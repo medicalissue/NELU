@@ -1,0 +1,129 @@
+\section{Experiments}\label{sec:experiments}
+
+We evaluate NELU as a drop-in GELU replacement, keeping all other hyperparameters identical.
+For CNNs, the normalization axis is global ($\mathrm{dim}{=}(1{,}2{,}3)$); for Transformers, it is per-token ($\mathrm{dim}{=}{-}1$), matching the scope of the downstream mixing operation (Appendix~\ref{app:ablation}).
+ReLU is included as a reference for CNNs; for Transformers and language models, where GELU is the standard, we compare GELU vs.\ NELU directly.
+
+%% ============================================================
+\subsection{CIFAR-10/100: CNN architectures}\label{sec:cifar}
+%% ============================================================
+
+We compare ReLU, GELU, and NELU on CIFAR-10/100~\citep{krizhevsky2009learning} across six CNN architectures: ResNet-20/56~\citep{he2016deep}, WRN-28-10~\citep{zagoruyko2016wide}, DenseNet-100~\citep{huang2017densely}, MobileNet-v2~\citep{sandler2018mobilenetv2}, and ShuffleNet-v1~\citep{zhang2018shufflenet} (3 seeds each).
+
+\begin{table}[t]
+\centering
+\caption{\textbf{CIFAR-10 / CIFAR-100 test accuracy (\%).} Mean $\pm$ std, 3 seeds.}
+\label{tab:cifar}
+\vspace{0.5em}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{3}{c}{CIFAR-10} & \multicolumn{3}{c}{CIFAR-100} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Architecture & ReLU & GELU & NELU & ReLU & GELU & NELU \\
+\midrule
+ResNet-20    & -- & -- & -- & -- & -- & -- \\
+ResNet-56    & -- & -- & -- & -- & -- & -- \\
+WRN-28-10    & -- & -- & -- & -- & -- & -- \\
+DenseNet-100 & -- & -- & -- & -- & -- & -- \\
+MobileNet-v2 & -- & -- & -- & -- & -- & -- \\
+ShuffleNet-v1 & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\subsection{ImageNet: ViT-B/L}\label{sec:imagenet}
+%% ============================================================
+
+We train ViT-B and ViT-L~\citep{dosovitskiy2021image} on ImageNet-1k~\citep{russakovsky2015imagenet} following the AugReg recipe of \citet{steiner2022how}, swapping only the activation function.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{ImageNet top-1 accuracy (\%).}}
+\label{tab:imagenet}
+\vspace{0.5em}
+\begin{tabular}{lccc}
+\toprule
+Model & Params & GELU & NELU \\
+\midrule
+ViT-B & 86M  & -- & -- \\
+ViT-L & 304M & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\subsection{Language modeling: GPT-2}\label{sec:language}
+%% ============================================================
+
+To verify that the normalization principle transfers beyond vision, we train GPT-2 Small (124M), Medium (355M), and Large (774M)~\citep{radford2019language} from scratch on FineWeb-Edu 10B~\citep{penedo2024fineweb}, swapping GELU for NELU while keeping all other settings identical.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Language modeling} (GPT-2, FineWeb-Edu 10B). Validation perplexity $\downarrow$.}
+\label{tab:language}
+\vspace{0.5em}
+\begin{tabular}{lccc}
+\toprule
+Model & Params & GELU & NELU \\
+\midrule
+GPT-2 Small  & 124M & -- & -- \\
+GPT-2 Medium & 355M & -- & -- \\
+GPT-2 Large  & 774M & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\subsection{Corruption robustness}\label{sec:robustness}
+%% ============================================================
+
+Section~\ref{sec:consequences} predicts that when the test-time distribution of $\rho$ shifts, scale-dependent gates produce output directions that differ from those seen during training.
+Our claim is not that scale-dependent gating is universally harmful, but that it becomes particularly fragile when pre-activation scale shifts at test time.
+Image corruptions provide a natural test bed: they perturb feature statistics without changing the label space.
+We evaluate on CIFAR-100-C and ImageNet-C~\citep{hendrycks2019robustness} (19 corruptions $\times$ 5 severities) without any retraining.
+Table~\ref{tab:corruption} reports category-level means; per-corruption results are in Appendix~\ref{app:corruption_full}.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Corruption robustness} (mean accuracy \% over 5 severities, grouped by category). \textbf{Bold} = best.}
+\label{tab:corruption}
+\vspace{0.5em}
+\small
+\begin{tabular}{lccc}
+\toprule
+ & \multicolumn{3}{c}{\textbf{CIFAR-100-C} (ResNet-20)} \\
+\cmidrule{2-4}
+Category & ReLU & GELU & NELU \\
+\midrule
+Noise (4)     & 21.94 & 21.06 & \textbf{24.37} \\
+Blur (5)      & 41.40 & 41.89 & \textbf{44.36} \\
+Weather (5)   & 51.25 & 51.99 & \textbf{52.97} \\
+Digital (5)   & 46.29 & 46.76 & \textbf{48.85} \\
+\midrule
+\textbf{Overall (19)} & 41.18 & 41.44 & \textbf{43.60} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.8em}
+
+\begin{tabular}{lcc}
+\toprule
+ & \multicolumn{2}{c}{\textbf{ImageNet-C} (ViT-B)} \\
+\cmidrule{2-3}
+Category & GELU & NELU \\
+\midrule
+Noise (4)   & -- & -- \\
+Blur (5)    & -- & -- \\
+Weather (5) & -- & -- \\
+Digital (5) & -- & -- \\
+\midrule
+\textbf{Overall (19)} & \textbf{--} & \textbf{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+NELU ranks first on all 19 CIFAR-100-C corruptions.
+On noise corruptions---which most strongly shift the pre-activation scale distribution---GELU falls \emph{below} ReLU (21.06\% vs.\ 21.94\%), confirming that smooth gating's scale sensitivity can outweigh its benefits under distribution shift.
+NELU recovers the robustness of scale invariance while retaining smooth gating (24.37\%).

@@ -1,0 +1,92 @@
+\section{Scale Sensitivity in Self-Gated Activations}\label{sec:problem}
+
+%% ============================================================
+\subsection{The self-gated family}\label{sec:selfgated}
+%% ============================================================
+
+A self-gated activation takes the form $f(z_i) = z_i \cdot g(z_i)$, where $g: \mathbb{R} \to (0,1)$ is a smooth, monotonic gate.
+The neuron gates itself: the same scalar $z_i$ determines both the signal and the gating decision.
+The dominant instances are GELU ($g = \Phi$, the standard-normal CDF) and SiLU ($g = \sigma$, the logistic sigmoid), both widely adopted in modern deep learning~\citep{devlin2019bert,dosovitskiy2021image,brown2020language}.
+
+Compared to ReLU, these activations provide smooth gradients, graded modulation (gate values between 0 and 1, rather than binary), and no dead neurons.
+All three advantages stem from replacing the binary indicator $\mathbf{1}[z_i > 0]$ with a smooth function $g$.
+We now show that this replacement has a side effect.
+
+%% ============================================================
+\subsection{The scale invariance trade-off}\label{sec:tradeoff}
+%% ============================================================
+
+An activation $f$ is \emph{positively homogeneous} if $f(\alpha\mathbf{z}) = \alpha\,f(\mathbf{z})$ for all $\alpha > 0$, which is equivalent to the output direction $f(\mathbf{z})/\|f(\mathbf{z})\|$ being independent of scale.
+
+Piecewise-linear activations---ReLU, Leaky ReLU, PReLU---are positively homogeneous, since $\max(\alpha z, 0) = \alpha\max(z, 0)$.
+In the self-gated form, however, positive homogeneity requires $g(\alpha z_i) = g(z_i)$ for all $\alpha$:
+
+\begin{proposition}\label{prop:no_invariance}
+No self-gated activation $z_i \cdot g(z_i)$ with non-constant smooth $g$ is positively homogeneous.
+\end{proposition}
+\begin{proof}
+Positive homogeneity requires $\alpha z_i \cdot g(\alpha z_i) = \alpha \cdot z_i \cdot g(z_i)$, hence $g(\alpha z_i) = g(z_i)$ for all $\alpha > 0$ and $z_i \neq 0$.
+This forces $g$ to be constant on $(0,\infty)$ and on $(-\infty, 0)$; continuity then makes $g$ constant everywhere, contradicting the definition of a gate.
+\end{proof}
+
+Smoothness and scale invariance are thus incompatible within the self-gated form.
+Every smooth self-gated activation---GELU, SiLU, and others---necessarily lost the scale invariance that ReLU had.
+
+%% ============================================================
+\subsection{Output direction entanglement}\label{sec:direction}
+%% ============================================================
+
+What is the concrete consequence of losing scale invariance?
+We decompose any pre-activation vector as $\mathbf{z} = \rho\,\hat{\mathbf{z}}$, where $\rho = \mathrm{rms}(\mathbf{z})$ and $\hat{\mathbf{z}} = \mathbf{z}/\rho$.
+
+\begin{proposition}\label{prop:direction}
+\textbf{(Output direction.)}
+
+\emph{(i)} For any positively homogeneous activation: $\hat{\mathbf{y}}(\alpha\mathbf{z}) = \hat{\mathbf{y}}(\mathbf{z})$ for all $\alpha > 0$.
+
+\emph{(ii)} For a self-gated activation $f(z_i) = z_i \cdot g(z_i)$ with non-constant $g$:
+\begin{equation}
+    \hat{\mathbf{y}}(\mathbf{z}) = \frac{\hat{\mathbf{z}} \odot g(\rho\hat{\mathbf{z}})}{\|\hat{\mathbf{z}} \odot g(\rho\hat{\mathbf{z}})\|},
+\end{equation}
+which depends on $\rho$.
+Two inputs sharing the same pattern $\hat{\mathbf{z}}$ but differing in scale $\rho$ produce different output directions.
+
+\emph{(iii)} For GELU, as $\rho \to \infty$:
+$\hat{\mathbf{y}}(\mathbf{z}) \to \mathrm{ReLU}(\hat{\mathbf{z}})/\|\mathrm{ReLU}(\hat{\mathbf{z}})\|$.
+The smooth gate saturates to a binary gate, and the output direction degenerates to ReLU's.
+\end{proposition}
+
+\begin{proof}
+(i) $f(\alpha\mathbf{z}) = \alpha f(\mathbf{z})$; dividing by the norm cancels $\alpha$.
+(ii) $f(\mathbf{z})_i = \rho\hat{z}_i \cdot g(\rho\hat{z}_i)$; the direction is $\hat{z}_i g(\rho\hat{z}_i)$ normalized, which depends on $\rho$ when $g$ is non-constant.
+(iii) $\Phi(\rho\hat{z}_i) \to \mathbf{1}[\hat{z}_i > 0]$ as $\rho \to \infty$.
+\end{proof}
+
+\paragraph{Why direction matters.}
+As noted in Section~\ref{sec:intro}, the next layer decomposes its response as $\langle \mathbf{w}_j, \mathbf{y} \rangle = \|\mathbf{y}\| \cdot \langle \mathbf{w}_j, \hat{\mathbf{y}} \rangle$: scale acts as gain, direction determines selectivity.
+In the self-gated form, a common scale factor changes both, entangling the two roles.
+
+%% ============================================================
+\subsection{Consequences for learning}\label{sec:consequences}
+%% ============================================================
+
+\paragraph{A harder optimization problem.}
+With a scale-invariant activation, the next layer's weight $\mathbf{w}_j$ must learn a function of $\hat{\mathbf{z}}$ alone.
+With a scale-dependent one, it must learn a function of $(\hat{\mathbf{z}}, \rho)$ jointly---a strictly larger input space.
+If the test-time distribution of $\rho$ differs from training, the learned weights encounter output directions they were not optimized for.
+
+\paragraph{Training dynamics compound the issue.}
+The output of a self-gated activation increases with scale:
+\begin{equation}\label{eq:df_dalpha}
+    \frac{\partial}{\partial \alpha}\bigl[\alpha \tilde{z}_i\,g(\alpha \tilde{z}_i)\bigr]
+    = \tilde{z}_i\,g(\alpha \tilde{z}_i) + \alpha\,\tilde{z}_i^2\,g'(\alpha \tilde{z}_i) \geq 0 \quad (\tilde{z}_i > 0),
+\end{equation}
+so cross-entropy (which rewards larger logits) can drive weight norms upward.
+In a piecewise-linear activation, this only amplifies the output; the direction is unchanged.
+In a smooth self-gated activation, increasing $\alpha$ simultaneously shifts the output direction (Proposition~\ref{prop:direction}(ii)) and sharpens the gate toward saturation (Proposition~\ref{prop:direction}(iii)).
+A single optimization pressure thus has a compound side effect: amplification \emph{and} direction drift.
+
+\paragraph{LayerNorm does not prevent this.}
+In a Transformer MLP, $\mathbf{z} = W\,\mathrm{LN}(\mathbf{x}) + \mathbf{b}$.
+LayerNorm controls $\|\mathbf{x}\|$, but $W$ reintroduces scale: $\mathrm{Var}(z_i) \propto \|\mathbf{w}_i\|^2$.
+The scale sensitivity arises \emph{inside the activation}, after the projection; inter-layer normalization cannot reach it (Appendix~\ref{app:ln_ablation}).

@@ -1,0 +1,32 @@
+# Data
+data/
+
+# Results & checkpoints
+results/
+wandb/
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# CUDA build cache
+*.so
+*.o
+*.ninja_deps
+*.ninja_log
+build.ninja
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
