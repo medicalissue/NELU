@@ -758,12 +758,15 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
         }
 
     # ── Checkpoint directory ──────────────────────────────────────────
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Use os.makedirs (race-safe under concurrent creation), not
+    # pathlib.mkdir(exist_ok=True) which has a known TOCTOU race in
+    # Python 3.11 under heavy parallelism.
+    os.makedirs(str(RESULTS_DIR), exist_ok=True)
     noise_tag = f"_noise{args.label_noise}" if args.label_noise > 0 else ""
     lr_tag = f"_lr{args.lr}" if args.lr is not None else ""
     run_tag = f"{arch}_{dataset_name}_{act_name}{noise_tag}{lr_tag}_s{args.seed}"
     ckpt_dir = RESULTS_DIR / "checkpoints"
-    ckpt_dir.mkdir(exist_ok=True)
+    os.makedirs(str(ckpt_dir), exist_ok=True)
     ckpt_name = run_tag
     last_path = ckpt_dir / f"{ckpt_name}_last.pt"
 
@@ -987,7 +990,7 @@ def main():
             print(f"  {r['arch']:<12} {r['dataset']:<15} {r['act']:<6} {r['best_test_acc']:>7.2f}%")
 
         # Save full summary
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        os.makedirs(str(RESULTS_DIR), exist_ok=True)
         summary_path = RESULTS_DIR / "main_summary.json"
         with open(summary_path, "w") as f:
             json.dump(results_summary, f, indent=2)

@@ -21,7 +21,9 @@
 # Don't `set -e` globally — a single failure should not kill 3 days
 # of training. Each phase wraps its own runs in `|| true`.
 cd "$(dirname "$0")"
-mkdir -p logs results
+# Pre-create all output directories ONCE before dispatching jobs.
+# Prevents races where N processes call mkdir simultaneously.
+mkdir -p logs results results/checkpoints results/lm results/imagenet
 
 CIFAR="python experiments/main_cifar_tinyimagenet.py"
 LM="torchrun --nproc_per_node=8 experiments/train_lm.py"
