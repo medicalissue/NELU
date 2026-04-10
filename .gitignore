@@ -28,5 +28,8 @@ build.ninja
 .DS_Store
 Thumbs.db
 
+# Playground (experiments unrelated to NELU paper)
+playground/
+
 # Claude
 .claude/

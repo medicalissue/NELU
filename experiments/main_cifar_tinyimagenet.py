@@ -597,7 +597,7 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
 
     # Dataset config
     img_size = 32
-    epochs = 200
+    epochs = args.epochs if args.epochs is not None else 200
 
     print(f"\n{'='*70}")
     print(f"  Experiment: arch={arch}  dataset={dataset_name}  act={act_name}")
@@ -750,16 +750,41 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
     ckpt_dir = RESULTS_DIR / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
     ckpt_name = f"{arch}_{dataset_name}_{act_name}{noise_tag}_s{args.seed}"
+    last_path = ckpt_dir / f"{ckpt_name}_last.pt"
 
     # Train
     best_acc = 0.0
+    start_epoch = 1
     history = {
         "train_loss": [], "train_acc": [], "test_loss": [], "test_acc": [], "lr": [],
         "gate_entropy": [], "binary_frac": [], "weight_norm": [], "gen_gap": [],
     }
 
+    # ── Resume (auto-detect last.pt unless --no-resume) ───────────────
+    if not args.no_resume and last_path.exists():
+        print(f"  → resuming from {last_path}")
+        ckpt = torch.load(last_path, map_location=device, weights_only=False)
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        raw_model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if use_amp and "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        best_acc = ckpt.get("best_acc", 0.0)
+        history = ckpt.get("history", history)
+        # RNG restore (move tensors to CPU — set_rng_state requires ByteTensor on CPU)
+        if "rng" in ckpt:
+            torch.set_rng_state(ckpt["rng"]["torch"].cpu())
+            if torch.cuda.is_available() and "cuda" in ckpt["rng"]:
+                torch.cuda.set_rng_state_all([s.cpu() for s in ckpt["rng"]["cuda"]])
+            np.random.set_state(ckpt["rng"]["numpy"])
+            import random as _r
+            _r.setstate(ckpt["rng"]["python"])
+        print(f"  → resumed: start_epoch={start_epoch}  best_acc={best_acc:.2f}%")
+
     t0 = time.time()
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         lr_now = optimizer.param_groups[0]["lr"]
         print(f"\n  Epoch {epoch}/{epochs}  lr={lr_now:.6f}")
 
@@ -782,17 +807,6 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
                   f"binary={diag.get('binary_frac',0):.1%}  "
                   f"||W||={diag.get('weight_norm',0):.1f}")
 
-        if test_acc > best_acc:
-            best_acc = test_acc
-            # Save best checkpoint
-            raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": raw_model.state_dict(),
-                "best_acc": best_acc,
-                "arch": arch, "dataset": dataset_name, "act": act_name,
-            }, ckpt_dir / f"{ckpt_name}_best.pt")
-
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
         history["test_loss"].append(test_loss)
@@ -802,6 +816,41 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
         history["gate_entropy"].append(diag.get("gate_entropy", None))
         history["binary_frac"].append(diag.get("binary_frac", None))
         history["weight_norm"].append(diag.get("weight_norm", None))
+
+        # ── Save: full state every epoch (last.pt) + best (model only) ──
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        import random as _r
+        rng_state = {
+            "torch": torch.get_rng_state(),
+            "numpy": np.random.get_state(),
+            "python": _r.getstate(),
+        }
+        if torch.cuda.is_available():
+            rng_state["cuda"] = torch.cuda.get_rng_state_all()
+        ckpt_payload = {
+            "epoch": epoch,
+            "model_state_dict": raw_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "scaler_state_dict": scaler.state_dict() if use_amp else None,
+            "best_acc": best_acc,
+            "history": history,
+            "rng": rng_state,
+            "arch": arch, "dataset": dataset_name, "act": act_name,
+        }
+        # Atomic write: tmp then rename
+        tmp_path = last_path.with_suffix(".pt.tmp")
+        torch.save(ckpt_payload, tmp_path)
+        tmp_path.replace(last_path)
+
+        if test_acc > best_acc:
+            best_acc = test_acc
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": raw_model.state_dict(),
+                "best_acc": best_acc,
+                "arch": arch, "dataset": dataset_name, "act": act_name,
+            }, ckpt_dir / f"{ckpt_name}_best.pt")
 
         if wandb_run:
             log_dict = {
@@ -892,6 +941,10 @@ def parse_args():
                         help="Use automatic mixed precision")
     parser.add_argument("--all", action="store_true",
                         help="Run ALL (arch, dataset, act) combinations")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Ignore existing last.pt and start fresh")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override total epochs (for smoke tests)")
     return parser.parse_args()
 
 

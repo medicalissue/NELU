@@ -321,13 +321,33 @@ def main():
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # Resume
+    # Resume — auto-detect last.pt unless --resume given
     start_epoch, best_acc = 0, 0.0
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+    last_path = f"{args.output_dir}/last.pt"
+    resume_path = args.resume
+    if resume_path is None and os.path.exists(last_path):
+        resume_path = last_path
+    if resume_path is not None and os.path.exists(resume_path):
+        if args.is_main:
+            print(f"  → resuming from {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         raw.load_state_dict(ckpt["model"])
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        if "scaler" in ckpt and ckpt["scaler"] is not None:
+            scaler.load_state_dict(ckpt["scaler"])
+        if ema is not None and "ema" in ckpt:
+            ema.load_state_dict(ckpt["ema"])
         start_epoch = ckpt.get("epoch", 0) + 1
-        best_acc = ckpt.get("best_acc", 0)
+        best_acc = ckpt.get("best_acc", 0.0)
+        if "rng_torch" in ckpt:
+            torch.set_rng_state(ckpt["rng_torch"].cpu())
+            if torch.cuda.is_available() and "rng_cuda" in ckpt:
+                torch.cuda.set_rng_state_all([s.cpu() for s in ckpt["rng_cuda"]])
+        if args.is_main:
+            print(f"  → resumed: start_epoch={start_epoch}  best_acc={best_acc:.2f}%")
 
     # Wandb
     if args.wandb and args.is_main and HAS_WANDB:
@@ -351,11 +371,22 @@ def main():
         if args.is_main:
             print(f"[{epoch+1}/{args.epochs}] loss={loss:.4f} "
                   f"top1={t1:.2f}% top5={t5:.2f}% best={best_acc:.2f}%")
-            ckpt = {"model": raw.state_dict(), "epoch": epoch,
-                    "best_acc": best_acc}
+            ckpt = {
+                "model": raw.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict() if args.amp else None,
+                "epoch": epoch,
+                "best_acc": best_acc,
+                "rng_torch": torch.get_rng_state(),
+            }
+            if torch.cuda.is_available():
+                ckpt["rng_cuda"] = torch.cuda.get_rng_state_all()
             if ema:
                 ckpt["ema"] = ema.state_dict()
-            torch.save(ckpt, f"{args.output_dir}/last.pt")
+            tmp = f"{args.output_dir}/last.pt.tmp"
+            torch.save(ckpt, tmp)
+            os.replace(tmp, f"{args.output_dir}/last.pt")
             if is_best:
                 torch.save(ckpt, f"{args.output_dir}/best.pt")
             if args.wandb and HAS_WANDB:

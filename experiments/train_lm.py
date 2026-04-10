@@ -326,15 +326,29 @@ def main():
                    name=f"gpt2_{args.size}_{args.act}",
                    config=vars(args))
 
-    # Resume
+    # Resume — auto-detect last.pt unless --resume given
     start_step = 0
     best_loss = float("inf")
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+    last_path = f"{args.output_dir}/last.pt"
+    resume_path = args.resume
+    if resume_path is None and os.path.exists(last_path):
+        resume_path = last_path
+    if resume_path is not None and os.path.exists(resume_path):
+        if args.is_main:
+            print(f"  → resuming from {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         raw.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        start_step = ckpt["step"]
+        if "scaler" in ckpt and ckpt["scaler"] is not None:
+            scaler.load_state_dict(ckpt["scaler"])
+        start_step = ckpt["step"] + 1
         best_loss = ckpt.get("best_loss", float("inf"))
+        if "rng_torch" in ckpt:
+            torch.set_rng_state(ckpt["rng_torch"].cpu())
+            if torch.cuda.is_available() and "rng_cuda" in ckpt:
+                torch.cuda.set_rng_state_all([s.cpu() for s in ckpt["rng_cuda"]])
+        if args.is_main:
+            print(f"  → resumed: start_step={start_step}  best_loss={best_loss:.4f}")
 
     # Train
     model.train()
@@ -445,6 +459,7 @@ def main():
                     best_loss = val_loss
                     torch.save({"model": raw.state_dict(),
                                 "optimizer": optimizer.state_dict(),
+                                "scaler": scaler.state_dict() if args.amp else None,
                                 "step": step, "best_loss": best_loss,
                                 "config": vars(args)},
                                f"{args.output_dir}/best.pt")
@@ -457,12 +472,28 @@ def main():
                     wandb.log(log_d)
             model.train()
 
-        # Periodic save
-        if step % 5000 == 0 and step > 0 and args.is_main:
-            torch.save({"model": raw.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "step": step, "best_loss": best_loss},
-                       f"{args.output_dir}/step_{step}.pt")
+        # Periodic save: last.pt (full state, every 500 steps) +
+        # named milestone every 5000 (for archival).
+        save_now_last = (step % 500 == 0) and (step > start_step)
+        save_now_milestone = (step % 5000 == 0) and (step > 0)
+        if (save_now_last or save_now_milestone) and args.is_main:
+            payload = {
+                "model": raw.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict() if args.amp else None,
+                "step": step,
+                "best_loss": best_loss,
+                "config": vars(args),
+                "rng_torch": torch.get_rng_state(),
+            }
+            if torch.cuda.is_available():
+                payload["rng_cuda"] = torch.cuda.get_rng_state_all()
+            if save_now_last:
+                tmp = f"{args.output_dir}/last.pt.tmp"
+                torch.save(payload, tmp)
+                os.replace(tmp, f"{args.output_dir}/last.pt")
+            if save_now_milestone:
+                torch.save(payload, f"{args.output_dir}/step_{step}.pt")
 
     # Final
     if args.is_main:
