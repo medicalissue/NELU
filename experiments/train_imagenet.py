@@ -40,6 +40,7 @@ import math
 import os
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -72,19 +73,23 @@ except ImportError:
 
 MODEL_CFGS = {
     # DeiT-III recipe (Touvron et al., README_revenge config)
-    # ViT-B: batch 64 × 32 GPUs = 2048 effective. 8 GPU → 256/GPU.
+    # Effective batch matches paper via grad_accum on 8×40GB A100.
+    #
+    # ViT-B: 128 × accum 2 × 8 GPU = 2048 effective  (paper: 64×32=2048)
     "deit3_base": {
         "timm_name": "deit3_base_patch16_224",
         "timm_pretrained": "deit3_base_patch16_224.fb_in1k",
         "drop_path": 0.2,
-        "batch_per_gpu": 256,        # 256 × 8 = 2048 ✓ matches paper
+        "batch_per_gpu": 128,
+        "grad_accum": 2,
     },
-    # ViT-L: batch 32 × 32 GPUs = 1024 effective. 8 GPU → 128/GPU.
+    # ViT-L: 64 × accum 2 × 8 GPU = 1024 effective  (paper: 32×32=1024)
     "deit3_large": {
         "timm_name": "deit3_large_patch16_224",
         "timm_pretrained": "deit3_large_patch16_224.fb_in1k",
         "drop_path": 0.45,
-        "batch_per_gpu": 128,        # 128 × 8 = 1024 ✓ matches paper
+        "batch_per_gpu": 64,
+        "grad_accum": 2,
     },
 }
 
@@ -161,31 +166,63 @@ def build_dataloaders(args, train_size=192):
 
 def train_one_epoch(model, loader, optimizer, scheduler, scaler,
                     mixup_fn, criterion, device, epoch, args, raw):
+    """Training loop with gradient accumulation.
+
+    For grad_accum > 1, we scale the per-micro-batch loss by 1/grad_accum
+    and only call optimizer.step() after all micro-batches. Non-final
+    micro-steps skip DDP gradient sync via model.no_sync() to save NCCL
+    bandwidth.
+    """
     model.train()
+    accum = max(1, args.grad_accum)
     total_loss, total = 0.0, 0
     pbar = tqdm(loader, desc=f"train {epoch}",
                 disable=not args.is_main, ncols=100)
+
+    optimizer.zero_grad(set_to_none=True)
+    accum_count = 0
+
     for step, (images, labels) in enumerate(pbar):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         if mixup_fn is not None:
             images, labels = mixup_fn(images, labels)
 
-        with torch.amp.autocast("cuda", enabled=args.amp):
-            loss = criterion(model(images), labels)
+        is_last_micro = (accum_count + 1) == accum
 
-        optimizer.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        # DeiT-III: gradient clipping at norm 1.0
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(raw.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
-        scheduler.step()
+        # Skip gradient sync on non-final micro-steps
+        if args.distributed and not is_last_micro and hasattr(model, "no_sync"):
+            sync_ctx = model.no_sync()
+        else:
+            sync_ctx = nullcontext()
 
-        total_loss += loss.item() * images.size(0)
+        with sync_ctx:
+            with torch.amp.autocast("cuda", enabled=args.amp):
+                loss = criterion(model(images), labels) / accum
+            scaler.scale(loss).backward()
+
+        total_loss += loss.item() * accum * images.size(0)
         total += images.size(0)
+        accum_count += 1
+
+        if is_last_micro:
+            # DeiT-III: gradient clipping at norm 1.0
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(raw.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            accum_count = 0
+
         pbar.set_postfix(loss=f"{total_loss/total:.4f}")
+
+    # Drop any tail micro-batches that didn't complete a full accum window
+    # (with DistributedSampler + drop_last=True, num_batches is constant,
+    # so this is a defensive no-op in practice)
+    if accum_count > 0:
+        optimizer.zero_grad(set_to_none=True)
+
     return total_loss / total
 
 
@@ -221,7 +258,9 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--epochs", type=int, default=800)
     parser.add_argument("--batch-size", type=int, default=None,
-                        help="Per-GPU batch (auto from config if not set)")
+                        help="Per-GPU micro batch (auto from config if not set)")
+    parser.add_argument("--grad-accum", type=int, default=None,
+                        help="Gradient accumulation steps (auto from config)")
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--wd", type=float, default=0.05)
     parser.add_argument("--warmup-epochs", type=int, default=5)
@@ -238,6 +277,8 @@ def main():
     cfg = MODEL_CFGS[args.model]
     if args.batch_size is None:
         args.batch_size = cfg["batch_per_gpu"]
+    if args.grad_accum is None:
+        args.grad_accum = cfg.get("grad_accum", 1)
     if args.output_dir is None:
         args.output_dir = f"results/imagenet/{args.model}_{args.act}"
 
@@ -260,8 +301,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.is_main:
-        eff = args.batch_size * args.world_size
-        print(f"{args.model} + {args.act} | batch {eff} | {args.epochs} epochs")
+        eff = args.batch_size * args.grad_accum * args.world_size
+        print(f"{args.model} + {args.act} | "
+              f"micro {args.batch_size} × accum {args.grad_accum} × "
+              f"{args.world_size} GPU = {eff} effective | "
+              f"{args.epochs} epochs")
 
     # Model
     if args.act == "gelu" and args.eval_only:
@@ -337,9 +381,10 @@ def main():
 
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
 
-    # Cosine schedule
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * args.warmup_epochs
+    # Cosine schedule — counted in OPTIMIZER steps (not data batches)
+    opt_steps_per_epoch = max(1, len(train_loader) // args.grad_accum)
+    total_steps = opt_steps_per_epoch * args.epochs
+    warmup_steps = opt_steps_per_epoch * args.warmup_epochs
 
     def lr_lambda(step):
         if step < warmup_steps:
