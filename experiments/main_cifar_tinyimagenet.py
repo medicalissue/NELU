@@ -659,26 +659,31 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
     use_amp = args.amp and torch.cuda.is_available()
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    # Wandb
+    # Wandb (graceful fallback: if init fails, continue without logging)
     wandb_run = None
     if args.wandb:
-        import wandb
-        config = {
-            "arch": arch, "dataset": dataset_name, "act": act_name,
-            "epochs": epochs, "seed": args.seed, "label_noise": args.label_noise,
-            "lr": 1e-3 if is_vit else 0.1,
-            "weight_decay": 0.05 if is_vit else 5e-4,
-            "optimizer": "AdamW" if is_vit else "SGD",
-            "params": param_count, "amp": use_amp, "compile": args.compile,
-        }
-        noise_tag = f"_noise{args.label_noise}" if args.label_noise > 0 else ""
-        wandb_run = wandb.init(
-            project="nelu",
-            group=f"{dataset_name}_{arch}",
-            name=f"{arch}_{dataset_name}_{act_name}{noise_tag}_s{args.seed}",
-            config=config,
-            reinit=True,
-        )
+        try:
+            import wandb
+            config = {
+                "arch": arch, "dataset": dataset_name, "act": act_name,
+                "epochs": epochs, "seed": args.seed, "label_noise": args.label_noise,
+                "lr": 1e-3 if is_vit else 0.1,
+                "weight_decay": 0.05 if is_vit else 5e-4,
+                "optimizer": "AdamW" if is_vit else "SGD",
+                "params": param_count, "amp": use_amp, "compile": args.compile,
+            }
+            noise_tag = f"_noise{args.label_noise}" if args.label_noise > 0 else ""
+            wandb_run = wandb.init(
+                project="nelu",
+                group=f"{dataset_name}_{arch}",
+                name=f"{arch}_{dataset_name}_{act_name}{noise_tag}_s{args.seed}",
+                config=config,
+                reinit=True,
+            )
+        except Exception as e:
+            print(f"  WARNING: wandb init failed ({type(e).__name__}: {e}); "
+                  f"continuing without wandb")
+            wandb_run = None
 
     # ── Diagnostic: gate statistics ──────────────────────────────────
     @torch.no_grad()

@@ -29,6 +29,18 @@ IMNET="torchrun --nproc_per_node=8 experiments/train_imagenet.py"
 C="--amp --compile --wandb"
 IMNET_DATA="/data/imagenet"
 
+# wandb service can't keep up when 8 jobs init simultaneously.
+# Raise the port-file poll timeout from 30 s → 3600 s (effectively
+# "wait until ready"). Fallback in the Python scripts kicks in if
+# wandb truly breaks.
+export WANDB__SERVICE_WAIT=3600
+# Also raise the init timeout (server-side handshake).
+export WANDB_INIT_TIMEOUT=600
+# Disable code capture to speed up init.
+export WANDB_DISABLE_CODE=true
+# Keep heartbeat/start timeouts generous
+export WANDB_HTTP_TIMEOUT=120
+
 # ── S3 backup destination (override with env var) ──────────────
 S3_BACKUP_BUCKET="${S3_BACKUP_BUCKET:-s3://nelu-datasets/ckpt-backup}"
 S3_BACKUP_INTERVAL="${S3_BACKUP_INTERVAL:-600}"   # seconds
@@ -98,10 +110,14 @@ wait_all() { echo "[$(date +%H:%M)] Waiting..."; wait; echo "[$(date +%H:%M)] Do
 
 # ── GPU job slot pool ──────────────────────────────────────────
 # Uses a named FIFO as a semaphore: each "slot" is a GPU id.
-# slot_init N            — fill the pool with GPU ids 0..N-1
-# slot_run "command..."  — wait for a free slot, run command on
-#                          that GPU in background, return slot
-# slot_drain             — wait for all background jobs
+# slot_init            — fill pool with GPU ids 0..NUM_GPUS-1
+# slot_run TAG CMD...  — wait for a free slot, run command on that
+#                        GPU in background with output redirected
+#                        to logs/TAG.log; release slot when done
+# slot_drain           — wait for all background jobs
+#
+# stdout only gets "[start]/[done]/[FAIL]" one-liners so parallel
+# tqdm bars don't garble the tmux pane. Per-job output is in logs/.
 NUM_GPUS=${NUM_GPUS:-8}
 SLOT_FIFO="/tmp/nelu_gpu_slots.$$"
 
@@ -115,11 +131,21 @@ slot_init() {
 }
 
 slot_run() {
+    # Usage: slot_run <tag> <command string>
+    local tag="$1"; shift
     local g
     read -u 9 g           # block until a GPU id is available
+    local logf="logs/${tag}.log"
     (
-        CUDA_VISIBLE_DEVICES=$g eval "$@"
-        echo $g >&9       # release the slot when done
+        echo "[$(date +%H:%M:%S)] [gpu $g] start $tag"
+        CUDA_VISIBLE_DEVICES=$g eval "$@" > "$logf" 2>&1
+        local rc=$?
+        if [ $rc -eq 0 ]; then
+            echo "[$(date +%H:%M:%S)] [gpu $g] done  $tag"
+        else
+            echo "[$(date +%H:%M:%S)] [gpu $g] FAIL  $tag (rc=$rc, see $logf)"
+        fi
+        echo $g >&9       # release the slot
     ) &
 }
 
@@ -172,8 +198,8 @@ for seed in "${SEEDS[@]}"; do
     for arch in "${CNN_ARCHS[@]}"; do
         for act in relu gelu nelu; do
             skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
-            echo "[$(date +%H:%M)] queue: $arch cifar100 $act s$seed"
-            slot_run "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
+            slot_run "cifar100_${arch}_${act}_s${seed}" \
+                "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
         done
     done
 done
@@ -188,8 +214,8 @@ for seed in "${SEEDS[@]}"; do
     for arch in "${CNN_ARCHS[@]}"; do
         for act in relu gelu nelu; do
             skip_if_done "$(cifar_result $arch cifar10 $act $seed)" && continue
-            echo "[$(date +%H:%M)] queue: $arch cifar10 $act s$seed"
-            slot_run "$CIFAR --arch $arch --dataset cifar10 --act $act --seed $seed $C"
+            slot_run "cifar10_${arch}_${act}_s${seed}" \
+                "$CIFAR --arch $arch --dataset cifar10 --act $act --seed $seed $C"
         done
     done
 done
@@ -203,8 +229,8 @@ echo -e "\n═══ Phase 2a: LR sensitivity ═══"
 for lr in 0.01 0.05 0.1 0.2 0.5; do
     for act in relu gelu nelu; do
         skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
-        echo "[$(date +%H:%M)] queue: resnet20 cifar100 $act lr=$lr"
-        slot_run "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
+        slot_run "lrsweep_resnet20_${act}_lr${lr}" \
+            "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
     done
 done
 slot_drain
@@ -219,8 +245,8 @@ for variant in "${ABLATION_VARIANTS[@]}"; do
     for seed in "${SEEDS[@]}"; do
         RESULT="results/ablation_${variant}_s${seed}.json"
         skip_if_done "$RESULT" && continue
-        echo "[$(date +%H:%M)] queue: ablation $variant s$seed"
-        slot_run "python experiments/ablation_full.py --variant $variant --seeds $seed --amp --compile"
+        slot_run "ablation_${variant}_s${seed}" \
+            "python experiments/ablation_full.py --variant $variant --seeds $seed --amp --compile --wandb"
     done
 done
 slot_drain

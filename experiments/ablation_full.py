@@ -177,9 +177,27 @@ def run(variant, seed=42, epochs=200, wd=5e-4, use_wandb=False, compile_model=Fa
     sched = optim.lr_scheduler.SequentialLR(opt, [warmup, step_sched], milestones=[1])
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    # wandb (graceful fallback)
+    wandb_run = None
+    if use_wandb:
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project="nelu", group="ablation",
+                name=f"{variant}_s{seed}",
+                config={"variant": variant, "seed": seed, "epochs": epochs,
+                        "wd": wd, "amp": use_amp, "compile": compile_model},
+                reinit=True,
+            )
+        except Exception as e:
+            print(f"  WARNING: wandb init failed ({type(e).__name__}: {e}); "
+                  f"continuing without wandb")
+            wandb_run = None
+
     best = 0
     for ep in range(1, epochs + 1):
         model.train()
+        epoch_loss, n_seen = 0.0, 0
         for x, y in train_ld:
             x, y = x.to(device), y.to(device)
             with torch.amp.autocast("cuda", enabled=use_amp):
@@ -187,7 +205,10 @@ def run(variant, seed=42, epochs=200, wd=5e-4, use_wandb=False, compile_model=Fa
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt); scaler.update()
+            epoch_loss += loss.item() * x.size(0)
+            n_seen += x.size(0)
         sched.step()
+        train_loss = epoch_loss / max(n_seen, 1)
 
         if ep % 10 == 0 or ep == epochs:
             model.eval()
@@ -201,6 +222,20 @@ def run(variant, seed=42, epochs=200, wd=5e-4, use_wandb=False, compile_model=Fa
             best = max(best, acc)
             if ep % 50 == 0:
                 print(f"  [{variant} s{seed}] ep={ep} acc={acc:.2f}% best={best:.2f}%")
+            if wandb_run is not None:
+                try:
+                    wandb_run.log({"epoch": ep, "train_loss": train_loss,
+                                   "test_acc": acc, "best_acc": best,
+                                   "lr": opt.param_groups[0]["lr"]})
+                except Exception:
+                    pass
+
+    if wandb_run is not None:
+        try:
+            wandb_run.log({"final_best_acc": best})
+            wandb_run.finish()
+        except Exception:
+            pass
 
     return {"variant": variant, "seed": seed, "best_acc": best, "wd": wd}
 
