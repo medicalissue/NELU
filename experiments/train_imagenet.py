@@ -45,6 +45,13 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+
+# torch.compile safety net: raise limits and fall back to eager on error
+# so long DDP training never dies from a Dynamo exception.
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.cache_size_limit = 512
+torch._dynamo.config.accumulated_cache_size_limit = 512
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP

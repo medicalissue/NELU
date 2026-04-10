@@ -43,6 +43,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
+# torch.compile safety net (same as other scripts)
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.cache_size_limit = 512
+torch._dynamo.config.accumulated_cache_size_limit = 512
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, IterableDataset

@@ -132,12 +132,22 @@ slot_init() {
 
 slot_run() {
     # Usage: slot_run <tag> <command string>
+    #
+    # Each GPU gets its own torch.compile / Triton cache directory to
+    # avoid JSON race conditions when 8 processes share ~/.cache/torch.
     local tag="$1"; shift
     local g
     read -u 9 g           # block until a GPU id is available
     local logf="logs/${tag}.log"
+    local ind_cache="/tmp/inductor_cache_gpu${g}"
+    local triton_cache="/tmp/triton_cache_gpu${g}"
+    mkdir -p "$ind_cache" "$triton_cache"
     (
         echo "[$(date +%H:%M:%S)] [gpu $g] start $tag"
+        TORCHINDUCTOR_CACHE_DIR="$ind_cache" \
+        TORCH_INDUCTOR_AUTOTUNE_LOCAL_CACHE=1 \
+        TORCH_INDUCTOR_AUTOTUNE_REMOTE_CACHE=0 \
+        TRITON_CACHE_DIR="$triton_cache" \
         CUDA_VISIBLE_DEVICES=$g eval "$@" > "$logf" 2>&1
         local rc=$?
         if [ $rc -eq 0 ]; then

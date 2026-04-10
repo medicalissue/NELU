@@ -30,6 +30,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+# ResNet-110 (54 residual blocks) blows past torch.compile's default
+# graph/recursion limits. Raise them aggressively; if compile still
+# fails, suppress_errors falls back to eager so the run never crashes.
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.cache_size_limit = 512
+torch._dynamo.config.accumulated_cache_size_limit = 512
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
