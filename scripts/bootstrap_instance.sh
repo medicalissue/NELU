@@ -51,11 +51,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 section "System info"
 echo "  hostname : $(hostname)"
 echo "  kernel   : $(uname -r)"
-if have nvidia-smi; then
+if have nvidia-smi && nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 else
-    echo "  WARNING: nvidia-smi not found. If this is a DL AMI, something is wrong."
-    echo "           If this is plain Ubuntu, run install_cuda.sh first."
+    echo "  no GPU available (CPU-only builder). NELU CUDA kernel will JIT-build on H100."
 fi
 
 # ── 1. Miniconda ───────────────────────────────────────────────────
