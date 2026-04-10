@@ -213,6 +213,10 @@ def main():
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Custom output JSON path. Default: "
+                             "results/ablation_<variant>_s<seed>.json (single) or "
+                             "results/ablation_full.json (--all)")
     args = parser.parse_args()
 
     variants = list(VARIANTS.keys()) if args.all else [args.variant]
@@ -222,21 +226,36 @@ def main():
     for v in variants:
         accs = []
         for s in args.seeds:
+            # Skip if per-(variant, seed) result already exists
+            single_path = f"results/ablation_{v}_s{s}.json"
+            if not args.all and len(args.seeds) == 1 and os.path.exists(single_path):
+                print(f"  SKIP {v} s{s}: {single_path} exists")
+                with open(single_path) as f:
+                    accs.append(json.load(f)["best_acc"])
+                continue
             r = run(v, seed=s, use_wandb=args.wandb,
                     compile_model=args.compile, use_amp=args.amp)
             accs.append(r["best_acc"])
+            # Always write per-(variant, seed) checkpoint result
+            with open(single_path, "w") as f:
+                json.dump(r, f, indent=2)
         import numpy as np
         mean, std = np.mean(accs), np.std(accs)
         all_results[v] = {"mean": mean, "std": std, "runs": accs}
         print(f"  {v:<16}: {mean:.2f} ± {std:.2f}")
 
-    print(f"\n{'='*50}")
-    print(f"  {'Variant':<16} {'Acc':>12}")
-    print(f"  {'-'*30}")
-    for v, r in sorted(all_results.items(), key=lambda x: -x[1]["mean"]):
-        print(f"  {v:<16} {r['mean']:>8.2f} ± {r['std']:.2f}")
+    if len(all_results) > 1:
+        print(f"\n{'='*50}")
+        print(f"  {'Variant':<16} {'Acc':>12}")
+        print(f"  {'-'*30}")
+        for v, r in sorted(all_results.items(), key=lambda x: -x[1]["mean"]):
+            print(f"  {v:<16} {r['mean']:>8.2f} ± {r['std']:.2f}")
 
-    with open("results/ablation_full.json", "w") as f:
+    out_path = args.output or (
+        "results/ablation_full.json" if args.all
+        else f"results/ablation_{variants[0]}_s{args.seeds[0]}.json"
+    )
+    with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
 
 

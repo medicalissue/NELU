@@ -747,9 +747,11 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
     # ── Checkpoint directory ──────────────────────────────────────────
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     noise_tag = f"_noise{args.label_noise}" if args.label_noise > 0 else ""
+    lr_tag = f"_lr{args.lr}" if args.lr is not None else ""
+    run_tag = f"{arch}_{dataset_name}_{act_name}{noise_tag}{lr_tag}_s{args.seed}"
     ckpt_dir = RESULTS_DIR / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
-    ckpt_name = f"{arch}_{dataset_name}_{act_name}{noise_tag}_s{args.seed}"
+    ckpt_name = run_tag
     last_path = ckpt_dir / f"{ckpt_name}_last.pt"
 
     # Train
@@ -890,7 +892,7 @@ def run_experiment(arch: str, dataset_name: str, act_name: str, args):
         wandb_run.finish()
 
     # Save results JSON
-    result_path = RESULTS_DIR / f"main_{arch}_{dataset_name}_{act_name}{noise_tag}.json"
+    result_path = RESULTS_DIR / f"main_{run_tag}.json"
     result = {
         "arch": arch,
         "dataset": dataset_name,
