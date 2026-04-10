@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
 """ImageNet-1k ViT training — GELU vs NELU.
 
-DeiT-III recipe (Touvron et al., 2022):
-    LAMB, lr=3e-3 (unscaled), wd=0.05, cosine + 5ep warmup,
-    3-Augment + Mixup 0.8 + Cutmix 1.0, BCE loss,
-    stochastic depth, layer scale, EMA,
-    800 epochs at 192x192, batch 2048.
+DeiT-III recipe (Touvron et al., 2022, "Revenge of the ViT")
+matches README_revenge config exactly:
+    Optimizer        : FusedLAMB (unscaled lr)
+    LR / WD          : 3e-3 / 0.05
+    WD groups        : decay on 2D weights only (no decay on bias/norm)
+    Schedule         : cosine to 1e-5, 5-ep linear warmup from 1e-6
+    Loss             : BCE (no label smoothing, no target threshold)
+    Augmentation     : RRC + HFlip + ColorJitter(0.3) + 3-Augment
+    Mixup / Cutmix   : 0.8 / 1.0
+    Drop path        : 0.2 (B), 0.45 (L)
+    Repeated Aug     : disabled
+    EMA              : disabled
+    Erasing          : disabled
+    Gradient clip    : 1.0
+    Train resolution : 192    Eval resolution  : 224 (eval crop ratio 1.0)
+    Effective batch  : 2048 (B), 1024 (L)
+    Epochs           : 800
 
-GELU baseline: use the DeiT-III pretrained checkpoint.
+GELU baseline: use the DeiT-III pretrained checkpoint (timm fb_in1k).
 NELU: train from scratch with identical recipe.
 
 Usage (H100×8):
@@ -44,7 +56,6 @@ import timm
 from timm.data import Mixup
 from timm.loss import BinaryCrossEntropy
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.utils import ModelEmaV3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nelu import NELU
@@ -60,17 +71,20 @@ except ImportError:
 # ── Model configs ────────────────────────────────────────────────
 
 MODEL_CFGS = {
+    # DeiT-III recipe (Touvron et al., README_revenge config)
+    # ViT-B: batch 64 × 32 GPUs = 2048 effective. 8 GPU → 256/GPU.
     "deit3_base": {
         "timm_name": "deit3_base_patch16_224",
         "timm_pretrained": "deit3_base_patch16_224.fb_in1k",
         "drop_path": 0.2,
-        "batch_per_gpu": 256,
+        "batch_per_gpu": 256,        # 256 × 8 = 2048 ✓ matches paper
     },
+    # ViT-L: batch 32 × 32 GPUs = 1024 effective. 8 GPU → 128/GPU.
     "deit3_large": {
         "timm_name": "deit3_large_patch16_224",
         "timm_pretrained": "deit3_large_patch16_224.fb_in1k",
         "drop_path": 0.45,
-        "batch_per_gpu": 64,
+        "batch_per_gpu": 128,        # 128 × 8 = 1024 ✓ matches paper
     },
 }
 
@@ -146,7 +160,7 @@ def build_dataloaders(args, train_size=192):
 # ── Training ─────────────────────────────────────────────────────
 
 def train_one_epoch(model, loader, optimizer, scheduler, scaler,
-                    mixup_fn, criterion, device, epoch, args, ema=None):
+                    mixup_fn, criterion, device, epoch, args, raw):
     model.train()
     total_loss, total = 0.0, 0
     pbar = tqdm(loader, desc=f"train {epoch}",
@@ -162,12 +176,12 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler,
 
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
+        # DeiT-III: gradient clipping at norm 1.0
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(raw.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
-
-        if ema is not None:
-            ema.update(model)
 
         total_loss += loss.item() * images.size(0)
         total += images.size(0)
@@ -262,9 +276,7 @@ def main():
     if args.compile:
         model = torch.compile(model)
 
-    # EMA
-    ema = ModelEmaV3(model, decay=0.99996) if not args.eval_only else None
-
+    # DeiT-III does NOT use EMA (per official README_revenge config)
     if args.distributed:
         model = DDP(model, device_ids=[args.local_rank])
     raw = model.module if args.distributed else model
@@ -293,17 +305,33 @@ def main():
     # BCE loss (DeiT-III)
     criterion = BinaryCrossEntropy(target_threshold=0.0)
 
-    # LAMB optimizer
+    # ── Per-parameter weight decay groups (DeiT-III convention) ──
+    # Bias and 1-D params (LayerNorm scale, LayerScale, etc.) get NO
+    # weight decay, matching timm's add_weight_decay() helper.
+    decay_params, no_decay_params = [], []
+    for name, p in raw.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim <= 1 or name.endswith(".bias"):
+            no_decay_params.append(p)
+        else:
+            decay_params.append(p)
+    param_groups = [
+        {"params": decay_params,    "weight_decay": args.wd},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    if args.is_main:
+        print(f"  WD groups: {len(decay_params)} decay, "
+              f"{len(no_decay_params)} no-decay")
+
+    # LAMB optimizer (DeiT-III default)
     try:
         from apex.optimizers import FusedLAMB
-        optimizer = FusedLAMB(raw.parameters(), lr=args.lr,
-                              weight_decay=args.wd)
+        optimizer = FusedLAMB(param_groups, lr=args.lr)
         if args.is_main:
             print("Using FusedLAMB (apex)")
     except ImportError:
-        # Fallback to AdamW if LAMB not available
-        optimizer = optim.AdamW(raw.parameters(), lr=args.lr,
-                                weight_decay=args.wd)
+        optimizer = optim.AdamW(param_groups, lr=args.lr)
         if args.is_main:
             print("LAMB not available, using AdamW")
 
@@ -338,8 +366,6 @@ def main():
             scheduler.load_state_dict(ckpt["scheduler"])
         if "scaler" in ckpt and ckpt["scaler"] is not None:
             scaler.load_state_dict(ckpt["scaler"])
-        if ema is not None and "ema" in ckpt:
-            ema.load_state_dict(ckpt["ema"])
         start_epoch = ckpt.get("epoch", 0) + 1
         best_acc = ckpt.get("best_acc", 0.0)
         if "rng_torch" in ckpt:
@@ -360,11 +386,9 @@ def main():
             train_sampler.set_epoch(epoch)
         loss = train_one_epoch(model, train_loader, optimizer, scheduler,
                                scaler, mixup_fn, criterion, device,
-                               epoch, args, ema)
+                               epoch, args, raw)
 
-        # Eval with EMA model
-        eval_model = ema.module if ema else model
-        t1, t5 = evaluate(eval_model, val_loader, device, args)
+        t1, t5 = evaluate(model, val_loader, device, args)
         is_best = t1 > best_acc
         best_acc = max(best_acc, t1)
 
@@ -382,8 +406,6 @@ def main():
             }
             if torch.cuda.is_available():
                 ckpt["rng_cuda"] = torch.cuda.get_rng_state_all()
-            if ema:
-                ckpt["ema"] = ema.state_dict()
             tmp = f"{args.output_dir}/last.pt.tmp"
             torch.save(ckpt, tmp)
             os.replace(tmp, f"{args.output_dir}/last.pt")

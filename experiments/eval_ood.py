@@ -164,9 +164,23 @@ def main():
                         help="GELU checkpoint for comparison")
     parser.add_argument("--nelu-ckpt", type=str, default=None,
                         help="NELU checkpoint for comparison")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Log per-corruption results to wandb")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Optional wandb run
+    wandb_run = None
+    if args.wandb:
+        try:
+            import wandb
+            wandb_run = wandb.init(project="nelu", group="ood_cifar100c",
+                                   name=f"ood_eval_{int(__import__('time').time())}",
+                                   reinit=True)
+        except Exception as e:
+            print(f"  WARNING: wandb init failed ({e}); continuing without wandb")
+            wandb_run = None
 
     # Download CIFAR-100-C
     cifar100c_dir = download_cifar100c(DATA_DIR)
@@ -205,6 +219,20 @@ def main():
         all_results[name] = results
 
         print(f"\n  Mean accuracy across all corruptions: {results['mCE_accuracy']:.2f}%")
+
+        # Log per-corruption metrics to wandb
+        if wandb_run is not None:
+            log_dict = {f"ood/{name}/mCE_accuracy": results["mCE_accuracy"]}
+            for corruption in CORRUPTIONS:
+                if corruption in results:
+                    log_dict[f"ood/{name}/{corruption}"] = results[corruption]["mean"]
+                    for severity in [1, 2, 3, 4, 5]:
+                        sk = f"severity_{severity}"
+                        if sk in results[corruption]:
+                            log_dict[f"ood/{name}/{corruption}_s{severity}"] = \
+                                results[corruption][sk]
+            wandb_run.log(log_dict)
+
         del model
         torch.cuda.empty_cache()
 
@@ -252,6 +280,27 @@ def main():
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\n  Results saved to {out_path}")
+
+    # Final wandb summary
+    if wandb_run is not None:
+        summary = {f"ood/{n}/mCE_accuracy": r["mCE_accuracy"]
+                   for n, r in all_results.items()}
+        wandb_run.log(summary)
+        # Build a wandb table for the comparison
+        try:
+            import wandb as _wb
+            cols = ["corruption"] + list(all_results.keys())
+            table = _wb.Table(columns=cols)
+            for c in CORRUPTIONS:
+                row = [c] + [all_results[n].get(c, {}).get("mean", float("nan"))
+                             for n in all_results]
+                table.add_data(*row)
+            row = ["MEAN"] + [all_results[n]["mCE_accuracy"] for n in all_results]
+            table.add_data(*row)
+            wandb_run.log({"ood/comparison_table": table})
+        except Exception:
+            pass
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
