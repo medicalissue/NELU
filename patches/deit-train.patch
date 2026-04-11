@@ -17,10 +17,18 @@ index 8d6640d..88b9b25 100644
  import numpy as np
  from torchvision import datasets, transforms
 diff --git a/main.py b/main.py
-index 3c8dd07..9bd220a 100644
+index 3c8dd07..55eee14 100644
 --- a/main.py
 +++ b/main.py
-@@ -28,6 +28,30 @@ import models_v2
+@@ -5,6 +5,7 @@ import datetime
+ import numpy as np
+ import time
+ import torch
++import torch._dynamo  # used by --torch-compile path; module-level to avoid local-rebind
+ import torch.backends.cudnn as cudnn
+ import json
+ 
+@@ -28,6 +29,30 @@ import models_v2
  
  import utils
  
@@ -51,7 +59,7 @@ index 3c8dd07..9bd220a 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +209,13 @@ def get_args_parser():
+@@ -185,6 +210,13 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -65,7 +73,7 @@ index 3c8dd07..9bd220a 100644
      return parser
  
  
-@@ -270,7 +301,15 @@ def main(args):
+@@ -270,7 +302,15 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -82,15 +90,18 @@ index 3c8dd07..9bd220a 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -344,6 +383,18 @@ def main(args):
+@@ -344,6 +384,21 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
 +
 +    # NELU paper: torch.compile AFTER DDP wrap. Suppress dynamo errors so
 +    # graph breaks can never crash an 800-epoch run.
++    # NOTE: do NOT do `import torch._dynamo` inside this function — that
++    # would rebind `torch` as a local variable in main(), shadowing the
++    # module-level import and causing UnboundLocalError elsewhere. The
++    # import is at module level instead.
 +    if getattr(args, "torch_compile", False):
-+        import torch._dynamo
 +        torch._dynamo.config.suppress_errors = True
 +        torch._dynamo.config.cache_size_limit = 512
 +        torch._dynamo.config.accumulated_cache_size_limit = 512
