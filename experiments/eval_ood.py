@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+# DataLoader removed: we batch directly off pre-loaded GPU tensors.
 from torchvision import transforms
 from tqdm import tqdm
 
@@ -92,22 +92,17 @@ def load_corruption(cifar100c_dir, corruption, severity):
     return images, labels.astype(np.int64)
 
 
-def make_loader(images, labels, batch_size=128):
-    """Convert numpy arrays to normalized DataLoader."""
-    # Normalize same as training
-    mean = np.array(CIFAR100_MEAN).reshape(1, 1, 1, 3)
-    std = np.array(CIFAR100_STD).reshape(1, 1, 1, 3)
-
-    images = images.astype(np.float32) / 255.0
-    images = (images - mean) / std
-    images = images.transpose(0, 3, 1, 2)  # NHWC -> NCHW
-
-    dataset = TensorDataset(
-        torch.tensor(images, dtype=torch.float32),
-        torch.tensor(labels, dtype=torch.long),
-    )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                      num_workers=2, pin_memory=True)
+def to_normalized_tensor(images, labels, device="cuda"):
+    """Pre-normalize an entire (images, labels) pair on GPU once.
+    CIFAR-100-C is small (10k × 32×32×3 ≈ 30 MB), fits trivially in VRAM.
+    Returns: (images_gpu_NCHW, labels_gpu)."""
+    mean = torch.tensor(CIFAR100_MEAN, device=device).view(1, 3, 1, 1)
+    std  = torch.tensor(CIFAR100_STD,  device=device).view(1, 3, 1, 1)
+    x = torch.from_numpy(images).to(device, non_blocking=True).float() / 255.0
+    x = x.permute(0, 3, 1, 2).contiguous()    # NHWC → NCHW
+    x = (x - mean) / std
+    y = torch.from_numpy(labels).to(device, non_blocking=True).long()
+    return x, y
 
 
 def load_checkpoint(ckpt_path, device="cuda"):
@@ -128,13 +123,14 @@ def load_checkpoint(ckpt_path, device="cuda"):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device="cuda"):
+def evaluate_tensor(model, x, y, batch_size=4096, device="cuda"):
+    """Evaluate on a pre-loaded GPU tensor. Slices into chunks of batch_size
+    so we never run out of memory even on the largest CNN (WRN-28-10)."""
     correct, total = 0, 0
-    for images, labels in loader:
-        images, labels = images.to(device), labels.to(device)
-        outputs = model(images)
-        correct += (outputs.argmax(1) == labels).sum().item()
-        total += labels.size(0)
+    for i in range(0, x.size(0), batch_size):
+        outputs = model(x[i:i+batch_size])
+        correct += (outputs.argmax(1) == y[i:i+batch_size]).sum().item()
+        total += min(batch_size, x.size(0) - i)
     return 100.0 * correct / total
 
 
@@ -145,12 +141,12 @@ def eval_all_corruptions(model, cifar100c_dir, device="cuda", severities=(1, 2, 
         accs = []
         for severity in severities:
             images, labels = load_corruption(cifar100c_dir, corruption, severity)
-            loader = make_loader(images, labels)
-            acc = evaluate(model, loader, device)
+            x, y = to_normalized_tensor(images, labels, device)
+            acc = evaluate_tensor(model, x, y, batch_size=4096, device=device)
             accs.append(acc)
         results[corruption] = {
             "per_severity": accs,
-            "mean": np.mean(accs),
+            "mean": float(np.mean(accs)),
         }
     results["mCE_accuracy"] = np.mean([r["mean"] for r in results.values()])
     return results
