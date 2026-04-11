@@ -30,16 +30,18 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision import transforms
 from tqdm import tqdm
 
-sys.path.insert(0, "/home/ubuntu/ResAct")
+# Path setup — relative to this file, not hardcoded.
+_THIS_DIR = Path(__file__).resolve().parent          # .../experiments
+_REPO_ROOT = _THIS_DIR.parent                        # .../<repo root>
+sys.path.insert(0, str(_REPO_ROOT))                  # for `import nelu`
+sys.path.insert(0, str(_THIS_DIR))                   # for `import main_cifar_tinyimagenet`
+
 from nelu import NELU
 from nelu.cuda_kernel import NELUCUDA
-
-# Import model builders from main script
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from main_cifar_tinyimagenet import build_model, CIFAR100_MEAN, CIFAR100_STD
 
-RESULTS_DIR = Path("/home/ubuntu/ResAct/results")
-DATA_DIR = Path("/home/ubuntu/ResAct/data")
+RESULTS_DIR = _REPO_ROOT / "results"
+DATA_DIR = _REPO_ROOT / "data"
 
 CORRUPTIONS = [
     "gaussian_noise", "shot_noise", "impulse_noise",
