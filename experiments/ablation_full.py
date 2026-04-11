@@ -189,6 +189,10 @@ def run(variant, seed=42, epochs=200, wd=5e-4, use_wandb=False, compile_model=Fa
                         "wd": wd, "amp": use_amp, "compile": compile_model},
                 reinit=True,
             )
+            # Tell wandb to use "epoch" as the x-axis for all metrics
+            # instead of the auto-incrementing step counter.
+            wandb_run.define_metric("epoch")
+            wandb_run.define_metric("*", step_metric="epoch")
         except Exception as e:
             print(f"  WARNING: wandb init failed ({type(e).__name__}: {e}); "
                   f"continuing without wandb")
@@ -210,25 +214,29 @@ def run(variant, seed=42, epochs=200, wd=5e-4, use_wandb=False, compile_model=Fa
         sched.step()
         train_loss = epoch_loss / max(n_seen, 1)
 
-        if ep % 10 == 0 or ep == epochs:
-            model.eval()
-            c, t = 0, 0
-            with torch.no_grad():
-                for x, y in test_ld:
-                    x, y = x.to(device), y.to(device)
-                    c += (model(x).argmax(1) == y).sum().item()
-                    t += y.size(0)
-            acc = 100.0 * c / t
-            best = max(best, acc)
-            if ep % 50 == 0:
-                print(f"  [{variant} s{seed}] ep={ep} acc={acc:.2f}% best={best:.2f}%")
-            if wandb_run is not None:
-                try:
-                    wandb_run.log({"epoch": ep, "train_loss": train_loss,
-                                   "test_acc": acc, "best_acc": best,
-                                   "lr": opt.param_groups[0]["lr"]})
-                except Exception:
-                    pass
+        # Evaluate EVERY epoch so best_acc matches main_cifar_tinyimagenet.py.
+        # Eval on CIFAR-100 test set is ~2-3 s on H100 for ResNet-20 — negligible.
+        model.eval()
+        c, t = 0, 0
+        with torch.no_grad():
+            for x, y in test_ld:
+                x, y = x.to(device), y.to(device)
+                c += (model(x).argmax(1) == y).sum().item()
+                t += y.size(0)
+        acc = 100.0 * c / t
+        best = max(best, acc)
+
+        if ep % 50 == 0 or ep == epochs:
+            print(f"  [{variant} s{seed}] ep={ep} acc={acc:.2f}% best={best:.2f}%")
+
+        # Log every epoch with explicit epoch step
+        if wandb_run is not None:
+            try:
+                wandb_run.log({"epoch": ep, "train_loss": train_loss,
+                               "test_acc": acc, "best_acc": best,
+                               "lr": opt.param_groups[0]["lr"]})
+            except Exception:
+                pass
 
     if wandb_run is not None:
         try:

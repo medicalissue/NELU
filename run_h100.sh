@@ -244,15 +244,15 @@ slot_init
 # Phase 2a: LR sensitivity (ResNet-20 CIFAR-100, single seed)
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 2a: LR sensitivity ═══"
-for lr in 0.01 0.05 0.1 0.2 0.5; do
-    for act in relu gelu nelu; do
-        skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
-        slot_run "lrsweep_resnet20_${act}_lr${lr}" \
-            "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
-    done
-done
-slot_drain
+# echo -e "\n═══ Phase 2a: LR sensitivity ═══"
+# for lr in 0.01 0.05 0.1 0.2 0.5; do
+#     for act in relu gelu nelu; do
+#         skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
+#         slot_run "lrsweep_resnet20_${act}_lr${lr}" \
+#             "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
+#     done
+# done
+# slot_drain
 
 # ─────────────────────────────────────────────────────────────
 # Phase 2b: Full ablation (ResNet-20 CIFAR-100, 9 variants × 3 seeds = 27 jobs)
