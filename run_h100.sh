@@ -394,6 +394,7 @@ imnet_eval_baseline convnext_tiny.fb_in1k imnet_convnext_t_gelu_eval
 if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
     echo "[$(date +%H:%M)] ConvNeXt-T NELU from scratch (FB ConvNeXt main.py)"
     (cd "$CONVNEXT_DIR" && \
+     PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
      torchrun --nproc_per_node=8 main.py \
         --model convnext_tiny --drop_path 0.1 \
         --batch_size 128 --lr 4e-3 --update_freq 4 \
@@ -445,6 +446,7 @@ if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
     echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch (FB deit main.py)"
     # README_revenge ImageNet-1k pretraining cmd (line 412 of README_revenge.md).
     (cd "$DEIT_DIR" && \
+     PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
      torchrun --nproc_per_node=8 main.py \
         --model deit_base_patch16_LS \
         --data-path "$IMNET_DATA" \

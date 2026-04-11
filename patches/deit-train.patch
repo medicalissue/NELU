@@ -17,17 +17,16 @@ index 8d6640d..88b9b25 100644
  import numpy as np
  from torchvision import datasets, transforms
 diff --git a/main.py b/main.py
-index 3c8dd07..6e80d67 100644
+index 3c8dd07..9bd220a 100644
 --- a/main.py
 +++ b/main.py
-@@ -28,6 +28,31 @@ import models_v2
+@@ -28,6 +28,30 @@ import models_v2
  
  import utils
  
 +# NELU paper: import our activations + define recursive swap helper.
-+import sys as _sys
-+from pathlib import Path as _Path
-+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "ResAct"))
++# `nelu` package must be importable; the launcher (ResAct/run_h100.sh)
++# prepends ResAct to PYTHONPATH for this run.
 +import torch.nn as _nn
 +from nelu import NELU as _NELU, NiLU as _NiLU, NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA
 +
@@ -52,7 +51,7 @@ index 3c8dd07..6e80d67 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +210,13 @@ def get_args_parser():
+@@ -185,6 +209,13 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -66,7 +65,7 @@ index 3c8dd07..6e80d67 100644
      return parser
  
  
-@@ -270,7 +302,15 @@ def main(args):
+@@ -270,7 +301,15 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -83,7 +82,7 @@ index 3c8dd07..6e80d67 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -344,6 +384,18 @@ def main(args):
+@@ -344,6 +383,18 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
