@@ -33,25 +33,15 @@ except ImportError:
 
 # ── NELU variants ────────────────────────────────────────────────
 
-class NELU_SG(nn.Module):
-    """Standard NELU: dim=(1,2,3) for CNN, stop-gradient."""
+class NELU(nn.Module):
+    """Default NELU: dim=(1,2,3) for CNN, no stop-gradient."""
     def __init__(self, eps=1e-6):
         super().__init__()
         self.eps = eps
     def forward(self, z):
         dim = (1,2,3) if z.dim()==4 else -1
         rms = z.pow(2).mean(dim=dim, keepdim=True).add(self.eps).sqrt()
-        return z * 0.5 * (1.0 + torch.erf(z / (rms.detach() * math.sqrt(2))))
-
-class NELU_NoSG(nn.Module):
-    """NELU without stop-gradient."""
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-    def forward(self, z):
-        dim = (1,2,3) if z.dim()==4 else -1
-        rms = z.pow(2).mean(dim=dim, keepdim=True).add(self.eps).sqrt()
-        return z * 0.5 * (1.0 + torch.erf(z / (rms * math.sqrt(2))))  # no detach
+        return z * 0.5 * (1.0 + torch.erf(z / (rms * math.sqrt(2))))
 
 class NELU_DimW(nn.Module):
     """NELU with dim=-1 (W axis only)."""
@@ -60,7 +50,7 @@ class NELU_DimW(nn.Module):
         self.eps = eps
     def forward(self, z):
         rms = z.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
-        return z * 0.5 * (1.0 + torch.erf(z / (rms.detach() * math.sqrt(2))))
+        return z * 0.5 * (1.0 + torch.erf(z / (rms * math.sqrt(2))))
 
 class NELU_DimC(nn.Module):
     """NELU with dim=1 (C axis)."""
@@ -70,7 +60,7 @@ class NELU_DimC(nn.Module):
     def forward(self, z):
         dim = 1 if z.dim()==4 else -1
         rms = z.pow(2).mean(dim=dim, keepdim=True).add(self.eps).sqrt()
-        return z * 0.5 * (1.0 + torch.erf(z / (rms.detach() * math.sqrt(2))))
+        return z * 0.5 * (1.0 + torch.erf(z / (rms * math.sqrt(2))))
 
 class NELU_DimHW(nn.Module):
     """NELU with dim=(2,3) (spatial)."""
@@ -80,7 +70,7 @@ class NELU_DimHW(nn.Module):
     def forward(self, z):
         dim = (2,3) if z.dim()==4 else -1
         rms = z.pow(2).mean(dim=dim, keepdim=True).add(self.eps).sqrt()
-        return z * 0.5 * (1.0 + torch.erf(z / (rms.detach() * math.sqrt(2))))
+        return z * 0.5 * (1.0 + torch.erf(z / (rms * math.sqrt(2))))
 
 class LearnableTau(nn.Module):
     """z * Phi(z / tau), tau learnable per-instance, init=1."""
@@ -92,15 +82,13 @@ class LearnableTau(nn.Module):
         return z * 0.5 * (1.0 + torch.erf(z / (tau * math.sqrt(2))))
 
 VARIANTS = {
-    "gelu":         lambda: nn.GELU(),
-    "nelu":         lambda: NELU_SG(),
-    "nelu_no_sg":   lambda: NELU_NoSG(),
-    "nelu_dim_w":   lambda: NELU_DimW(),
-    "nelu_dim_c":   lambda: NELU_DimC(),
-    "nelu_dim_hw":  lambda: NELU_DimHW(),
-    "nelu_dim_chw": lambda: NELU_SG(),  # same as nelu
+    "gelu":          lambda: nn.GELU(),
+    "nelu":          lambda: NELU(),           # default NoSG, dim=(1,2,3)
+    "nelu_dim_w":    lambda: NELU_DimW(),
+    "nelu_dim_c":    lambda: NELU_DimC(),
+    "nelu_dim_hw":   lambda: NELU_DimHW(),
     "learnable_tau": lambda: LearnableTau(),
-    "gelu_wd2":     lambda: nn.GELU(),  # same act, different wd
+    "gelu_wd2":      lambda: nn.GELU(),        # same act, different wd
 }
 
 # ── Model (ResNet-20) ────────────────────────────────────────────

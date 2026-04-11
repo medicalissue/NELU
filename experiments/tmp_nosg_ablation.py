@@ -49,6 +49,16 @@ nosg_dir = mc.RESULTS_DIR / "nosg"
 nosg_dir.mkdir(parents=True, exist_ok=True)
 mc.RESULTS_DIR = nosg_dir
 
+# Disable all checkpoint saves (we only need best_acc in result.json).
+# WRN-28-10 checkpoints are ~140MB each × 18 files = 1.3 GB — not worth.
+_orig_save = torch.save
+def _noop_save(obj, path, *args, **kwargs):
+    p = str(path)
+    if "/checkpoints/" in p or p.endswith((".pt", ".pt.tmp")):
+        return  # skip all model/optimizer dumps
+    return _orig_save(obj, path, *args, **kwargs)
+torch.save = _noop_save
+
 
 def main():
     parser = argparse.ArgumentParser()

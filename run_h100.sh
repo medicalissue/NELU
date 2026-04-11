@@ -209,57 +209,75 @@ echo "════════════════════════�
 slot_init
 
 # ─────────────────────────────────────────────────────────────
-# Phase 1a: CIFAR-100 CNN (7 arch × 3 act × 3 seeds = 63 jobs)
+# Phase 1a: CIFAR-100 CNN  (NELU is now NoSG — see nelu/activations.py)
+# 7 archs × 3 acts × 3 seeds = 63 jobs
+# Already-trained entries are auto-skipped by skip_if_done. On this
+# rerun we only retrain the NELU variants whose local result files
+# were deleted during the SG→NoSG migration (5 archs).
 # ─────────────────────────────────────────────────────────────
 
-# echo -e "\n═══ Phase 1a: CIFAR-100 CNN ═══"
-# for seed in "${SEEDS[@]}"; do
-#     for arch in "${CNN_ARCHS[@]}"; do
-#         for act in relu gelu nelu; do
-#             skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
-#             slot_run "cifar100_${arch}_${act}_s${seed}" \
-#                 "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
-#         done
-#     done
-# done
-# slot_drain
+echo -e "\n═══ Phase 1a: CIFAR-100 CNN ═══"
+for seed in "${SEEDS[@]}"; do
+    for arch in "${CNN_ARCHS[@]}"; do
+        for act in relu gelu nelu; do
+            skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
+            slot_run "cifar100_${arch}_${act}_s${seed}" \
+                "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
+        done
+    done
+done
+slot_drain
+
+# CIFAR-10 phase removed — we focus on CIFAR-100 only.
 
 # ─────────────────────────────────────────────────────────────
-# Phase 1b: CIFAR-10 CNN (7 arch × 3 act × 3 seeds = 63 jobs)
+# Phase 2a: OOD eval on CIFAR-100-C (one job per checkpoint, 8 GPUs)
+# Dispatches each best.pt through slot_run so the 63 per-ckpt
+# evals run in parallel. After all finish, one aggregate pass
+# computes mean ± std across the 3 seeds per (arch, act).
 # ─────────────────────────────────────────────────────────────
 
-# echo -e "\n═══ Phase 1b: CIFAR-10 ═══"
-# for seed in "${SEEDS[@]}"; do
-#     for arch in "${CNN_ARCHS[@]}"; do
-#         for act in relu gelu nelu; do
-#             skip_if_done "$(cifar_result $arch cifar10 $act $seed)" && continue
-#             slot_run "cifar10_${arch}_${act}_s${seed}" \
-#                 "$CIFAR --arch $arch --dataset cifar10 --act $act --seed $seed $C"
-#         done
-#     done
-# done
-# slot_drain
+echo -e "\n═══ Phase 2a: OOD eval (CIFAR-100-C, parallel) ═══"
+for f in results/checkpoints/*_cifar100_*_best.pt; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f" _best.pt)
+    cache="results/ood/${name}.json"
+    if [ -f "$cache" ]; then
+        echo "  SKIP (cached): $name"
+        continue
+    fi
+    slot_run "ood_${name}" \
+        "python experiments/eval_ood.py --checkpoint \"$f\""
+done
+slot_drain
+
+# Aggregate: load all cached per-ckpt results + compute mean ± std
+python experiments/eval_ood.py --aggregate-only 2>&1 | tee logs/phase2a_ood_agg.log || \
+    echo "[WARN] OOD aggregation failed — continuing"
 
 # ─────────────────────────────────────────────────────────────
-# Phase 2a: LR sensitivity (ResNet-20 CIFAR-100, single seed)
+# Phase 2b: LR sensitivity (ResNet-20 CIFAR-100, single seed)
 # ─────────────────────────────────────────────────────────────
 
-# echo -e "\n═══ Phase 2a: LR sensitivity ═══"
-# for lr in 0.01 0.05 0.1 0.2 0.5; do
-#     for act in relu gelu nelu; do
-#         skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
-#         slot_run "lrsweep_resnet20_${act}_lr${lr}" \
-#             "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
-#     done
-# done
-# slot_drain
+echo -e "\n═══ Phase 2b: LR sensitivity ═══"
+for lr in 0.01 0.05 0.1 0.2 0.5; do
+    for act in relu gelu nelu; do
+        skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
+        slot_run "lrsweep_resnet20_${act}_lr${lr}" \
+            "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
+    done
+done
+slot_drain
 
 # ─────────────────────────────────────────────────────────────
-# Phase 2b: Full ablation (ResNet-20 CIFAR-100, 9 variants × 3 seeds = 27 jobs)
+# Phase 2c: Ablation  (ResNet-20 CIFAR-100, 3 seeds each)
+# NELU is now defined as NoSG; we no longer include "nelu_no_sg" or
+# any SG variants in the ablation. Remaining variants probe the RMS
+# reduction axis, a learnable temperature, and a GELU wd × 2 control.
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 2b: Ablation (parallel) ═══"
-ABLATION_VARIANTS=(nelu_no_sg nelu_dim_w nelu_dim_c nelu_dim_hw nelu_dim_chw learnable_tau gelu_wd2)
+echo -e "\n═══ Phase 2c: Ablation (parallel) ═══"
+ABLATION_VARIANTS=(nelu_dim_w nelu_dim_c nelu_dim_hw learnable_tau gelu_wd2)
 for variant in "${ABLATION_VARIANTS[@]}"; do
     for seed in "${SEEDS[@]}"; do
         RESULT="results/ablation_${variant}_s${seed}.json"
@@ -288,14 +306,6 @@ print(f"  aggregated {len(results)} variants → results/ablation_full.json")
 for v, r in sorted(agg.items(), key=lambda x: -x[1]["mean"]):
     print(f"    {v:<16} {r['mean']:>6.2f} ± {r['std']:.2f}")
 PY
-
-# ─────────────────────────────────────────────────────────────
-# Phase 2c: OOD eval on CIFAR-100-C
-# ─────────────────────────────────────────────────────────────
-
-echo -e "\n═══ Phase 2c: OOD eval (CIFAR-100-C) ═══"
-python experiments/eval_ood.py --wandb 2>&1 | tee logs/phase2c_ood.log || \
-    echo "[WARN] Phase 2c failed — continuing"
 
 # ─────────────────────────────────────────────────────────────
 # Phase 3: ImageNet DeiT-III ViT-B (DDP)

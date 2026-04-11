@@ -1,10 +1,12 @@
 """Pure PyTorch implementation of NELU.
 
-    NELU(z)_i = z_i * Phi(z_i / sg[rms(z)])
+    NELU(z)_i = z_i * Phi(z_i / rms(z))
 
 The gate sees only relative magnitudes; absolute scale flows through the
-output. sg[.] denotes stop-gradient: rms is treated as constant during
-backpropagation, keeping the Jacobian diagonal.
+output. The forward is exactly scale-invariant: NELU(alpha z) = alpha NELU(z).
+Gradient flows through rms (no stop-gradient) — an O(1/N) cross-term
+provides self-normalizing feedback that empirically improves training
+stability on CNNs.
 
 RMS reduction axis:
     2D/3D  (*, d)        ->  dim = -1        (feature axis)
@@ -37,7 +39,8 @@ class NELU(nn.Module):
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         dim = (1, 2, 3) if z.dim() == 4 else -1
         rms = z.pow(2).mean(dim=dim, keepdim=True).add(self.eps).sqrt()
-        z_hat = z / rms.detach()
+        # No stop-gradient: rms participates in backward via autograd.
+        z_hat = z / rms
         return z * 0.5 * (1.0 + torch.erf(z_hat * _INV_SQRT2))
 
     def extra_repr(self) -> str:
@@ -48,7 +51,7 @@ def nelu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Functional interface for NELU."""
     dim = (1, 2, 3) if z.dim() == 4 else -1
     rms = z.pow(2).mean(dim=dim, keepdim=True).add(eps).sqrt()
-    z_hat = z / rms.detach()
+    z_hat = z / rms
     return z * 0.5 * (1.0 + torch.erf(z_hat * _INV_SQRT2))
 
 
