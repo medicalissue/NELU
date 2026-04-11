@@ -33,3 +33,4 @@ playground/
 
 # Claude
 .claude/
+.timm_train_py.env

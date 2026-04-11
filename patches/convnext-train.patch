@@ -1,0 +1,154 @@
+diff --git a/main.py b/main.py
+index e3e40e3..43c6643 100644
+--- a/main.py
++++ b/main.py
+@@ -32,6 +32,28 @@ import utils
+ import models.convnext
+ import models.convnext_isotropic
+ 
++# NELU paper: import our activations + define recursive swap helper.
++import sys as _sys
++from pathlib import Path as _Path
++_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "ResAct"))
++from nelu import NELU as _NELU, NiLU as _NiLU, NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA
++_NELU_CLS = _NELUCUDA if _NELUCUDA is not None else _NELU
++_NILU_CLS = _NiLUCUDA if _NiLUCUDA is not None else _NiLU
++_ACT_CLS_MAP = {
++    "gelu": nn.GELU,
++    "silu": nn.SiLU,
++    "nelu": _NELU_CLS,
++    "nilu": _NILU_CLS,
++}
++
++def _replace_act(module, baseline_cls, target_cls):
++    for name, child in module.named_children():
++        if isinstance(child, baseline_cls):
++            setattr(module, name, target_cls())
++        else:
++            _replace_act(child, baseline_cls, target_cls)
++    return module
++
+ def str2bool(v):
+     """
+     Converts string to bool type; enables command line 
+@@ -199,6 +221,13 @@ def get_args_parser():
+     parser.add_argument('--wandb_ckpt', type=str2bool, default=False,
+                         help="Save model checkpoints as W&B Artifacts.")
+ 
++    # NELU paper: activation swap. Patches every nn.GELU in the model.
++    parser.add_argument('--act', default='gelu', type=str,
++                        choices=['gelu', 'silu', 'nelu', 'nilu'],
++                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
++    parser.add_argument('--torch_compile', type=str2bool, default=False,
++                        help='Wrap model in torch.compile after DDP wrap.')
++
+     return parser
+ 
+ def main(args):
+@@ -276,14 +305,22 @@ def main(args):
+             label_smoothing=args.smoothing, num_classes=args.nb_classes)
+ 
+     model = create_model(
+-        args.model, 
+-        pretrained=False, 
+-        num_classes=args.nb_classes, 
++        args.model,
++        pretrained=False,
++        num_classes=args.nb_classes,
+         drop_path_rate=args.drop_path,
+         layer_scale_init_value=args.layer_scale_init_value,
+         head_init_scale=args.head_init_scale,
+         )
+ 
++    # NELU paper: swap GELU -> NELU (or other) BEFORE finetune-load / EMA / DDP.
++    if args.act != "gelu":
++        target_cls = _ACT_CLS_MAP[args.act]
++        # ConvNeXt baseline activation is GELU.
++        _replace_act(model, nn.GELU, target_cls)
++        n = sum(1 for m in model.modules() if isinstance(m, target_cls))
++        print(f"  [NELU] swapped GELU -> {args.act}  ({n} modules)")
++
+     if args.finetune:
+         if args.finetune.startswith('https'):
+             checkpoint = torch.hub.load_state_dict_from_url(
+@@ -347,6 +384,18 @@ def main(args):
+         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+         model_without_ddp = model.module
+ 
++    # NELU paper: torch.compile AFTER DDP wrap so the compiled graph
++    # includes DDP all-reduce hooks. Suppress dynamo errors so a
++    # mid-training graph break can never crash a multi-day run.
++    if getattr(args, "torch_compile", False):
++        import torch._dynamo
++        torch._dynamo.config.suppress_errors = True
++        torch._dynamo.config.cache_size_limit = 512
++        torch._dynamo.config.accumulated_cache_size_limit = 512
++        model = torch.compile(model)
++        if utils.is_main_process():
++            print("  [NELU] torch.compile enabled")
++
+     optimizer = create_optimizer(
+         args, model_without_ddp, skip_list=None,
+         get_num_layer=assigner.get_layer_id if assigner is not None else None, 
+diff --git a/models/convnext.py b/models/convnext.py
+index 74c1e94..e2a52b9 100644
+--- a/models/convnext.py
++++ b/models/convnext.py
+@@ -63,9 +63,10 @@ class ConvNeXt(nn.Module):
+         layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
+         head_init_scale (float): Init scaling value for classifier weights and biases. Default: 1.
+     """
+-    def __init__(self, in_chans=3, num_classes=1000, 
+-                 depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate=0., 
++    def __init__(self, in_chans=3, num_classes=1000,
++                 depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate=0.,
+                  layer_scale_init_value=1e-6, head_init_scale=1.,
++                 **kwargs,  # newer timm passes pretrained_cfg etc. — accept and ignore
+                  ):
+         super().__init__()
+ 
+diff --git a/optim_factory.py b/optim_factory.py
+index ec5c003..11f3da0 100644
+--- a/optim_factory.py
++++ b/optim_factory.py
+@@ -13,10 +13,20 @@ from timm.optim.adafactor import Adafactor
+ from timm.optim.adahessian import Adahessian
+ from timm.optim.adamp import AdamP
+ from timm.optim.lookahead import Lookahead
+-from timm.optim.nadam import Nadam
+-from timm.optim.novograd import NovoGrad
++# timm 1.0+ renamed Nadam->NAdamLegacy and removed novograd. Compat shims:
++try:
++    from timm.optim.nadam import Nadam  # type: ignore
++except ImportError:
++    from timm.optim.nadam import NAdamLegacy as Nadam  # noqa: F401
++try:
++    from timm.optim.novograd import NovoGrad  # type: ignore
++except ImportError:
++    NovoGrad = None  # ConvNeXt training never uses --opt novograd
+ from timm.optim.nvnovograd import NvNovoGrad
+-from timm.optim.radam import RAdam
++try:
++    from timm.optim.radam import RAdam  # type: ignore
++except ImportError:
++    from timm.optim.radam import RAdamLegacy as RAdam  # noqa: F401
+ from timm.optim.rmsprop_tf import RMSpropTF
+ from timm.optim.sgdp import SGDP
+ 
+diff --git a/utils.py b/utils.py
+index a34c480..7939180 100644
+--- a/utils.py
++++ b/utils.py
+@@ -18,7 +18,11 @@ from pathlib import Path
+ 
+ import torch
+ import torch.distributed as dist
+-from torch._six import inf
++# torch._six was removed in PyTorch 2.0; `inf` lives in math/torch directly.
++try:
++    from torch._six import inf  # type: ignore
++except ImportError:
++    from math import inf  # noqa: F401
+ 
+ from tensorboardX import SummaryWriter
+ 

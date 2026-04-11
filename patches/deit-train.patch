@@ -1,0 +1,104 @@
+diff --git a/augment.py b/augment.py
+index 8d6640d..88b9b25 100644
+--- a/augment.py
++++ b/augment.py
+@@ -9,7 +9,12 @@ and timm DA(https://github.com/rwightman/pytorch-image-models)
+ import torch
+ from torchvision import transforms
+ 
+-from timm.data.transforms import _pil_interp, RandomResizedCropAndInterpolation, ToNumpy, ToTensor
++from timm.data.transforms import RandomResizedCropAndInterpolation, ToNumpy, ToTensor
++# timm renamed _pil_interp -> str_to_pil_interp around 0.6.x. Alias for compat.
++try:
++    from timm.data.transforms import _pil_interp  # type: ignore  # noqa: F401
++except ImportError:
++    from timm.data.transforms import str_to_pil_interp as _pil_interp  # noqa: F401
+ 
+ import numpy as np
+ from torchvision import datasets, transforms
+diff --git a/main.py b/main.py
+index 3c8dd07..6e80d67 100644
+--- a/main.py
++++ b/main.py
+@@ -28,6 +28,31 @@ import models_v2
+ 
+ import utils
+ 
++# NELU paper: import our activations + define recursive swap helper.
++import sys as _sys
++from pathlib import Path as _Path
++_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "ResAct"))
++import torch.nn as _nn
++from nelu import NELU as _NELU, NiLU as _NiLU, NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA
++
++_NELU_CLS = _NELUCUDA if _NELUCUDA is not None else _NELU
++_NILU_CLS = _NiLUCUDA if _NiLUCUDA is not None else _NiLU
++_ACT_CLS_MAP = {
++    "gelu": _nn.GELU,
++    "silu": _nn.SiLU,
++    "nelu": _NELU_CLS,
++    "nilu": _NILU_CLS,
++}
++
++def _replace_act(module, baseline_cls, target_cls):
++    """Recursively replace every `baseline_cls` instance with `target_cls()`."""
++    for name, child in module.named_children():
++        if isinstance(child, baseline_cls):
++            setattr(module, name, target_cls())
++        else:
++            _replace_act(child, baseline_cls, target_cls)
++    return module
++
+ 
+ def get_args_parser():
+     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
+@@ -185,6 +210,13 @@ def get_args_parser():
+     parser.add_argument('--world_size', default=1, type=int,
+                         help='number of distributed processes')
+     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
++
++    # NELU paper: activation swap (gelu/silu/nelu/nilu). Patch for our experiments.
++    parser.add_argument('--act', default='gelu', type=str,
++                        choices=['gelu', 'silu', 'nelu', 'nilu'],
++                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
++    parser.add_argument('--torch-compile', action='store_true', default=False,
++                        help='Wrap model in torch.compile after DDP wrap.')
+     return parser
+ 
+ 
+@@ -270,7 +302,15 @@ def main(args):
+         img_size=args.input_size
+     )
+ 
+-                    
++    # NELU paper: swap activation BEFORE finetune-load / EMA / DDP wrap so
++    # all downstream code (state_dict, EMA copy, DDP) sees the new modules.
++    if args.act != "gelu":
++        target_cls = _ACT_CLS_MAP[args.act]
++        # DeiT-III ViT-B baseline activation is GELU.
++        _replace_act(model, _nn.GELU, target_cls)
++        n_swapped = sum(1 for m in model.modules() if isinstance(m, target_cls))
++        print(f"  [NELU] swapped GELU -> {args.act}  ({n_swapped} modules)")
++
+     if args.finetune:
+         if args.finetune.startswith('https'):
+             checkpoint = torch.hub.load_state_dict_from_url(
+@@ -344,6 +384,18 @@ def main(args):
+     if args.distributed:
+         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+         model_without_ddp = model.module
++
++    # NELU paper: torch.compile AFTER DDP wrap. Suppress dynamo errors so
++    # graph breaks can never crash an 800-epoch run.
++    if getattr(args, "torch_compile", False):
++        import torch._dynamo
++        torch._dynamo.config.suppress_errors = True
++        torch._dynamo.config.cache_size_limit = 512
++        torch._dynamo.config.accumulated_cache_size_limit = 512
++        model = torch.compile(model)
++        if utils.is_main_process():
++            print("  [NELU] torch.compile enabled")
++
+     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+     print('number of params:', n_parameters)
+     if not args.unscale_lr:
