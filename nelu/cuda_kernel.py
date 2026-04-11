@@ -64,6 +64,15 @@ def nelu_cuda(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return _LegacyFn.apply(z, eps)
 
 
+# Tell torch.compile / Dynamo to treat our pybind11 entrypoint as an
+# opaque op rather than trying to trace into it. Without this, Dynamo
+# emits a graph break around every NELU call which kills compile speedup.
+try:
+    torch.compiler.allow_in_graph(_nelu_cuda.nelu_autograd)
+except Exception:
+    pass
+
+
 class NELUCUDA(nn.Module):
     def __init__(self, eps: float = 1e-6):
         super().__init__()

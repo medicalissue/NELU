@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index e3e40e3..f4d5a5a 100644
+index e3e40e3..d958d0c 100644
 --- a/main.py
 +++ b/main.py
 @@ -11,6 +11,7 @@ import datetime
@@ -78,7 +78,7 @@ index e3e40e3..f4d5a5a 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -347,6 +384,21 @@ def main(args):
+@@ -347,6 +384,31 @@ def main(args):
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
          model_without_ddp = model.module
  
@@ -96,6 +96,16 @@ index e3e40e3..f4d5a5a 100644
 +        model = torch.compile(model)
 +        if utils.is_main_process():
 +            print("  [NELU] torch.compile enabled")
++        # torch.compile prefixes state_dict keys with '_orig_mod.', which
++        # breaks timm ModelEma.update key matching. Monkey-patch update so
++        # it sees the underlying DDP-wrapped model (keys are 'module.X').
++        if model_ema is not None:
++            _orig_ema_update = model_ema.update
++            def _ema_update_compile_aware(m, _orig=_orig_ema_update):
++                if hasattr(m, "_orig_mod"):
++                    m = m._orig_mod
++                return _orig(m)
++            model_ema.update = _ema_update_compile_aware
 +
      optimizer = create_optimizer(
          args, model_without_ddp, skip_list=None,

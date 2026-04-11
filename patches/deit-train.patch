@@ -17,7 +17,7 @@ index 8d6640d..88b9b25 100644
  import numpy as np
  from torchvision import datasets, transforms
 diff --git a/main.py b/main.py
-index 3c8dd07..55eee14 100644
+index 3c8dd07..19d7785 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -90,7 +90,7 @@ index 3c8dd07..55eee14 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -344,6 +384,21 @@ def main(args):
+@@ -344,6 +384,31 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
@@ -108,6 +108,16 @@ index 3c8dd07..55eee14 100644
 +        model = torch.compile(model)
 +        if utils.is_main_process():
 +            print("  [NELU] torch.compile enabled")
++        # torch.compile prefixes state_dict keys with '_orig_mod.', which
++        # breaks timm ModelEma.update key matching. Monkey-patch update so
++        # it sees the underlying DDP-wrapped model (keys are 'module.X').
++        if model_ema is not None:
++            _orig_ema_update = model_ema.update
++            def _ema_update_compile_aware(m, _orig=_orig_ema_update):
++                if hasattr(m, "_orig_mod"):
++                    m = m._orig_mod
++                return _orig(m)
++            model_ema.update = _ema_update_compile_aware
 +
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)

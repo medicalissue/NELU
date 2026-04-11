@@ -66,6 +66,14 @@ def nilu_cuda(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return _LegacyFn.apply(z, eps)
 
 
+# Tell torch.compile / Dynamo to treat the pybind11 entrypoint as opaque.
+# Without this, Dynamo emits a graph break around every NiLU call.
+try:
+    torch.compiler.allow_in_graph(_nilu_cuda.nilu_autograd)
+except Exception:
+    pass
+
+
 class NiLUCUDA(nn.Module):
     def __init__(self, eps: float = 1e-6):
         super().__init__()
