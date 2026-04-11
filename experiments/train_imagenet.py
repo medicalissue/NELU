@@ -133,6 +133,17 @@ class ThreeAugment:
 
 # ── Data ─────────────────────────────────────────────────────────
 
+def _worker_init_fn(worker_id):
+    """Reproducible per-worker RNG seeding.
+    Each worker gets a distinct seed derived from the base seed + worker id.
+    """
+    import numpy as _np
+    import random as _rnd
+    base = torch.initial_seed() % (2**32)
+    _np.random.seed(base + worker_id)
+    _rnd.seed(base + worker_id)
+
+
 def build_dataloaders(args, train_size=192):
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(train_size,
@@ -155,17 +166,24 @@ def build_dataloaders(args, train_size=192):
     val_ds = datasets.ImageFolder(os.path.join(args.data, "val"), val_transform)
 
     if args.distributed:
-        train_sampler = DistributedSampler(train_ds)
+        # DistributedSampler with explicit seed → reproducible shuffle
+        train_sampler = DistributedSampler(train_ds, shuffle=True, seed=args.seed)
         val_sampler = DistributedSampler(val_ds, shuffle=False)
     else:
         train_sampler = val_sampler = None
 
+    # Reproducible DataLoader worker RNG via generator + worker_init_fn
+    gen = torch.Generator()
+    gen.manual_seed(args.seed + args.rank)
+
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
         shuffle=(train_sampler is None), num_workers=args.workers,
-        pin_memory=True, sampler=train_sampler, drop_last=True)
+        pin_memory=True, sampler=train_sampler, drop_last=True,
+        worker_init_fn=_worker_init_fn, generator=gen, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size,
         shuffle=False, num_workers=args.workers, pin_memory=True,
-        sampler=val_sampler)
+        sampler=val_sampler, worker_init_fn=_worker_init_fn,
+        persistent_workers=True)
     return train_loader, val_loader, train_sampler
 
 
@@ -304,7 +322,18 @@ def main():
         device = torch.device("cuda")
     args.is_main = args.rank == 0
 
-    torch.manual_seed(args.seed + args.rank)
+    # Seed every RNG we know about — torch (+cuda), numpy, Python random.
+    # Keeps ranks distinct so DDP shards don't collide but still reproducible
+    # across runs given the same --seed.
+    import random as _rnd
+    import numpy as _np
+    seed_for_rank = args.seed + args.rank
+    torch.manual_seed(seed_for_rank)
+    torch.cuda.manual_seed_all(seed_for_rank)
+    _np.random.seed(seed_for_rank)
+    _rnd.seed(seed_for_rank)
+    # Match DeiT-III: benchmark=True (fast), deterministic=False (speed > bit-exact)
+    torch.backends.cudnn.benchmark = True
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.is_main:

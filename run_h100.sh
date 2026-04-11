@@ -122,6 +122,7 @@ wait_all() { echo "[$(date +%H:%M)] Waiting..."; wait; echo "[$(date +%H:%M)] Do
 # tqdm bars don't garble the tmux pane. Per-job output is in logs/.
 NUM_GPUS=${NUM_GPUS:-8}
 SLOT_FIFO="/tmp/nelu_gpu_slots.$$"
+SLOT_PIDS=()   # track slot job PIDs so slot_drain doesn't wait on backup_loop
 
 slot_init() {
     rm -f "$SLOT_FIFO"
@@ -130,6 +131,7 @@ slot_init() {
     for g in $(seq 0 $((NUM_GPUS - 1))); do
         echo $g >&9
     done
+    SLOT_PIDS=()
 }
 
 slot_run() {
@@ -159,10 +161,15 @@ slot_run() {
         fi
         echo $g >&9       # release the slot
     ) &
+    SLOT_PIDS+=($!)
 }
 
 slot_drain() {
-    wait
+    # Wait ONLY for slot jobs, not for the backup_loop (which is infinite).
+    if [ ${#SLOT_PIDS[@]} -gt 0 ]; then
+        wait "${SLOT_PIDS[@]}" 2>/dev/null || true
+    fi
+    SLOT_PIDS=()
 }
 
 slot_cleanup() {
@@ -205,17 +212,17 @@ slot_init
 # Phase 1a: CIFAR-100 CNN (7 arch × 3 act × 3 seeds = 63 jobs)
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 1a: CIFAR-100 CNN ═══"
-for seed in "${SEEDS[@]}"; do
-    for arch in "${CNN_ARCHS[@]}"; do
-        for act in relu gelu nelu; do
-            skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
-            slot_run "cifar100_${arch}_${act}_s${seed}" \
-                "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
-        done
-    done
-done
-slot_drain
+# echo -e "\n═══ Phase 1a: CIFAR-100 CNN ═══"
+# for seed in "${SEEDS[@]}"; do
+#     for arch in "${CNN_ARCHS[@]}"; do
+#         for act in relu gelu nelu; do
+#             skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
+#             slot_run "cifar100_${arch}_${act}_s${seed}" \
+#                 "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
+#         done
+#     done
+# done
+# slot_drain
 
 # ─────────────────────────────────────────────────────────────
 # Phase 1b: CIFAR-10 CNN (7 arch × 3 act × 3 seeds = 63 jobs)
