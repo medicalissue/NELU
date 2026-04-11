@@ -11,15 +11,11 @@
 #           (combined LPT queue, 7 archs × 5 acts × 3 seeds = 105 main
 #            + 25 LR sweep + 15 ablation = 145 single-GPU jobs)     ~10-14h
 #  Phase 2: OOD eval on CIFAR-100-C (per-ckpt parallel, 105+ jobs)   ~15min
-#  Phase 3: ImageNet DeiT-III ViT-B (NELU from scratch, DDP)         ~10h
-#  Phase 4: ImageNet DeiT-III ViT-L (NELU from scratch, DDP)         ~36h
-#  Phase 5: ImageNet-C eval (mCE, timm GELU vs trained NELU)         ~30min
-#  Phase 6: GPT-2 LM (Small+Medium+Large, GELU+NELU, DDP)            ~24h
-#
-#  GLU-block variants (SwiGLU baseline vs NiLUGLU / NELUGLU) for
-#  LLaMA-tiny are run by a separate script — see
-#  experiments/tiny_lm_gluvariants.py (TODO, not wired into this
-#  pipeline yet).
+#  Phase 3: ImageNet ConvNeXt-T  (GELU pretrained, NELU from scratch) ~30h
+#  Phase 4: ImageNet EfficientNet-B2 (SiLU pretrained, NiLU scratch)  ~22-26h
+#  Phase 5: ImageNet DeiT-III ViT-B  (GELU pretrained, NELU scratch)  ~40h
+#  Phase 6: ImageNet-C eval (mCE, timm baseline vs trained ours)      ~1h
+#  Phase 7: COCO Det/Seg — Mask R-CNN + ConvNeXt-T (GELU vs NELU)     ~20h
 #
 #  Pre-flight:
 #    - `wandb login`  (required, --wandb is on for all runs)
@@ -33,13 +29,14 @@
 cd "$(dirname "$0")"
 # Pre-create all output directories ONCE before dispatching jobs.
 # Prevents races where N processes call mkdir simultaneously.
-mkdir -p logs results results/checkpoints results/lm results/imagenet
+mkdir -p logs results results/checkpoints results/imagenet results/coco
 
 CIFAR="python experiments/main_cifar_tinyimagenet.py"
-LM="torchrun --nproc_per_node=8 experiments/train_lm.py"
-IMNET="torchrun --nproc_per_node=8 experiments/train_imagenet.py"
 C="--amp --compile --wandb"
 IMNET_DATA="/data/imagenet"
+COCO_DATA="/data/coco"
+# Phase 3-5 ImageNet runs use bit-exact upstream stacks; see those phases
+# below for the exact torchrun invocations (no $IMNET shorthand).
 
 # wandb service can't keep up when 8 jobs init simultaneously.
 # Raise the port-file poll timeout from 30 s → 3600 s (effectively
@@ -281,6 +278,17 @@ for variant in "${ABLATION_VARIANTS[@]}"; do
     done
 done
 
+# 1d. RMS-axis ablation on MobileNetV2 (DW conv, single seed 42).
+# CHW = default `nelu` and is already in Phase 1a's main grid as
+#   results/main_mobilenetv2_cifar100_nelu_s42.json
+# Only HW and C variants need to be run here.
+for variant in nelu_hw nelu_c; do
+    RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s42.json"
+    skip_if_done "$RESULT" && continue
+    slot_run "rmsaxis_mobilenetv2_${variant}_s42" \
+        "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed 42 --amp --compile --wandb"
+done
+
 echo -e "\n[$(date +%H:%M)] Phase 1 fully queued — draining..."
 slot_drain
 echo "[$(date +%H:%M)] Phase 1 complete."
@@ -328,81 +336,181 @@ python experiments/eval_ood.py --aggregate-only 2>&1 | tee logs/phase2_ood_agg.l
     echo "[WARN] OOD aggregation failed — continuing"
 
 # ─────────────────────────────────────────────────────────────
-# Phase 3: ImageNet DeiT-III ViT-B (DDP)
-#   GELU: pretrained eval. NELU: from scratch, same recipe.
+# §4.3 ImageNet trio — bit-exact reproduction of timm/FB recipes.
+#
+# Each phase uses the ORIGINAL training stack that produced the
+# pretrained checkpoint, with a single-line activation swap. The
+# baseline is the timm pretrained ckpt (loaded via timm + evaluated
+# under the same eval transform) — only OUR variant is trained.
+#
+#   Model            Trained by      Stack we use
+#   ----------------------------------------------------------------
+#   ConvNeXt-T       FB ConvNeXt     /home/ubuntu/convnext-train/main.py
+#   EffNet-B2        timm/train.py   /home/ubuntu/NELU/timm-train/train.py
+#                                    via experiments/train_imagenet_timm.py
+#   DeiT-III B       FB deit         /home/ubuntu/deit-train/main.py
+#
+# Each clone has been patched with NELU/NiLU activation swap. The
+# original optimizer / scheduler / dataloader / EMA / AMP / DDP /
+# scaler / sampler are 100 % preserved.
+#
+# Drained sequentially — each occupies all 8 GPUs via DDP.
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 3: ImageNet DeiT-III ViT-B ═══"
-python experiments/train_imagenet.py --model deit3_base --act gelu \
-    --data $IMNET_DATA --eval-only \
-    2>&1 | tee logs/imnet_b_gelu_eval.log || \
-    echo "[WARN] ViT-B GELU eval failed — continuing"
+CONVNEXT_DIR=/home/ubuntu/convnext-train
+DEIT_DIR=/home/ubuntu/deit-train
+TIMM_TRAIN_PY=/home/ubuntu/NELU/timm-train/train.py
+export TIMM_TRAIN_PY
+RESACT_DIR=/home/ubuntu/ResAct
+
+# Baseline pretrained ImageNet eval — just `python -c` against timm.
+# We don't need a full DDP launch for inference; one GPU is enough.
+imnet_eval_baseline() {
+    local timm_id="$1" eval_log="$2"
+    if [ -f "logs/${eval_log}.done" ]; then
+        echo "  SKIP baseline eval: $timm_id (already done)"
+        return 0
+    fi
+    echo "[$(date +%H:%M)] baseline eval: $timm_id"
+    python experiments/eval_timm_pretrained.py \
+        --model "$timm_id" --data "$IMNET_DATA/val" \
+        2>&1 | tee "logs/${eval_log}.log" && \
+        touch "logs/${eval_log}.done" || \
+        echo "[WARN] baseline eval $timm_id failed — continuing"
+}
+
+# ─────────── Phase 3: ConvNeXt-T (FB ConvNeXt main.py) ───────────
+echo -e "\n═══ Phase 3: ImageNet ConvNeXt-T (GELU vs NELU) ═══"
+imnet_eval_baseline convnext_tiny.fb_in1k imnet_convnext_t_gelu_eval
+
+if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
+    echo "[$(date +%H:%M)] ConvNeXt-T NELU from scratch (FB ConvNeXt main.py)"
+    (cd "$CONVNEXT_DIR" && \
+     torchrun --nproc_per_node=8 main.py \
+        --model convnext_tiny --drop_path 0.1 \
+        --batch_size 128 --lr 4e-3 --update_freq 4 \
+        --model_ema true --model_ema_eval true \
+        --data_path "$IMNET_DATA" \
+        --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu" \
+        --use_amp true --auto_resume true \
+        --enable_wandb true --project nelu \
+        --torch_compile true \
+        --act nelu) \
+        2>&1 | tee logs/imnet_convnext_t_nelu.log || \
+        echo "[WARN] ConvNeXt-T NELU train failed — continuing"
+fi
+
+# ─────────── Phase 4: EfficientNet-B2 (timm/train.py) ────────────
+echo -e "\n═══ Phase 4: ImageNet EfficientNet-B2 (SiLU vs NiLU) ═══"
+imnet_eval_baseline efficientnet_b2.ra_in1k imnet_effnet_b2_silu_eval
+
+if ! skip_if_done "results/imagenet/efficientnet_b2_nilu/result.json"; then
+    echo "[$(date +%H:%M)] EfficientNet-B2 NiLU from scratch (timm/train.py)"
+    # Wightman B2 RA recipe (from hfdocs/source/training_script.mdx).
+    # Original: -b 128 × 2 GPU = 256 effective at lr 0.016.
+    # We use 8 GPU × -b 128 = 1024 effective with linearly scaled lr 0.064
+    # (matches Wightman's B0 scaling: 3× effective batch ⇒ 3× lr).
+    torchrun --nproc_per_node=8 experiments/train_imagenet_timm.py \
+        --our-act nilu \
+        "$IMNET_DATA" \
+        --model efficientnet_b2 -b 128 \
+        --sched step --epochs 450 --decay-epochs 2.4 --decay-rate .97 \
+        --opt rmsproptf --opt-eps .001 -j 8 \
+        --warmup-lr 1e-6 --warmup-epochs 5 --weight-decay 1e-5 \
+        --drop 0.3 --drop-path 0.2 \
+        --model-ema --model-ema-decay 0.9999 \
+        --aa rand-m9-mstd0.5 --remode pixel --reprob 0.2 \
+        --amp --amp-dtype float16 --lr .064 \
+        --torchcompile inductor \
+        --output "$RESACT_DIR/results/imagenet/efficientnet_b2_nilu" \
+        --experiment efficientnet_b2_nilu \
+        --log-wandb --wandb-project nelu --wandb-tags imagenet effnet \
+        2>&1 | tee logs/imnet_effnet_b2_nilu.log || \
+        echo "[WARN] EfficientNet-B2 NiLU train failed — continuing"
+fi
+
+# ─────────── Phase 5: DeiT-III ViT-B (FB deit main.py) ───────────
+echo -e "\n═══ Phase 5: ImageNet DeiT-III ViT-B (GELU vs NELU) ═══"
+imnet_eval_baseline deit3_base_patch16_224.fb_in1k imnet_deit3_b_gelu_eval
 
 if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
-    echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch"
-    $IMNET --model deit3_base --act nelu --data $IMNET_DATA $C \
-        2>&1 | tee logs/imnet_b_nelu.log || \
-        echo "[WARN] ViT-B NELU train failed — continuing"
+    echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch (FB deit main.py)"
+    # README_revenge ImageNet-1k pretraining cmd (line 412 of README_revenge.md).
+    (cd "$DEIT_DIR" && \
+     torchrun --nproc_per_node=8 main.py \
+        --model deit_base_patch16_LS \
+        --data-path "$IMNET_DATA" \
+        --output_dir "$RESACT_DIR/results/imagenet/deit3_base_nelu" \
+        --batch 256 --lr 3e-3 --epochs 800 --weight-decay 0.05 \
+        --sched cosine --input-size 192 --eval-crop-ratio 1.0 \
+        --reprob 0.0 --smoothing 0.0 --warmup-epochs 5 \
+        --drop 0.0 --nb-classes 1000 --seed 0 \
+        --opt fusedlamb --warmup-lr 1e-6 \
+        --mixup .8 --drop-path 0.2 --cutmix 1.0 \
+        --unscale-lr --repeated-aug --bce-loss \
+        --color-jitter 0.3 --ThreeAugment \
+        --torch-compile \
+        --act nelu) \
+        2>&1 | tee logs/imnet_deit3_b_nelu.log || \
+        echo "[WARN] DeiT-III ViT-B NELU train failed — continuing"
 fi
 
 # ─────────────────────────────────────────────────────────────
-# Phase 4: ImageNet DeiT-III ViT-L (DDP)
+# Phase 6: ImageNet-C eval (timm baseline pretrained vs trained ours)
+# All 3 models evaluated with DataParallel across 8 GPUs.
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 4: ImageNet DeiT-III ViT-L ═══"
-python experiments/train_imagenet.py --model deit3_large --act gelu \
-    --data $IMNET_DATA --eval-only \
-    2>&1 | tee logs/imnet_l_gelu_eval.log || \
-    echo "[WARN] ViT-L GELU eval failed — continuing"
-
-if ! skip_if_done "results/imagenet/deit3_large_nelu/result.json"; then
-    echo "[$(date +%H:%M)] DeiT-III ViT-L NELU from scratch"
-    $IMNET --model deit3_large --act nelu --data $IMNET_DATA $C \
-        2>&1 | tee logs/imnet_l_nelu.log || \
-        echo "[WARN] ViT-L NELU train failed — continuing"
-fi
-
-# ─────────────────────────────────────────────────────────────
-# Phase 5: ImageNet-C eval (timm GELU pretrained vs trained NELU)
-#
-# Done BEFORE the long GPT-2 LM phase so the OOD tables are
-# available to inspect while LM is still running. Each model
-# eval is dispatched per-corruption to slot pool internally,
-# using all 8 GPUs in DataParallel-style sharding.
-# ─────────────────────────────────────────────────────────────
-
-echo -e "\n═══ Phase 5: ImageNet-C eval ═══"
-for model in deit3_base deit3_large; do
-    NELU_CKPT="results/imagenet/${model}_nelu/best.pt"
-    if [ ! -f "$NELU_CKPT" ]; then
-        echo "  SKIP $model: NELU checkpoint not found ($NELU_CKPT)"
+echo -e "\n═══ Phase 6: ImageNet-C eval ═══"
+declare -A IMNET_C_OURS=(
+    [convnext_tiny]=nelu
+    [efficientnet_b2]=nilu
+    [deit3_base]=nelu
+)
+for model in convnext_tiny efficientnet_b2 deit3_base; do
+    our="${IMNET_C_OURS[$model]}"
+    OUR_CKPT="results/imagenet/${model}_${our}/best.pt"
+    if [ ! -f "$OUR_CKPT" ]; then
+        echo "  SKIP $model: ${our} checkpoint not found ($OUR_CKPT)"
         continue
     fi
-    echo "[$(date +%H:%M)] ImageNet-C eval: $model"
+    echo "[$(date +%H:%M)] ImageNet-C eval: $model (baseline vs $our)"
     python experiments/eval_imagenet_c.py \
-        --model $model \
+        --model "$model" \
         --data /data/ImageNet-C \
-        --gelu-pretrained \
-        --nelu-ckpt "$NELU_CKPT" \
+        --baseline-pretrained \
+        --our-act "$our" \
+        --our-ckpt "$OUR_CKPT" \
         --wandb \
-        2>&1 | tee logs/imnet_c_${model}.log || \
+        2>&1 | tee "logs/imnet_c_${model}.log" || \
         echo "[WARN] ImageNet-C eval $model failed — continuing"
 done
 
 # ─────────────────────────────────────────────────────────────
-# Phase 6: GPT-2 LM on FineWeb-Edu 10B (DDP, ~24h)
+# Phase 7: COCO Det/Seg — Mask R-CNN + ConvNeXt-T  (1× × 2)
+#   Backbone init: GELU = timm pretrained, NELU = our Phase 3 ckpt
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 6: GPT-2 LM ═══"
-for size in small medium large; do
-    for act in gelu nelu; do
-        RESULT="results/lm/${size}_${act}/result.json"
-        skip_if_done "$RESULT" && continue
-        echo "[$(date +%H:%M)] GPT-2 $size $act (auto-resume from last.pt if present)"
-        $LM --size $size --act $act --wandb --compile \
-            2>&1 | tee logs/lm_${size}_${act}.log || \
-            echo "[WARN] LM $size $act failed — continuing"
-    done
+echo -e "\n═══ Phase 7: COCO Mask R-CNN + ConvNeXt-T ═══"
+for act in gelu nelu; do
+    RESULT="results/coco/maskrcnn_convnext_tiny_${act}/result.json"
+    skip_if_done "$RESULT" && continue
+    if [ "$act" = "nelu" ]; then
+        BACKBONE_CKPT="results/imagenet/convnext_tiny_nelu/best.pt"
+        if [ ! -f "$BACKBONE_CKPT" ]; then
+            echo "  SKIP coco nelu: missing backbone ($BACKBONE_CKPT)"
+            continue
+        fi
+        BACKBONE_ARG="--backbone-ckpt $BACKBONE_CKPT"
+    else
+        BACKBONE_ARG=""
+    fi
+    echo "[$(date +%H:%M)] COCO Mask R-CNN ConvNeXt-T $act"
+    torchrun --nproc_per_node=8 experiments/train_coco_maskrcnn.py \
+        --backbone convnext_tiny --act "$act" \
+        --data $COCO_DATA --schedule 1x --wandb \
+        $BACKBONE_ARG \
+        2>&1 | tee "logs/coco_maskrcnn_convnext_tiny_${act}.log" || \
+        echo "[WARN] COCO $act failed — continuing"
 done
 
 echo -e "\n═══════════════════════════════════════════════════════════"

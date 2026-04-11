@@ -11,19 +11,13 @@ The 4 "extra" corruptions (gaussian_blur, saturate, spatter,
 speckle_noise) are also evaluated and reported separately.
 
 Usage:
-    # Single model (timm pretrained name OR local checkpoint)
+    # Compare timm pretrained baseline vs our trained variant
     python experiments/eval_imagenet_c.py \
-        --model deit3_base \
-        --act gelu \
-        --data /data/ImageNet-C
-
-    # Compare GELU baseline vs trained NELU
-    python experiments/eval_imagenet_c.py \
-        --model deit3_base \
-        --gelu-pretrained \
-        --nelu-ckpt results/imagenet/deit3_base_nelu/best.pt \
-        --data /data/ImageNet-C \
-        --wandb
+        --model convnext_tiny \
+        --baseline-pretrained \
+        --our-act nelu \
+        --our-ckpt results/imagenet/convnext_tiny_nelu/best.pt \
+        --data /data/ImageNet-C --wandb
 """
 
 import argparse
@@ -41,8 +35,16 @@ from torchvision import datasets, transforms
 import timm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nelu import NELU
-from nelu.cuda_kernel import NELUCUDA
+from nelu import NELU, NiLU, NELUCUDA, NiLUCUDA
+
+_NELU_CLS = NELUCUDA if NELUCUDA is not None else NELU
+_NILU_CLS = NiLUCUDA if NiLUCUDA is not None else NiLU
+_ACT_CLS = {
+    "gelu": nn.GELU,
+    "silu": nn.SiLU,
+    "nelu": _NELU_CLS,
+    "nilu": _NILU_CLS,
+}
 
 # ── Config ─────────────────────────────────────────────────────────
 
@@ -80,51 +82,61 @@ IMAGENET_STD  = (0.229, 0.224, 0.225)
 
 # Model configs (matching train_imagenet.py)
 MODEL_CFGS = {
+    "convnext_tiny": {
+        "timm_pretrained": "convnext_tiny.fb_in1k",
+        "timm_name":       "convnext_tiny",
+        "baseline_act":    "gelu",
+        "eval_size":       224,
+        "crop_pct":        0.875,
+    },
+    "efficientnet_b2": {
+        "timm_pretrained": "efficientnet_b2.ra_in1k",
+        "timm_name":       "efficientnet_b2",
+        "baseline_act":    "silu",
+        "eval_size":       288,
+        "crop_pct":        1.0,
+    },
     "deit3_base": {
         "timm_pretrained": "deit3_base_patch16_224.fb_in1k",
         "timm_name":       "deit3_base_patch16_224",
-    },
-    "deit3_large": {
-        "timm_pretrained": "deit3_large_patch16_224.fb_in1k",
-        "timm_name":       "deit3_large_patch16_224",
+        "baseline_act":    "gelu",
+        "eval_size":       224,
+        "crop_pct":        1.0,
     },
 }
 
 
 # ── Activation replacement (must match training) ──────────────────
 
-def replace_act(model, act_name):
-    """Replace all GELU modules with the requested activation."""
-    if act_name == "gelu":
+def replace_act(model, baseline_act, our_act):
+    """Replace every instance of `baseline_act` with `our_act`."""
+    if our_act == baseline_act:
         return model
-    if act_name == "nelu":
-        new_act = NELU
-    else:
-        raise ValueError(f"Unknown act: {act_name}")
-
-    def _replace(parent):
-        for name, child in parent.named_children():
-            if isinstance(child, nn.GELU):
-                setattr(parent, name, new_act())
-            else:
-                _replace(child)
-
-    _replace(model)
+    src_cls = _ACT_CLS[baseline_act]
+    dst_cls = _ACT_CLS[our_act]
+    for name, child in model.named_children():
+        if isinstance(child, src_cls):
+            setattr(model, name, dst_cls())
+        else:
+            replace_act(child, baseline_act, our_act)
     return model
 
 
 # ── Data loader ────────────────────────────────────────────────────
 
-def make_loader(corruption_dir, batch_size, num_workers, persistent=True):
+def make_loader(corruption_dir, batch_size, num_workers,
+                eval_size=224, crop_pct=0.875, persistent=True):
     """Build a loader for one (corruption, severity) directory.
     Expected layout: corruption_dir/<class>/*.JPEG
 
-    Inference-friendly defaults: large batch (split across GPUs by
-    DataParallel), many workers, persistent across calls inside one
-    eval to avoid re-spawning."""
+    eval_size + crop_pct come from each model's cfg so B3 (300/1.0)
+    and DeiT-III (224/1.0) and ConvNeXt-T (224/0.875) all match the
+    resolution they were trained at."""
+    resize_to = int(round(eval_size / crop_pct))
     transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.Resize(resize_to,
+            interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(eval_size),
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
@@ -171,7 +183,8 @@ def find_corruption_dir(root, corruption, severity):
     return None
 
 
-def evaluate_model(model, root, corruptions, batch_size, num_workers, device):
+def evaluate_model(model, root, corruptions, batch_size, num_workers, device,
+                   eval_size=224, crop_pct=0.875):
     """Returns: {corruption: {1..5: err, "mean": mean_err}, ...}"""
     results = {}
     for corruption in corruptions:
@@ -181,7 +194,8 @@ def evaluate_model(model, root, corruptions, batch_size, num_workers, device):
             if cdir is None:
                 print(f"  WARN: missing {corruption}/{severity}")
                 continue
-            loader = make_loader(cdir, batch_size, num_workers)
+            loader = make_loader(cdir, batch_size, num_workers,
+                                 eval_size=eval_size, crop_pct=crop_pct)
             t0 = time.time()
             err = eval_loader(model, loader, device)
             dt = time.time() - t0
@@ -208,17 +222,17 @@ def compute_mce(results):
 
 # ── Model loading ──────────────────────────────────────────────────
 
-def load_model(model_name, act, ckpt_path, device, gelu_pretrained=False,
+def load_model(model_name, act, ckpt_path, device, baseline_pretrained=False,
                multi_gpu=True):
     cfg = MODEL_CFGS[model_name]
-    if act == "gelu" and gelu_pretrained:
-        # Use timm's pretrained ImageNet weights
+    baseline_act = cfg["baseline_act"]
+    if act == baseline_act and baseline_pretrained:
         model = timm.create_model(cfg["timm_pretrained"], pretrained=True,
                                   num_classes=1000)
     else:
         model = timm.create_model(cfg["timm_name"], pretrained=False,
                                   num_classes=1000)
-        model = replace_act(model, act)
+        model = replace_act(model, baseline_act, act)
         if ckpt_path is not None:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             state = ckpt.get("model", ckpt.get("state_dict", ckpt))
@@ -231,7 +245,6 @@ def load_model(model_name, act, ckpt_path, device, gelu_pretrained=False,
                 print(f"  unexpected: {len(unexpected)} (first: {unexpected[:3]})")
     model = model.to(device)
     model.eval()
-    # Wrap with DataParallel for inference across all visible GPUs.
     n_gpu = torch.cuda.device_count()
     if multi_gpu and n_gpu > 1:
         model = nn.DataParallel(model, device_ids=list(range(n_gpu)))
@@ -243,7 +256,7 @@ def load_model(model_name, act, ckpt_path, device, gelu_pretrained=False,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="deit3_base",
+    p.add_argument("--model", default="convnext_tiny",
                    choices=list(MODEL_CFGS.keys()))
     p.add_argument("--data", default="/data/ImageNet-C",
                    help="Root of ImageNet-C corruptions")
@@ -255,34 +268,41 @@ def main():
     p.add_argument("--include-extra", action="store_true",
                    help="Also evaluate the 4 extra corruptions")
     # Single model
-    p.add_argument("--act", default=None, choices=["gelu", "nelu"])
+    p.add_argument("--act", default=None,
+                   choices=["gelu", "silu", "nelu", "nilu"])
     p.add_argument("--checkpoint", default=None)
-    # Comparison: GELU baseline vs trained NELU
-    p.add_argument("--gelu-pretrained", action="store_true",
-                   help="Use timm's pretrained GELU weights as baseline")
-    p.add_argument("--nelu-ckpt", default=None,
-                   help="Trained NELU checkpoint to compare")
-    p.add_argument("--gelu-ckpt", default=None,
-                   help="Trained GELU checkpoint (overrides --gelu-pretrained)")
+    # Comparison: timm pretrained baseline vs our trained variant
+    p.add_argument("--baseline-pretrained", action="store_true",
+                   help="Use timm pretrained weights for the baseline activation")
+    p.add_argument("--baseline-ckpt", default=None,
+                   help="Trained baseline checkpoint (overrides --baseline-pretrained)")
+    p.add_argument("--our-act", default=None,
+                   choices=["nelu", "nilu"],
+                   help="Our activation (defaults: gelu→nelu, silu→nilu)")
+    p.add_argument("--our-ckpt", default=None,
+                   help="Trained checkpoint for our variant")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--output", default=None,
                    help="Output JSON path (default: results/ood_imagenet_c.json)")
     args = p.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    cfg = MODEL_CFGS[args.model]
+    baseline_act = cfg["baseline_act"]
+    if args.our_act is None:
+        args.our_act = "nelu" if baseline_act == "gelu" else "nilu"
 
     # Decide which models to evaluate
     runs = []
     if args.act and args.checkpoint:
         runs.append((args.act.upper(), args.act, args.checkpoint, False))
-    if args.gelu_pretrained or args.gelu_ckpt:
-        runs.append(("GELU", "gelu", args.gelu_ckpt,
-                     args.gelu_ckpt is None))
-    if args.nelu_ckpt:
-        runs.append(("NELU", "nelu", args.nelu_ckpt, False))
+    if args.baseline_pretrained or args.baseline_ckpt:
+        runs.append((baseline_act.upper(), baseline_act, args.baseline_ckpt,
+                     args.baseline_ckpt is None))
+    if args.our_ckpt:
+        runs.append((args.our_act.upper(), args.our_act, args.our_ckpt, False))
     if not runs:
-        # Default: assume timm GELU pretrained as the baseline
-        runs.append(("GELU", "gelu", None, True))
+        runs.append((baseline_act.upper(), baseline_act, None, True))
 
     corruptions = MAIN_CORRUPTIONS + (EXTRA_CORRUPTIONS if args.include_extra else [])
 
@@ -304,14 +324,16 @@ def main():
         print(f"  {name}  (model={args.model}, ckpt={ckpt or 'timm pretrained'})")
         print(f"{'='*60}")
         model = load_model(args.model, act, ckpt, device,
-                           gelu_pretrained=use_pretrained,
+                           baseline_pretrained=use_pretrained,
                            multi_gpu=not args.single_gpu)
         # When wrapped in DataParallel, .parameters() still works.
         n_params = sum(p.numel() for p in model.parameters()) / 1e6
         print(f"  params: {n_params:.1f}M")
 
         results = evaluate_model(model, args.data, corruptions,
-                                 args.batch_size, args.num_workers, device)
+                                 args.batch_size, args.num_workers, device,
+                                 eval_size=cfg["eval_size"],
+                                 crop_pct=cfg["crop_pct"])
         mce = compute_mce(results)
         results["mCE"] = mce
         results["mean_error"] = float(
