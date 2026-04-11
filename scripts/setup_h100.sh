@@ -136,15 +136,15 @@ fi
 
 
 # ─── 5: Clear torch_extensions cache ─────────────────────────────
-hdr "[4/8] Clearing torch_extensions cache (forces NELU/NiLU recompile)"
-EXT_DIR="$HOME/.cache/torch_extensions"
-if [ -d "$EXT_DIR" ]; then
-    for sub in "$EXT_DIR"/*/nelu_cuda "$EXT_DIR"/*/nilu_cuda; do
-        [ -e "$sub" ] && rm -rf "$sub" && ok "removed $sub"
-    done
-else
-    ok "no extension cache yet (clean machine)"
-fi
+# hdr "[4/8] Clearing torch_extensions cache (forces NELU/NiLU recompile)"
+# EXT_DIR="$HOME/.cache/torch_extensions"
+# if [ -d "$EXT_DIR" ]; then
+#     for sub in "$EXT_DIR"/*/nelu_cuda "$EXT_DIR"/*/nilu_cuda; do
+#         [ -e "$sub" ] && rm -rf "$sub" && ok "removed $sub"
+#     done
+# else
+#     ok "no extension cache yet (clean machine)"
+# fi
 
 
 # ─── 6: Smoke test the kernels ───────────────────────────────────
