@@ -290,14 +290,14 @@ done
 # means depthwise) — only the PW activation differs.
 #
 # 4 variants × 2 seeds = 8 jobs. ~25 min wall-clock via the slot pool.
-# for variant in nelu_hw nelu_c nelu_hybrid nelu_hybrid_hwc; do
-#     for seed in 42 123; do
-#         RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s${seed}.json"
-#         skip_if_done "$RESULT" && continue
-#         slot_run "rmsaxis_mobilenetv2_${variant}_s${seed}" \
-#             "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed $seed --amp --compile --wandb"
-#     done
-# done
+for variant in nelu_hw nelu_c nelu_hybrid nelu_hybrid_hwc; do
+    for seed in 42 123; do
+        RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s${seed}.json"
+        skip_if_done "$RESULT" && continue
+        slot_run "rmsaxis_mobilenetv2_${variant}_s${seed}" \
+            "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed $seed --amp --compile --wandb"
+    done
+done
 
 echo -e "\n[$(date +%H:%M)] Phase 1 fully queued — draining..."
 slot_drain
