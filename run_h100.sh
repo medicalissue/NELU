@@ -282,12 +282,12 @@ done
 # CHW = default `nelu` and is already in Phase 1a's main grid as
 #   results/main_mobilenetv2_cifar100_nelu_s42.json
 # Only HW and C variants need to be run here.
-for variant in nelu_hw nelu_c; do
-    RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s42.json"
-    skip_if_done "$RESULT" && continue
-    slot_run "rmsaxis_mobilenetv2_${variant}_s42" \
-        "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed 42 --amp --compile --wandb"
-done
+# for variant in nelu_hw nelu_c; do
+#     RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s42.json"
+#     skip_if_done "$RESULT" && continue
+#     slot_run "rmsaxis_mobilenetv2_${variant}_s42" \
+#         "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed 42 --amp --compile --wandb"
+# done
 
 echo -e "\n[$(date +%H:%M)] Phase 1 fully queued — draining..."
 slot_drain
@@ -357,11 +357,19 @@ python experiments/eval_ood.py --aggregate-only 2>&1 | tee logs/phase2_ood_agg.l
 # Drained sequentially — each occupies all 8 GPUs via DDP.
 # ─────────────────────────────────────────────────────────────
 
-CONVNEXT_DIR=/home/ubuntu/convnext-train
-DEIT_DIR=/home/ubuntu/deit-train
-TIMM_TRAIN_PY=/home/ubuntu/NELU/timm-train/train.py
+# All path locations are env-overridable so the same script runs on
+# any machine. Defaults: external repos as siblings of ResAct; timm-train
+# searched both in-tree (ResAct/timm-train) and as sibling.
+RESACT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONVNEXT_DIR="${CONVNEXT_DIR:-$RESACT_DIR/../convnext-train}"
+DEIT_DIR="${DEIT_DIR:-$RESACT_DIR/../deit-train}"
+if [ -z "${TIMM_TRAIN_PY:-}" ]; then
+    for _c in "$RESACT_DIR/timm-train/train.py" "$RESACT_DIR/../timm-train/train.py"; do
+        [ -f "$_c" ] && TIMM_TRAIN_PY="$_c" && break
+    done
+fi
+[ -f "$RESACT_DIR/.timm_train_py.env" ] && source "$RESACT_DIR/.timm_train_py.env"
 export TIMM_TRAIN_PY
-RESACT_DIR=/home/ubuntu/ResAct
 
 # Baseline pretrained ImageNet eval — just `python -c` against timm.
 # We don't need a full DDP launch for inference; one GPU is enough.

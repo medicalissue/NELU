@@ -30,8 +30,11 @@ set -u
 
 RESACT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PATCH_DIR="$RESACT_DIR/patches"
-DEIT_DIR="${DEIT_DIR:-/home/ubuntu/deit-train}"
-CONVNEXT_DIR="${CONVNEXT_DIR:-/home/ubuntu/convnext-train}"
+# Default external repo locations: SIBLING dirs of ResAct. So if ResAct
+# lives at /home/ubuntu/NELU/ResAct, externals land at /home/ubuntu/NELU/
+# {deit-train,convnext-train,timm-train}. Override with env vars if needed.
+DEIT_DIR="${DEIT_DIR:-$RESACT_DIR/../deit-train}"
+CONVNEXT_DIR="${CONVNEXT_DIR:-$RESACT_DIR/../convnext-train}"
 
 DEIT_COMMIT="7e160fe43f0252d17191b71cbb5826254114ea5b"
 CONVNEXT_COMMIT="048efcea897d999aed302f2639b6270aedf8d4c8"
@@ -87,18 +90,22 @@ clone_and_patch "$CONVNEXT_DIR" "$CONVNEXT_URL" "$CONVNEXT_COMMIT" "$PATCH_DIR/c
 hdr "[2/8] Locating Wightman timm-train"
 TIMM_TRAIN_PY="${TIMM_TRAIN_PY:-}"
 if [ -z "$TIMM_TRAIN_PY" ]; then
-    for c in /home/ubuntu/NELU/timm-train/train.py \
+    # Search: in-tree first (ResAct/timm-train), then sibling, then legacy locations.
+    for c in "$RESACT_DIR/timm-train/train.py" \
+             "$RESACT_DIR/../timm-train/train.py" \
+             /home/ubuntu/NELU/timm-train/train.py \
              /home/ubuntu/timm-train/train.py \
              /home/ubuntu/pytorch-image-models/train.py ; do
         if [ -f "$c" ]; then
-            TIMM_TRAIN_PY="$c"; break
+            TIMM_TRAIN_PY="$(cd "$(dirname "$c")" && pwd)/train.py"; break
         fi
     done
 fi
 if [ -z "$TIMM_TRAIN_PY" ] || [ ! -f "$TIMM_TRAIN_PY" ]; then
     warn "timm-train/train.py not found locally."
     warn "  Phase 4 (efficientnet_b2) needs this. Clone it via:"
-    warn "    git clone https://github.com/huggingface/pytorch-image-models /home/ubuntu/NELU/timm-train"
+    warn "    git clone https://github.com/huggingface/pytorch-image-models \\"
+    warn "        $RESACT_DIR/timm-train"
     warn "  then re-run this script (or set TIMM_TRAIN_PY manually)."
 else
     ok "timm-train at $TIMM_TRAIN_PY"
