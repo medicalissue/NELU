@@ -393,11 +393,15 @@ imnet_eval_baseline convnext_tiny.fb_in1k imnet_convnext_t_gelu_eval
 
 if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
     echo "[$(date +%H:%M)] ConvNeXt-T NELU from scratch (FB ConvNeXt main.py)"
+    # Effective batch = 8 GPU × 512 × 1 = 4096 (canonical recipe).
+    # Original FB cmd was 8 GPU × 128 × 4=4096; we drop grad-accum so the
+    # 4 forward/backward+sync passes per step collapse to 1, ~4x faster
+    # per step. Memory: ~40 GB / 80 GB on H100.
     (cd "$CONVNEXT_DIR" && \
      PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
      torchrun --nproc_per_node=8 main.py \
         --model convnext_tiny --drop_path 0.1 \
-        --batch_size 128 --lr 4e-3 --update_freq 4 \
+        --batch_size 512 --lr 4e-3 --update_freq 1 \
         --model_ema true --model_ema_eval true \
         --data_path "$IMNET_DATA" \
         --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu" \
@@ -424,7 +428,7 @@ if ! skip_if_done "results/imagenet/efficientnet_b2_nilu/result.json"; then
         "$IMNET_DATA" \
         --model efficientnet_b2 -b 128 \
         --sched step --epochs 450 --decay-epochs 2.4 --decay-rate .97 \
-        --opt rmsproptf --opt-eps .001 -j 8 \
+        --opt rmsproptf --opt-eps .001 -j 10 \
         --warmup-lr 1e-6 --warmup-epochs 5 --weight-decay 1e-5 \
         --drop 0.3 --drop-path 0.2 \
         --model-ema --model-ema-decay 0.9999 \
