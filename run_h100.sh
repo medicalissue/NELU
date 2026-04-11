@@ -259,7 +259,7 @@ slot_init
 # ─────────────────────────────────────────────────────────────
 
 echo -e "\n═══ Phase 2b: Ablation (parallel) ═══"
-ABLATION_VARIANTS=(gelu nelu nelu_no_sg nelu_dim_w nelu_dim_c nelu_dim_hw nelu_dim_chw learnable_tau gelu_wd2)
+ABLATION_VARIANTS=(nelu_no_sg nelu_dim_w nelu_dim_c nelu_dim_hw nelu_dim_chw learnable_tau gelu_wd2)
 for variant in "${ABLATION_VARIANTS[@]}"; do
     for seed in "${SEEDS[@]}"; do
         RESULT="results/ablation_${variant}_s${seed}.json"
