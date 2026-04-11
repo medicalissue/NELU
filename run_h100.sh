@@ -228,17 +228,17 @@ slot_init
 # Phase 1b: CIFAR-10 CNN (7 arch × 3 act × 3 seeds = 63 jobs)
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 1b: CIFAR-10 ═══"
-for seed in "${SEEDS[@]}"; do
-    for arch in "${CNN_ARCHS[@]}"; do
-        for act in relu gelu nelu; do
-            skip_if_done "$(cifar_result $arch cifar10 $act $seed)" && continue
-            slot_run "cifar10_${arch}_${act}_s${seed}" \
-                "$CIFAR --arch $arch --dataset cifar10 --act $act --seed $seed $C"
-        done
-    done
-done
-slot_drain
+# echo -e "\n═══ Phase 1b: CIFAR-10 ═══"
+# for seed in "${SEEDS[@]}"; do
+#     for arch in "${CNN_ARCHS[@]}"; do
+#         for act in relu gelu nelu; do
+#             skip_if_done "$(cifar_result $arch cifar10 $act $seed)" && continue
+#             slot_run "cifar10_${arch}_${act}_s${seed}" \
+#                 "$CIFAR --arch $arch --dataset cifar10 --act $act --seed $seed $C"
+#         done
+#     done
+# done
+# slot_drain
 
 # ─────────────────────────────────────────────────────────────
 # Phase 2a: LR sensitivity (ResNet-20 CIFAR-100, single seed)
