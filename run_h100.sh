@@ -4,12 +4,13 @@
 #
 #  Estimated total: ~3-4 days
 #
-#  Phase 1: CIFAR CNN (7 archs × 3 acts × 3 seeds × 2 datasets) ~8-15h
-#  Phase 2: LR sensitivity + Ablation (parallel) + OOD eval     ~3h
-#  Phase 3: ImageNet DeiT-III ViT-B (NELU from scratch)         ~10h
-#  Phase 4: ImageNet DeiT-III ViT-L (NELU from scratch)         ~36h
-#  Phase 5: GPT-2 LM (Small+Medium+Large, GELU+NELU)            ~24h
-#  Phase 6: ImageNet-C eval (mCE)                                ~2h
+#  Phase 1: CIFAR training — main + LR sweep + ablation
+#           (combined queue, LPT-ordered)                       ~8-12h
+#  Phase 2: OOD eval on CIFAR-100-C (per-ckpt parallel)          ~10min
+#  Phase 3: ImageNet DeiT-III ViT-B (NELU from scratch, DDP)    ~10h
+#  Phase 4: ImageNet DeiT-III ViT-L (NELU from scratch, DDP)    ~36h
+#  Phase 5: ImageNet-C eval (mCE)                                ~30min
+#  Phase 6: GPT-2 LM (Small+Medium+Large, GELU+NELU, DDP)       ~24h
 #
 #  Pre-flight:
 #    - `wandb login`  (required, --wandb is on for all runs)
@@ -199,26 +200,40 @@ cifar_result() {
 }
 
 SEEDS=(42 123 456)
-CNN_ARCHS=(resnet20 resnet56 resnet110 wrn28_10 densenet100 mobilenetv2 shufflenetv1)
+
+# Longest-Processing-Time (LPT) order: largest archs first so that
+# they don't end up at the tail of the schedule. With FIFO slot pool
+# this gives near-optimal makespan. Order roughly tracks per-job
+# wall-clock from earlier runs.
+CNN_ARCHS_LPT=(densenet100 wrn28_10 resnet110 mobilenetv2 shufflenetv1 resnet56 resnet20)
+
+ABLATION_VARIANTS=(nelu_dim_w nelu_dim_c nelu_dim_hw learnable_tau gelu_wd2)
 
 echo "═══════════════════════════════════════════════════════════"
 echo "  NELU — $(date)"
 echo "═══════════════════════════════════════════════════════════"
 
-# Initialize the GPU slot pool for phases that use single-GPU jobs
+# Initialize the GPU slot pool for all single-GPU phases
 slot_init
 
 # ─────────────────────────────────────────────────────────────
-# Phase 1a: CIFAR-100 CNN  (NELU is now NoSG — see nelu/activations.py)
-# 7 archs × 3 acts × 3 seeds = 63 jobs
-# Already-trained entries are auto-skipped by skip_if_done. On this
-# rerun we only retrain the NELU variants whose local result files
-# were deleted during the SG→NoSG migration (5 archs).
+# Phase 1: CIFAR training — combined queue (no per-sub-phase drain)
+#
+# Three groups of single-GPU jobs are queued into ONE FIFO pool:
+#   1a. Main CIFAR-100  (7 archs × 3 acts × 3 seeds = 63 jobs)
+#   1b. LR sensitivity  (resnet20 × 5 LRs × 3 acts = 15 jobs)
+#   1c. Ablation        (resnet20 × 5 variants × 3 seeds = 15 jobs)
+#
+# Single drain at the end: idle gaps between sub-phases vanish, and
+# the smaller LR/ablation jobs naturally fill the tail of the larger
+# CIFAR jobs. Largest archs queued first (LPT) to minimize makespan.
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 1a: CIFAR-100 CNN ═══"
-for seed in "${SEEDS[@]}"; do
-    for arch in "${CNN_ARCHS[@]}"; do
+echo -e "\n═══ Phase 1: CIFAR training (combined queue, ~108 jobs) ═══"
+
+# 1a. Main CIFAR-100, longest archs first
+for arch in "${CNN_ARCHS_LPT[@]}"; do
+    for seed in "${SEEDS[@]}"; do
         for act in relu gelu nelu; do
             skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
             slot_run "cifar100_${arch}_${act}_s${seed}" \
@@ -226,40 +241,8 @@ for seed in "${SEEDS[@]}"; do
         done
     done
 done
-slot_drain
 
-# CIFAR-10 phase removed — we focus on CIFAR-100 only.
-
-# ─────────────────────────────────────────────────────────────
-# Phase 2a: OOD eval on CIFAR-100-C (one job per checkpoint, 8 GPUs)
-# Dispatches each best.pt through slot_run so the 63 per-ckpt
-# evals run in parallel. After all finish, one aggregate pass
-# computes mean ± std across the 3 seeds per (arch, act).
-# ─────────────────────────────────────────────────────────────
-
-echo -e "\n═══ Phase 2a: OOD eval (CIFAR-100-C, parallel) ═══"
-for f in results/checkpoints/*_cifar100_*_best.pt; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f" _best.pt)
-    cache="results/ood/${name}.json"
-    if [ -f "$cache" ]; then
-        echo "  SKIP (cached): $name"
-        continue
-    fi
-    slot_run "ood_${name}" \
-        "python experiments/eval_ood.py --checkpoint \"$f\""
-done
-slot_drain
-
-# Aggregate: load all cached per-ckpt results + compute mean ± std
-python experiments/eval_ood.py --aggregate-only 2>&1 | tee logs/phase2a_ood_agg.log || \
-    echo "[WARN] OOD aggregation failed — continuing"
-
-# ─────────────────────────────────────────────────────────────
-# Phase 2b: LR sensitivity (ResNet-20 CIFAR-100, single seed)
-# ─────────────────────────────────────────────────────────────
-
-echo -e "\n═══ Phase 2b: LR sensitivity ═══"
+# 1b. LR sensitivity sweep (resnet20)
 for lr in 0.01 0.05 0.1 0.2 0.5; do
     for act in relu gelu nelu; do
         skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
@@ -267,17 +250,8 @@ for lr in 0.01 0.05 0.1 0.2 0.5; do
             "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"
     done
 done
-slot_drain
 
-# ─────────────────────────────────────────────────────────────
-# Phase 2c: Ablation  (ResNet-20 CIFAR-100, 3 seeds each)
-# NELU is now defined as NoSG; we no longer include "nelu_no_sg" or
-# any SG variants in the ablation. Remaining variants probe the RMS
-# reduction axis, a learnable temperature, and a GELU wd × 2 control.
-# ─────────────────────────────────────────────────────────────
-
-echo -e "\n═══ Phase 2c: Ablation (parallel) ═══"
-ABLATION_VARIANTS=(nelu_dim_w nelu_dim_c nelu_dim_hw learnable_tau gelu_wd2)
+# 1c. Ablation (resnet20 variants)
 for variant in "${ABLATION_VARIANTS[@]}"; do
     for seed in "${SEEDS[@]}"; do
         RESULT="results/ablation_${variant}_s${seed}.json"
@@ -286,10 +260,13 @@ for variant in "${ABLATION_VARIANTS[@]}"; do
             "python experiments/ablation_full.py --variant $variant --seeds $seed --amp --compile --wandb"
     done
 done
-slot_drain
 
-# Aggregate per-run JSONs into the combined ablation_full.json
-python - <<'PY' || echo "[WARN] aggregation failed"
+echo -e "\n[$(date +%H:%M)] Phase 1 fully queued — draining..."
+slot_drain
+echo "[$(date +%H:%M)] Phase 1 complete."
+
+# Aggregate ablation runs (post-processing only)
+python - <<'PY' || echo "[WARN] ablation aggregation failed"
 import json, glob, os, numpy as np
 results = {}
 for f in glob.glob("results/ablation_*_s*.json"):
@@ -306,6 +283,29 @@ print(f"  aggregated {len(results)} variants → results/ablation_full.json")
 for v, r in sorted(agg.items(), key=lambda x: -x[1]["mean"]):
     print(f"    {v:<16} {r['mean']:>6.2f} ± {r['std']:.2f}")
 PY
+
+# ─────────────────────────────────────────────────────────────
+# Phase 2: OOD eval on CIFAR-100-C (per-ckpt parallel via slot pool)
+# Tiny inference jobs (~5-15 s each) — totally fills the pool
+# briefly and finishes fast. Cached per-ckpt under results/ood/.
+# ─────────────────────────────────────────────────────────────
+
+echo -e "\n═══ Phase 2: OOD eval (CIFAR-100-C, parallel) ═══"
+for f in results/checkpoints/*_cifar100_*_best.pt; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f" _best.pt)
+    cache="results/ood/${name}.json"
+    if [ -f "$cache" ]; then
+        echo "  SKIP (cached): $name"
+        continue
+    fi
+    slot_run "ood_${name}" \
+        "python experiments/eval_ood.py --checkpoint \"$f\""
+done
+slot_drain
+
+python experiments/eval_ood.py --aggregate-only 2>&1 | tee logs/phase2_ood_agg.log || \
+    echo "[WARN] OOD aggregation failed — continuing"
 
 # ─────────────────────────────────────────────────────────────
 # Phase 3: ImageNet DeiT-III ViT-B (DDP)
@@ -343,26 +343,15 @@ if ! skip_if_done "results/imagenet/deit3_large_nelu/result.json"; then
 fi
 
 # ─────────────────────────────────────────────────────────────
-# Phase 5: GPT-2 LM on FineWeb-Edu 10B (DDP, ~24h)
+# Phase 5: ImageNet-C eval (timm GELU pretrained vs trained NELU)
+#
+# Done BEFORE the long GPT-2 LM phase so the OOD tables are
+# available to inspect while LM is still running. Each model
+# eval is dispatched per-corruption to slot pool internally,
+# using all 8 GPUs in DataParallel-style sharding.
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 5: GPT-2 LM ═══"
-for size in small medium large; do
-    for act in gelu nelu; do
-        RESULT="results/lm/${size}_${act}/result.json"
-        skip_if_done "$RESULT" && continue
-        echo "[$(date +%H:%M)] GPT-2 $size $act (auto-resume from last.pt if present)"
-        $LM --size $size --act $act --wandb --compile \
-            2>&1 | tee logs/lm_${size}_${act}.log || \
-            echo "[WARN] LM $size $act failed — continuing"
-    done
-done
-
-# ─────────────────────────────────────────────────────────────
-# Phase 6: ImageNet-C eval (timm GELU pretrained vs trained NELU)
-# ─────────────────────────────────────────────────────────────
-
-echo -e "\n═══ Phase 6: ImageNet-C eval ═══"
+echo -e "\n═══ Phase 5: ImageNet-C eval ═══"
 for model in deit3_base deit3_large; do
     NELU_CKPT="results/imagenet/${model}_nelu/best.pt"
     if [ ! -f "$NELU_CKPT" ]; then
@@ -378,6 +367,22 @@ for model in deit3_base deit3_large; do
         --wandb \
         2>&1 | tee logs/imnet_c_${model}.log || \
         echo "[WARN] ImageNet-C eval $model failed — continuing"
+done
+
+# ─────────────────────────────────────────────────────────────
+# Phase 6: GPT-2 LM on FineWeb-Edu 10B (DDP, ~24h)
+# ─────────────────────────────────────────────────────────────
+
+echo -e "\n═══ Phase 6: GPT-2 LM ═══"
+for size in small medium large; do
+    for act in gelu nelu; do
+        RESULT="results/lm/${size}_${act}/result.json"
+        skip_if_done "$RESULT" && continue
+        echo "[$(date +%H:%M)] GPT-2 $size $act (auto-resume from last.pt if present)"
+        $LM --size $size --act $act --wandb --compile \
+            2>&1 | tee logs/lm_${size}_${act}.log || \
+            echo "[WARN] LM $size $act failed — continuing"
+    done
 done
 
 echo -e "\n═══════════════════════════════════════════════════════════"

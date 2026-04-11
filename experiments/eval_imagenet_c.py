@@ -115,9 +115,13 @@ def replace_act(model, act_name):
 
 # ── Data loader ────────────────────────────────────────────────────
 
-def make_loader(corruption_dir, batch_size, num_workers):
+def make_loader(corruption_dir, batch_size, num_workers, persistent=True):
     """Build a loader for one (corruption, severity) directory.
-    Expected layout: corruption_dir/<class>/*.JPEG"""
+    Expected layout: corruption_dir/<class>/*.JPEG
+
+    Inference-friendly defaults: large batch (split across GPUs by
+    DataParallel), many workers, persistent across calls inside one
+    eval to avoid re-spawning."""
     transform = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
@@ -128,6 +132,8 @@ def make_loader(corruption_dir, batch_size, num_workers):
     return DataLoader(
         ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=True,
+        persistent_workers=persistent and num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
 
@@ -140,7 +146,7 @@ def eval_loader(model, loader, device):
     for x, y in loader:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-        with torch.amp.autocast("cuda", enabled=True):
+        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
             logits = model(x)
         pred = logits.argmax(-1)
         correct += (pred == y).sum().item()
@@ -202,7 +208,8 @@ def compute_mce(results):
 
 # ── Model loading ──────────────────────────────────────────────────
 
-def load_model(model_name, act, ckpt_path, device, gelu_pretrained=False):
+def load_model(model_name, act, ckpt_path, device, gelu_pretrained=False,
+               multi_gpu=True):
     cfg = MODEL_CFGS[model_name]
     if act == "gelu" and gelu_pretrained:
         # Use timm's pretrained ImageNet weights
@@ -224,6 +231,11 @@ def load_model(model_name, act, ckpt_path, device, gelu_pretrained=False):
                 print(f"  unexpected: {len(unexpected)} (first: {unexpected[:3]})")
     model = model.to(device)
     model.eval()
+    # Wrap with DataParallel for inference across all visible GPUs.
+    n_gpu = torch.cuda.device_count()
+    if multi_gpu and n_gpu > 1:
+        model = nn.DataParallel(model, device_ids=list(range(n_gpu)))
+        print(f"  DataParallel across {n_gpu} GPUs")
     return model
 
 
@@ -235,8 +247,11 @@ def main():
                    choices=list(MODEL_CFGS.keys()))
     p.add_argument("--data", default="/data/ImageNet-C",
                    help="Root of ImageNet-C corruptions")
-    p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--num-workers", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=2048,
+                   help="Total batch (DataParallel splits across GPUs)")
+    p.add_argument("--num-workers", type=int, default=16)
+    p.add_argument("--single-gpu", action="store_true",
+                   help="Disable DataParallel (use only CUDA:0)")
     p.add_argument("--include-extra", action="store_true",
                    help="Also evaluate the 4 extra corruptions")
     # Single model
@@ -289,7 +304,9 @@ def main():
         print(f"  {name}  (model={args.model}, ckpt={ckpt or 'timm pretrained'})")
         print(f"{'='*60}")
         model = load_model(args.model, act, ckpt, device,
-                           gelu_pretrained=use_pretrained)
+                           gelu_pretrained=use_pretrained,
+                           multi_gpu=not args.single_gpu)
+        # When wrapped in DataParallel, .parameters() still works.
         n_params = sum(p.numel() for p in model.parameters()) / 1e6
         print(f"  params: {n_params:.1f}M")
 
