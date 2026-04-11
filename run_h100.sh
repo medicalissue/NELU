@@ -4,13 +4,22 @@
 #
 #  Estimated total: ~3-4 days
 #
+#  Activations under test: relu / gelu / silu  (baselines)
+#                          nelu (=GELU+RMS)  nilu (=SiLU+RMS)  (ours)
+#
 #  Phase 1: CIFAR training — main + LR sweep + ablation
-#           (combined queue, LPT-ordered)                       ~8-12h
-#  Phase 2: OOD eval on CIFAR-100-C (per-ckpt parallel)          ~10min
-#  Phase 3: ImageNet DeiT-III ViT-B (NELU from scratch, DDP)    ~10h
-#  Phase 4: ImageNet DeiT-III ViT-L (NELU from scratch, DDP)    ~36h
-#  Phase 5: ImageNet-C eval (mCE)                                ~30min
-#  Phase 6: GPT-2 LM (Small+Medium+Large, GELU+NELU, DDP)       ~24h
+#           (combined LPT queue, 7 archs × 5 acts × 3 seeds = 105 main
+#            + 25 LR sweep + 15 ablation = 145 single-GPU jobs)     ~10-14h
+#  Phase 2: OOD eval on CIFAR-100-C (per-ckpt parallel, 105+ jobs)   ~15min
+#  Phase 3: ImageNet DeiT-III ViT-B (NELU from scratch, DDP)         ~10h
+#  Phase 4: ImageNet DeiT-III ViT-L (NELU from scratch, DDP)         ~36h
+#  Phase 5: ImageNet-C eval (mCE, timm GELU vs trained NELU)         ~30min
+#  Phase 6: GPT-2 LM (Small+Medium+Large, GELU+NELU, DDP)            ~24h
+#
+#  GLU-block variants (SwiGLU baseline vs NiLUGLU / NELUGLU) for
+#  LLaMA-tiny are run by a separate script — see
+#  experiments/tiny_lm_gluvariants.py (TODO, not wired into this
+#  pipeline yet).
 #
 #  Pre-flight:
 #    - `wandb login`  (required, --wandb is on for all runs)
@@ -229,12 +238,23 @@ slot_init
 # CIFAR jobs. Largest archs queued first (LPT) to minimize makespan.
 # ─────────────────────────────────────────────────────────────
 
-echo -e "\n═══ Phase 1: CIFAR training (combined queue, ~108 jobs) ═══"
+# 5 activations:
+#   relu, gelu, silu           — baselines
+#   nelu  (= GELU + RMS)       — our GELU variant
+#   nilu  (= SiLU + RMS)       — our SiLU variant
+# Total main grid: 7 archs × 5 acts × 3 seeds = 105 jobs
+MAIN_ACTS=(relu gelu silu nelu nilu)
+
+# LR sweep keeps only the 3 baselines (plus both of ours) at seed 42:
+#   5 lrs × 5 acts = 25 jobs
+LR_ACTS=(relu gelu silu nelu nilu)
+
+echo -e "\n═══ Phase 1: CIFAR training (combined queue) ═══"
 
 # 1a. Main CIFAR-100, longest archs first
 for arch in "${CNN_ARCHS_LPT[@]}"; do
     for seed in "${SEEDS[@]}"; do
-        for act in relu gelu nelu; do
+        for act in "${MAIN_ACTS[@]}"; do
             skip_if_done "$(cifar_result $arch cifar100 $act $seed)" && continue
             slot_run "cifar100_${arch}_${act}_s${seed}" \
                 "$CIFAR --arch $arch --dataset cifar100 --act $act --seed $seed $C"
@@ -242,9 +262,9 @@ for arch in "${CNN_ARCHS_LPT[@]}"; do
     done
 done
 
-# 1b. LR sensitivity sweep (resnet20)
+# 1b. LR sensitivity sweep (resnet20 only)
 for lr in 0.01 0.05 0.1 0.2 0.5; do
-    for act in relu gelu nelu; do
+    for act in "${LR_ACTS[@]}"; do
         skip_if_done "$(cifar_result resnet20 cifar100 $act 42 $lr)" && continue
         slot_run "lrsweep_resnet20_${act}_lr${lr}" \
             "$CIFAR --arch resnet20 --dataset cifar100 --act $act --lr $lr --seed 42 $C"

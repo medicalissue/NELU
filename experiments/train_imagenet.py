@@ -66,9 +66,16 @@ from timm.loss import BinaryCrossEntropy
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nelu import NELU
-from nelu import NELUCUDA
+from nelu import NELU, NiLU, NELUCUDA
+# Only NELU has a fused CUDA kernel; NiLU falls back to Python + compile.
 _NELU_CLS = NELUCUDA if NELUCUDA is not None else NELU
+_NILU_CLS = NiLU
+
+_ACT_CLS = {
+    "gelu": None,         # keep as-is (no replacement)
+    "nelu": _NELU_CLS,
+    "nilu": _NILU_CLS,
+}
 
 try:
     import wandb
@@ -104,12 +111,14 @@ MODEL_CFGS = {
 # ── Activation ───────────────────────────────────────────────────
 
 def replace_act(model, act_name):
-    if act_name == "gelu":
+    """Recursively replace GELU/ReLU/SiLU with the requested activation.
+    For gelu, this is a no-op (timm models already use GELU)."""
+    target_cls = _ACT_CLS.get(act_name)
+    if target_cls is None:
         return model
-    target = _NELU_CLS
     for name, child in model.named_children():
-        if isinstance(child, (nn.GELU, nn.ReLU)):
-            setattr(model, name, target())
+        if isinstance(child, (nn.GELU, nn.ReLU, nn.SiLU)):
+            setattr(model, name, target_cls())
         else:
             replace_act(child, act_name)
     return model
@@ -279,7 +288,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="deit3_base",
                         choices=list(MODEL_CFGS.keys()))
-    parser.add_argument("--act", default="nelu", choices=["gelu", "nelu"])
+    parser.add_argument("--act", default="nelu",
+                        choices=["gelu", "nelu", "nilu"])
     parser.add_argument("--data", required=True)
     parser.add_argument("--epochs", type=int, default=800)
     parser.add_argument("--batch-size", type=int, default=None,

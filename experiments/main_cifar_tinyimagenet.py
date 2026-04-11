@@ -43,7 +43,7 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nelu import NELU
+from nelu import NELU, NiLU
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -58,7 +58,8 @@ ARCHS = [
     "vit_tiny", "vit_small", "vit_base",
 ]
 DATASETS = ["cifar10", "cifar100"]
-ACTS = ["relu", "gelu", "nelu"]
+# 5 activations:  ReLU / GELU / SiLU baselines + NELU / NiLU (our variants)
+ACTS = ["relu", "gelu", "silu", "nelu", "nilu"]
 
 CNN_ARCHS = {"resnet20", "resnet56", "resnet110", "wrn28_10",
              "densenet100", "mobilenetv2", "shufflenetv1"}
@@ -84,12 +85,18 @@ def set_seed(seed: int):
 
 # ── Activation replacement ───────────────────────────────────────────
 
-_REPLACE_TYPES = (nn.ReLU, nn.ReLU6, nn.GELU)
-_ACT_MAP = {"relu": nn.ReLU, "gelu": nn.GELU, "nelu": NELU}
+_REPLACE_TYPES = (nn.ReLU, nn.ReLU6, nn.GELU, nn.SiLU)
+_ACT_MAP = {
+    "relu": nn.ReLU,
+    "gelu": nn.GELU,
+    "silu": nn.SiLU,
+    "nelu": NELU,
+    "nilu": NiLU,
+}
 
 
 def replace_activations(model: nn.Module, act_name: str) -> nn.Module:
-    """Recursively swap all ReLU / ReLU6 / GELU modules."""
+    """Recursively swap all ReLU / ReLU6 / GELU / SiLU modules."""
     target_cls = _ACT_MAP[act_name]
     for name, child in model.named_children():
         if isinstance(child, _REPLACE_TYPES):
