@@ -454,7 +454,7 @@ if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
         --batch 256 --lr 3e-3 --epochs 800 --weight-decay 0.05 \
         --sched cosine --input-size 192 --eval-crop-ratio 1.0 \
         --reprob 0.0 --smoothing 0.0 --warmup-epochs 5 \
-        --drop 0.0 --nb-classes 1000 --seed 0 \
+        --drop 0.0 --seed 0 \
         --opt fusedlamb --warmup-lr 1e-6 \
         --mixup .8 --drop-path 0.2 --cutmix 1.0 \
         --unscale-lr --repeated-aug --bce-loss \

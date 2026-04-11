@@ -111,12 +111,34 @@ else
     ok "timm-train at $TIMM_TRAIN_PY"
     echo "  exporting TIMM_TRAIN_PY for run_h100.sh consumers"
     echo "export TIMM_TRAIN_PY=\"$TIMM_TRAIN_PY\"" > "$RESACT_DIR/.timm_train_py.env"
+
+    # Install timm-train as editable so `import timm` resolves to the same
+    # version as train.py uses (otherwise train.py imports symbols from
+    # bleeding-edge timm that the conda-installed timm doesn't have).
+    TIMM_REPO_DIR="$(dirname "$TIMM_TRAIN_PY")"
+    if [ -d "$TIMM_REPO_DIR/timm" ]; then
+        installed_path=$(python -c "import timm, os; print(os.path.dirname(timm.__file__))" 2>/dev/null)
+        target_path="$TIMM_REPO_DIR/timm"
+        # Resolve both to compare
+        installed_real=$(readlink -f "$installed_path" 2>/dev/null)
+        target_real=$(readlink -f "$target_path" 2>/dev/null)
+        if [ "$installed_real" = "$target_real" ]; then
+            ok "timm package matches timm-train (already editable-installed)"
+        else
+            echo "  installing timm-train as editable to match train.py version"
+            pip install --quiet -e "$TIMM_REPO_DIR" && \
+                ok "timm-train installed (editable)" || \
+                err "timm-train editable install failed"
+        fi
+    fi
 fi
 
 
 # ─── 4: pip dependencies ─────────────────────────────────────────
 hdr "[3/8] Installing python dependencies"
-PIP_DEPS=(tensorboardX wandb timm)
+PIP_DEPS=(tensorboardX wandb)
+# NB: do NOT install `timm` from PyPI here — Phase 2 above installs the
+# timm-train repo editable. PyPI timm would be overwritten anyway.
 for pkg in "${PIP_DEPS[@]}"; do
     if python -c "import $pkg" 2>/dev/null; then
         ok "$pkg already installed"
