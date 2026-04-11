@@ -9,11 +9,11 @@
 #
 #  Phase 1: CIFAR training — main + LR sweep + ablation
 #           (combined LPT queue, 7 archs × 5 acts × 3 seeds = 105 main
-#            + 25 LR sweep + 15 ablation = 145 single-GPU jobs)     ~10-14h
+#            + 25 LR sweep + 21 ablation = 151 single-GPU jobs)     ~10-14h
 #  Phase 2: OOD eval on CIFAR-100-C (per-ckpt parallel, 105+ jobs)   ~15min
-#  Phase 3: ImageNet ConvNeXt-T  (GELU pretrained, NELU from scratch) ~30h
-#  Phase 4: ImageNet EfficientNet-B2 (SiLU pretrained, NiLU scratch)  ~22-26h
-#  Phase 5: ImageNet DeiT-III ViT-B  (GELU pretrained, NELU scratch)  ~40h
+#  Phase 3: ImageNet DeiT-III ViT-B  (GELU pretrained, NELU scratch)  ~40h
+#  Phase 4: ImageNet ConvNeXt-T      (GELU pretrained, NELU scratch)  ~30h
+#  Phase 5: ImageNet EfficientNet-B2 (SiLU pretrained, NiLU scratch)  ~22-26h
 #  Phase 6: ImageNet-C eval (mCE, timm baseline vs trained ours)      ~1h
 #  Phase 7: COCO Det/Seg — Mask R-CNN + ConvNeXt-T (GELU vs NELU)     ~20h
 #
@@ -278,15 +278,25 @@ for variant in "${ABLATION_VARIANTS[@]}"; do
     done
 done
 
-# 1d. RMS-axis ablation on MobileNetV2 (DW conv, single seed 42).
+# 1d. RMS-axis ablation on MobileNetV2 (DW conv, 2 seeds).
 # CHW = default `nelu` and is already in Phase 1a's main grid as
-#   results/main_mobilenetv2_cifar100_nelu_s42.json
-# Only HW and C variants need to be run here.
-# for variant in nelu_hw nelu_c; do
-#     RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s42.json"
-#     skip_if_done "$RESULT" && continue
-#     slot_run "rmsaxis_mobilenetv2_${variant}_s42" \
-#         "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed 42 --amp --compile --wandb"
+#   results/main_mobilenetv2_cifar100_nelu_s{42,123}.json
+# 4 variants here:
+#   nelu_hw          pure HW everywhere
+#   nelu_c           pure C  everywhere
+#   nelu_hybrid      DW→HW, PW→C        (channel-wise / position-wise)
+#   nelu_hybrid_hwc  DW→HW, PW→HWC      (channel-wise / per-sample)
+# Both hybrids use the same context-aware swap (Conv2d.groups > 1
+# means depthwise) — only the PW activation differs.
+#
+# 4 variants × 2 seeds = 8 jobs. ~25 min wall-clock via the slot pool.
+# for variant in nelu_hw nelu_c nelu_hybrid nelu_hybrid_hwc; do
+#     for seed in 42 123; do
+#         RESULT="results/rms_axis/main_mobilenetv2_cifar100_${variant}_s${seed}.json"
+#         skip_if_done "$RESULT" && continue
+#         slot_run "rmsaxis_mobilenetv2_${variant}_s${seed}" \
+#             "python experiments/ablation_mobilenetv2_rms_axis.py --variant $variant --seed $seed --amp --compile --wandb"
+#     done
 # done
 
 echo -e "\n[$(date +%H:%M)] Phase 1 fully queued — draining..."
@@ -387,8 +397,40 @@ imnet_eval_baseline() {
         echo "[WARN] baseline eval $timm_id failed — continuing"
 }
 
-# ─────────── Phase 3: ConvNeXt-T (FB ConvNeXt main.py) ───────────
-echo -e "\n═══ Phase 3: ImageNet ConvNeXt-T (GELU vs NELU) ═══"
+# Phases 3-5 ordered longest-first (LPT) so the longest job starts ASAP:
+#   Phase 3: DeiT-III B  ~40h    (was Phase 5)
+#   Phase 4: ConvNeXt-T  ~30h    (was Phase 3)
+#   Phase 5: EffNet-B2   ~22h    (was Phase 4)
+
+# ─────────── Phase 3: DeiT-III ViT-B (FB deit main.py) ───────────
+echo -e "\n═══ Phase 3: ImageNet DeiT-III ViT-B (GELU vs NELU) ═══"
+imnet_eval_baseline deit3_base_patch16_224.fb_in1k imnet_deit3_b_gelu_eval
+
+if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
+    echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch (FB deit main.py)"
+    # README_revenge ImageNet-1k pretraining cmd (line 412 of README_revenge.md).
+    (cd "$DEIT_DIR" && \
+     PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
+     torchrun --nproc_per_node=8 main.py \
+        --model deit_base_patch16_LS \
+        --data-path "$IMNET_DATA" \
+        --output_dir "$RESACT_DIR/results/imagenet/deit3_base_nelu" \
+        --batch 256 --lr 3e-3 --epochs 800 --weight-decay 0.05 \
+        --sched cosine --input-size 192 --eval-crop-ratio 1.0 \
+        --reprob 0.0 --smoothing 0.0 --warmup-epochs 5 \
+        --drop 0.0 --seed 0 \
+        --opt fusedlamb --warmup-lr 1e-6 \
+        --mixup .8 --drop-path 0.2 --cutmix 1.0 \
+        --unscale-lr --repeated-aug --bce-loss \
+        --color-jitter 0.3 --ThreeAugment \
+        --torch-compile \
+        --act nelu) \
+        2>&1 | tee logs/imnet_deit3_b_nelu.log || \
+        echo "[WARN] DeiT-III ViT-B NELU train failed — continuing"
+fi
+
+# ─────────── Phase 4: ConvNeXt-T (FB ConvNeXt main.py) ───────────
+echo -e "\n═══ Phase 4: ImageNet ConvNeXt-T (GELU vs NELU) ═══"
 imnet_eval_baseline convnext_tiny.fb_in1k imnet_convnext_t_gelu_eval
 
 if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
@@ -413,8 +455,8 @@ if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
         echo "[WARN] ConvNeXt-T NELU train failed — continuing"
 fi
 
-# ─────────── Phase 4: EfficientNet-B2 (timm/train.py) ────────────
-echo -e "\n═══ Phase 4: ImageNet EfficientNet-B2 (SiLU vs NiLU) ═══"
+# ─────────── Phase 5: EfficientNet-B2 (timm/train.py) ────────────
+echo -e "\n═══ Phase 5: ImageNet EfficientNet-B2 (SiLU vs NiLU) ═══"
 imnet_eval_baseline efficientnet_b2.ra_in1k imnet_effnet_b2_silu_eval
 
 if ! skip_if_done "results/imagenet/efficientnet_b2_nilu/result.json"; then
@@ -440,33 +482,6 @@ if ! skip_if_done "results/imagenet/efficientnet_b2_nilu/result.json"; then
         --log-wandb --wandb-project nelu --wandb-tags imagenet effnet \
         2>&1 | tee logs/imnet_effnet_b2_nilu.log || \
         echo "[WARN] EfficientNet-B2 NiLU train failed — continuing"
-fi
-
-# ─────────── Phase 5: DeiT-III ViT-B (FB deit main.py) ───────────
-echo -e "\n═══ Phase 5: ImageNet DeiT-III ViT-B (GELU vs NELU) ═══"
-imnet_eval_baseline deit3_base_patch16_224.fb_in1k imnet_deit3_b_gelu_eval
-
-if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
-    echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch (FB deit main.py)"
-    # README_revenge ImageNet-1k pretraining cmd (line 412 of README_revenge.md).
-    (cd "$DEIT_DIR" && \
-     PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
-     torchrun --nproc_per_node=8 main.py \
-        --model deit_base_patch16_LS \
-        --data-path "$IMNET_DATA" \
-        --output_dir "$RESACT_DIR/results/imagenet/deit3_base_nelu" \
-        --batch 256 --lr 3e-3 --epochs 800 --weight-decay 0.05 \
-        --sched cosine --input-size 192 --eval-crop-ratio 1.0 \
-        --reprob 0.0 --smoothing 0.0 --warmup-epochs 5 \
-        --drop 0.0 --seed 0 \
-        --opt fusedlamb --warmup-lr 1e-6 \
-        --mixup .8 --drop-path 0.2 --cutmix 1.0 \
-        --unscale-lr --repeated-aug --bce-loss \
-        --color-jitter 0.3 --ThreeAugment \
-        --torch-compile \
-        --act nelu) \
-        2>&1 | tee logs/imnet_deit3_b_nelu.log || \
-        echo "[WARN] DeiT-III ViT-B NELU train failed — continuing"
 fi
 
 # ─────────────────────────────────────────────────────────────
