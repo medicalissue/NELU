@@ -123,14 +123,10 @@ axis_dir = mc.RESULTS_DIR / "rms_axis"
 axis_dir.mkdir(parents=True, exist_ok=True)
 mc.RESULTS_DIR = axis_dir
 
-# Suppress checkpoint dumps — we only need best_acc in result.json.
-_orig_save = torch.save
-def _noop_save(obj, path, *args, **kwargs):
-    p = str(path)
-    if "/checkpoints/" in p or p.endswith((".pt", ".pt.tmp")):
-        return
-    return _orig_save(obj, path, *args, **kwargs)
-torch.save = _noop_save
+# Don't bother suppressing checkpoint dumps for this ablation —
+# mobilenetv2 checkpoints are ~10 MB each so 8 jobs × 2 (last+best)
+# = ~160 MB total. Trivial. Earlier no-op-save approach broke
+# main_cifar's atomic-write pattern (torch.save tmp → pathlib.replace).
 
 
 # ── Hybrid swap (context-aware) ───────────────────────────────────
