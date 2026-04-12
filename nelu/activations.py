@@ -249,6 +249,95 @@ class NiLU_Gamma(nn.Module):
         return f"eps={self.eps}"
 
 
+# ── Surrogate-backward variants ───────────────────────────────────
+#
+# Forward: f(z) = z · g(z/ρ)       ← scale-invariant, unchanged
+# Backward: dz = g_out · h(z)      ← uses RAW z, not z̃ = z/ρ
+#
+# h(z) = Φ(z) + z·φ(z)   for NELU
+# h(z) = σ(z) + z·σ'(z)  for NiLU
+#
+# Why: GELU's h(z) saturates at large |z| → {0, 1} → sparse gradient
+# → implicit damping. NELU's h(z̃) never saturates because z̃ = z/ρ
+# is always O(1). The surrogate re-introduces GELU's damping in
+# backward only, keeping forward scale-invariant.
+#
+# At init (ρ ≈ 1): z ≈ z̃ → no difference.
+# When ||W|| grows (ρ >> 1): h(z) saturates → gradient damping.
+
+_INV_SQRT2PI = 0.3989422804014327  # 1/sqrt(2π)
+
+
+class _NELUSurrFn(torch.autograd.Function):
+    @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+    def forward(ctx, z, eps):
+        dim = (1, 2, 3) if z.dim() == 4 else -1
+        rho = z.pow(2).mean(dim=dim, keepdim=True).add(eps).sqrt()
+        gate = 0.5 * (1.0 + torch.erf((z / rho) * _INV_SQRT2))
+        ctx.save_for_backward(z)  # only z — backward doesn't need ρ
+        return z * gate
+
+    @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
+    def backward(ctx, grad_out):
+        z, = ctx.saved_tensors
+        # Surrogate: evaluate h at raw z, not z̃ = z/ρ
+        phi_z = _INV_SQRT2PI * torch.exp(-0.5 * z * z)
+        cdf_z = 0.5 * (1.0 + torch.erf(z * _INV_SQRT2))
+        h_z = cdf_z + z * phi_z
+        return grad_out * h_z, None
+
+
+class NELU_Surr(nn.Module):
+    """NELU with surrogate backward: forward is scale-invariant,
+    backward uses h(z) instead of h(z/ρ) for GELU-like damping."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return _NELUSurrFn.apply(z, self.eps)
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}"
+
+
+class _NiLUSurrFn(torch.autograd.Function):
+    @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+    def forward(ctx, z, eps):
+        dim = (1, 2, 3) if z.dim() == 4 else -1
+        rho = z.pow(2).mean(dim=dim, keepdim=True).add(eps).sqrt()
+        gate = torch.sigmoid(z / rho)
+        ctx.save_for_backward(z)
+        return z * gate
+
+    @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
+    def backward(ctx, grad_out):
+        z, = ctx.saved_tensors
+        sig_z = torch.sigmoid(z)
+        dsig_z = sig_z * (1.0 - sig_z)
+        h_z = sig_z + z * dsig_z
+        return grad_out * h_z, None
+
+
+class NiLU_Surr(nn.Module):
+    """NiLU with surrogate backward."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return _NiLUSurrFn.apply(z, self.eps)
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}"
+
+
 # ── Functional interfaces ─────────────────────────────────────────
 
 def nelu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

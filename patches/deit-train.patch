@@ -102,7 +102,7 @@ index 1f036cf..5faafb6 100644
      metric_logger.synchronize_between_processes()
      print("Averaged stats:", metric_logger)
 diff --git a/main.py b/main.py
-index 3c8dd07..87e5434 100644
+index 3c8dd07..70e477a 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -113,7 +113,7 @@ index 3c8dd07..87e5434 100644
  import torch.backends.cudnn as cudnn
  import json
  
-@@ -28,6 +29,45 @@ import models_v2
+@@ -28,6 +29,48 @@ import models_v2
  
  import utils
  
@@ -125,6 +125,7 @@ index 3c8dd07..87e5434 100644
 +                  NELU_SG as _NELU_SG, NiLU_SG as _NiLU_SG,
 +                  NELU_Beta as _NELU_Beta, NiLU_Beta as _NiLU_Beta,
 +                  NELU_Gamma as _NELU_Gamma, NiLU_Gamma as _NiLU_Gamma,
++                  NELU_Surr as _NELU_Surr, NiLU_Surr as _NiLU_Surr,
 +                  NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA,
 +                  NELUCUDA_SG as _NELUCUDA_SG, NiLUCUDA_SG as _NiLUCUDA_SG)
 +
@@ -143,6 +144,8 @@ index 3c8dd07..87e5434 100644
 +    "nilu_beta":  _NiLU_Beta,
 +    "nelu_gamma": _NELU_Gamma,   # per-channel γ, RMSNorm-style, NoSG
 +    "nilu_gamma": _NiLU_Gamma,
++    "nelu_surr":  _NELU_Surr,   # surrogate bwd: h(z) not h(z̃), GELU-like damping
++    "nilu_surr":  _NiLU_Surr,
 +}
 +# Variants with lazy-init parameters (need dummy forward before DDP wrap)
 +_LAZY_ACT_VARIANTS = {"nelu_gamma", "nilu_gamma"}
@@ -159,7 +162,7 @@ index 3c8dd07..87e5434 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +225,20 @@ def get_args_parser():
+@@ -185,6 +228,21 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -169,7 +172,8 @@ index 3c8dd07..87e5434 100644
 +                        choices=['gelu', 'silu', 'nelu', 'nilu',
 +                                 'nelu_sg', 'nilu_sg',
 +                                 'nelu_beta', 'nilu_beta',
-+                                 'nelu_gamma', 'nilu_gamma'],
++                                 'nelu_gamma', 'nilu_gamma',
++                                 'nelu_surr', 'nilu_surr'],
 +                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
 +    parser.add_argument('--torch-compile', action='store_true', default=False,
 +                        help='Wrap model in torch.compile after DDP wrap.')
@@ -180,7 +184,7 @@ index 3c8dd07..87e5434 100644
      return parser
  
  
-@@ -193,6 +247,21 @@ def main(args):
+@@ -193,6 +251,21 @@ def main(args):
  
      print(args)
  
@@ -202,7 +206,7 @@ index 3c8dd07..87e5434 100644
      if args.distillation_type != 'none' and args.finetune and not args.eval:
          raise NotImplementedError("Finetuning with distillation not yet supported")
  
-@@ -270,7 +339,15 @@ def main(args):
+@@ -270,7 +343,15 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -219,7 +223,7 @@ index 3c8dd07..87e5434 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -331,6 +408,16 @@ def main(args):
+@@ -331,6 +412,16 @@ def main(args):
              
      model.to(device)
  
@@ -236,7 +240,7 @@ index 3c8dd07..87e5434 100644
      model_ema = None
      if args.model_ema:
          # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-@@ -344,6 +431,31 @@ def main(args):
+@@ -344,6 +435,31 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
@@ -268,7 +272,7 @@ index 3c8dd07..87e5434 100644
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)
      if not args.unscale_lr:
-@@ -414,6 +526,17 @@ def main(args):
+@@ -414,6 +530,17 @@ def main(args):
          print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
          return
  
@@ -286,7 +290,7 @@ index 3c8dd07..87e5434 100644
      print(f"Start training for {args.epochs} epochs")
      start_time = time.time()
      max_accuracy = 0.0
-@@ -427,6 +550,7 @@ def main(args):
+@@ -427,6 +554,7 @@ def main(args):
              args.clip_grad, model_ema, mixup_fn,
              set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
              args = args,
@@ -294,7 +298,7 @@ index 3c8dd07..87e5434 100644
          )
  
          lr_scheduler.step(epoch)
-@@ -468,6 +592,20 @@ def main(args):
+@@ -468,6 +596,20 @@ def main(args):
                       **{f'test_{k}': v for k, v in test_stats.items()},
                       'epoch': epoch,
                       'n_parameters': n_parameters}
@@ -315,7 +319,7 @@ index 3c8dd07..87e5434 100644
          
          
          
-@@ -476,6 +614,19 @@ def main(args):
+@@ -476,6 +618,19 @@ def main(args):
              with (output_dir / "log.txt").open("a") as f:
                  f.write(json.dumps(log_stats) + "\n")
  
