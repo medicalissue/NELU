@@ -40,6 +40,12 @@ except Exception:
     nelu_cuda_sg = None
 
 try:
+    from .cuda_kernel_surr import NELUCUDA_Surr, nelu_cuda_surr
+except Exception:
+    NELUCUDA_Surr = None
+    nelu_cuda_surr = None
+
+try:
     from .nilu_cuda_kernel_sg import NiLUCUDA_SG, nilu_cuda_sg
 except Exception:
     NiLUCUDA_SG = None
