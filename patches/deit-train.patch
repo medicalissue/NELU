@@ -16,8 +16,93 @@ index 8d6640d..88b9b25 100644
  
  import numpy as np
  from torchvision import datasets, transforms
+diff --git a/engine.py b/engine.py
+index 1f036cf..5faafb6 100644
+--- a/engine.py
++++ b/engine.py
+@@ -20,44 +20,53 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
+                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
+                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
+                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
+-                    set_training_mode=True, args = None):
++                    set_training_mode=True, args = None, diag = None):
+     model.train(set_training_mode)
+     metric_logger = utils.MetricLogger(delimiter="  ")
+     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+     header = 'Epoch: [{}]'.format(epoch)
+     print_freq = 10
+-    
++
+     if args.cosub:
+         criterion = torch.nn.BCEWithLogitsLoss()
+-        
++
++    _global_step = epoch * len(data_loader)
++
+     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+         samples = samples.to(device, non_blocking=True)
+         targets = targets.to(device, non_blocking=True)
+ 
++        if diag is not None:
++            diag.step_forward_done()  # reset hook accumulators
++
+         if mixup_fn is not None:
+             samples, targets = mixup_fn(samples, targets)
+-            
++
+         if args.cosub:
+             samples = torch.cat((samples,samples),dim=0)
+-            
++
+         if args.bce_loss:
+             targets = targets.gt(0.0).type(targets.dtype)
+-         
++
+         with torch.cuda.amp.autocast():
+             outputs = model(samples)
+             if not args.cosub:
+                 loss = criterion(samples, outputs, targets)
+             else:
+                 outputs = torch.split(outputs, outputs.shape[0]//2, dim=0)
+-                loss = 0.25 * criterion(outputs[0], targets) 
+-                loss = loss + 0.25 * criterion(outputs[1], targets) 
++                loss = 0.25 * criterion(outputs[0], targets)
++                loss = loss + 0.25 * criterion(outputs[1], targets)
+                 loss = loss + 0.25 * criterion(outputs[0], outputs[1].detach().sigmoid())
+-                loss = loss + 0.25 * criterion(outputs[1], outputs[0].detach().sigmoid()) 
++                loss = loss + 0.25 * criterion(outputs[1], outputs[0].detach().sigmoid())
+ 
+         loss_value = loss.item()
+ 
+         if not math.isfinite(loss_value):
+             print("Loss is {}, stopping training".format(loss_value))
++            # NELU diag: dump final diagnostics before dying
++            if diag is not None:
++                print("  [DIAG] dumping final diagnostics before exit")
++                diag.step(_global_step)
+             sys.exit(1)
+ 
+         optimizer.zero_grad()
+@@ -68,11 +77,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
+                     parameters=model.parameters(), create_graph=is_second_order)
+ 
+         torch.cuda.synchronize()
++
++        # NELU diagnostics: log grad norms + rho + activation stats
++        if diag is not None:
++            diag.step(_global_step)
++
+         if model_ema is not None:
+             model_ema.update(model)
+ 
+         metric_logger.update(loss=loss_value)
+         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
++        _global_step += 1
+     # gather the stats from all processes
+     metric_logger.synchronize_between_processes()
+     print("Averaged stats:", metric_logger)
 diff --git a/main.py b/main.py
-index 3c8dd07..b750c08 100644
+index 3c8dd07..87e5434 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -183,7 +268,33 @@ index 3c8dd07..b750c08 100644
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)
      if not args.unscale_lr:
-@@ -468,6 +580,20 @@ def main(args):
+@@ -414,6 +526,17 @@ def main(args):
+         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+         return
+ 
++    # NELU paper: training diagnostics (grad norms, ρ, activation stats)
++    _diag = None
++    if args.act != 'gelu' and utils.is_main_process():
++        try:
++            from nelu.diagnostics import NELUDiagnostics
++            _diag = NELUDiagnostics(model_without_ddp, log_every=50,
++                                     wandb_run=_wandb_run)
++            print(f"  [DIAG] diagnostics enabled (log every 50 steps)")
++        except Exception as e:
++            print(f"  [DIAG] WARNING: failed to init diagnostics: {e}")
++
+     print(f"Start training for {args.epochs} epochs")
+     start_time = time.time()
+     max_accuracy = 0.0
+@@ -427,6 +550,7 @@ def main(args):
+             args.clip_grad, model_ema, mixup_fn,
+             set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
+             args = args,
++            diag = _diag,
+         )
+ 
+         lr_scheduler.step(epoch)
+@@ -468,6 +592,20 @@ def main(args):
                       **{f'test_{k}': v for k, v in test_stats.items()},
                       'epoch': epoch,
                       'n_parameters': n_parameters}
@@ -204,7 +315,7 @@ index 3c8dd07..b750c08 100644
          
          
          
-@@ -476,6 +602,19 @@ def main(args):
+@@ -476,6 +614,19 @@ def main(args):
              with (output_dir / "log.txt").open("a") as f:
                  f.write(json.dumps(log_stats) + "\n")
  
