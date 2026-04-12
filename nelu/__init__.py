@@ -14,7 +14,8 @@ gives exact forward scale invariance, f(alpha z) = alpha f(z).
 """
 
 from .activations import (NELU, NiLU, NELU_SG, NiLU_SG,
-                          NELU_Beta, NiLU_Beta, nelu, nilu)
+                          NELU_Beta, NiLU_Beta,
+                          NELU_Gamma, NiLU_Gamma, nelu, nilu)
 from .glu import SwiGLU, NiLUGLU, NELUGLU
 
 # NoSG CUDA kernels (backward has cross-term reduction)

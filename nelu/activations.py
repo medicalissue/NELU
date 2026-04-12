@@ -176,6 +176,65 @@ class NiLU_Beta(nn.Module):
     def extra_repr(self) -> str:
         return f"eps={self.eps}, beta={self.beta.item():.4f}"
 
+
+# ── Per-channel γ variants (RMSNorm-style affine gate) ───────────
+#
+# f(z)_i = z_i · g(γ_i · z_i / ρ)
+#
+# γ is a per-channel (or per-feature) learnable gain, initialized to 1.
+# Preserves exact homogeneity: f(αz) = αf(z) because ρ(αz) = αρ(z),
+# so γ·αz/(αρ) = γ·z/ρ — the α cancels.
+#
+# Lazy-initialized: γ is created on first forward() from the input shape.
+# A dummy forward must be run BEFORE DDP wrap so all ranks have γ.
+
+class NELU_Gamma(nn.Module):
+    """NELU with per-channel learnable gate gain γ.
+
+    Like RMSNorm's affine weight but inside the activation gate.
+    NoSG — gradient flows through rms. γ initialized to 1.
+    """
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.gamma = None  # lazy: materialized on first forward
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if self.gamma is None:
+            dim = z.size(1) if z.dim() == 4 else z.size(-1)
+            self.gamma = nn.Parameter(torch.ones(dim, device=z.device))
+        rho = _rms(z, self.eps)
+        g = self.gamma.view(1, -1, 1, 1) if z.dim() == 4 else self.gamma
+        t = g * z / rho
+        return z * 0.5 * (1.0 + torch.erf(t * _INV_SQRT2))
+
+    def extra_repr(self) -> str:
+        n = self.gamma.numel() if self.gamma is not None else '?'
+        return f"eps={self.eps}, dim={n}"
+
+
+class NiLU_Gamma(nn.Module):
+    """NiLU with per-channel learnable gate gain γ. NoSG."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.gamma = None
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if self.gamma is None:
+            dim = z.size(1) if z.dim() == 4 else z.size(-1)
+            self.gamma = nn.Parameter(torch.ones(dim, device=z.device))
+        rho = _rms(z, self.eps)
+        g = self.gamma.view(1, -1, 1, 1) if z.dim() == 4 else self.gamma
+        t = g * z / rho
+        return z * torch.sigmoid(t)
+
+    def extra_repr(self) -> str:
+        n = self.gamma.numel() if self.gamma is not None else '?'
+        return f"eps={self.eps}, dim={n}"
+
     def extra_repr(self) -> str:
         return f"eps={self.eps}"
 
