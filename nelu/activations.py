@@ -122,6 +122,64 @@ class NiLU_SG(nn.Module):
         return f"eps={self.eps}"
 
 
+# ── Learnable-β variants ─────────────────────────────────────────
+#
+# f(z) = z · g(β · z / ρ)   where β = softplus(raw) > 0, learnable.
+#
+# β > 1 : sharper gate (→ ReLU-like)
+# β < 1 : softer gate (→ linear)
+# β = 1 : standard NELU / NiLU
+#
+# Uses SG on ρ for stability. β gradient flows through autograd
+# (one extra scalar per module — negligible overhead).
+
+class NELU_Beta(nn.Module):
+    """NELU with learnable gate temperature β. NoSG — gradient flows through rms."""
+
+    def __init__(self, eps: float = 1e-6, init_beta: float = 1.0):
+        super().__init__()
+        self.eps = eps
+        raw = math.log(math.exp(init_beta) - 1.0) if init_beta > 0 else 0.0
+        self._raw_beta = nn.Parameter(torch.tensor(raw))
+
+    @property
+    def beta(self) -> torch.Tensor:
+        return F.softplus(self._raw_beta)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        rho = _rms(z, self.eps)
+        t = self.beta * z / rho
+        return z * 0.5 * (1.0 + torch.erf(t * _INV_SQRT2))
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}, beta={self.beta.item():.4f}"
+
+
+class NiLU_Beta(nn.Module):
+    """NiLU with learnable gate temperature β. NoSG — gradient flows through rms."""
+
+    def __init__(self, eps: float = 1e-6, init_beta: float = 1.0):
+        super().__init__()
+        self.eps = eps
+        raw = math.log(math.exp(init_beta) - 1.0) if init_beta > 0 else 0.0
+        self._raw_beta = nn.Parameter(torch.tensor(raw))
+
+    @property
+    def beta(self) -> torch.Tensor:
+        return F.softplus(self._raw_beta)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        rho = _rms(z, self.eps)
+        t = self.beta * z / rho
+        return z * torch.sigmoid(t)
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}, beta={self.beta.item():.4f}"
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}"
+
+
 # ── Functional interfaces ─────────────────────────────────────────
 
 def nelu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

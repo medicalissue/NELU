@@ -17,7 +17,7 @@ index 8d6640d..88b9b25 100644
  import numpy as np
  from torchvision import datasets, transforms
 diff --git a/main.py b/main.py
-index 3c8dd07..ac74922 100644
+index 3c8dd07..0f71b13 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -28,7 +28,7 @@ index 3c8dd07..ac74922 100644
  import torch.backends.cudnn as cudnn
  import json
  
-@@ -28,6 +29,37 @@ import models_v2
+@@ -28,6 +29,40 @@ import models_v2
  
  import utils
  
@@ -38,6 +38,7 @@ index 3c8dd07..ac74922 100644
 +import torch.nn as _nn
 +from nelu import (NELU as _NELU, NiLU as _NiLU,
 +                  NELU_SG as _NELU_SG, NiLU_SG as _NiLU_SG,
++                  NELU_Beta as _NELU_Beta, NiLU_Beta as _NiLU_Beta,
 +                  NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA,
 +                  NELUCUDA_SG as _NELUCUDA_SG, NiLUCUDA_SG as _NiLUCUDA_SG)
 +
@@ -46,12 +47,14 @@ index 3c8dd07..ac74922 100644
 +_NELU_SG_CLS = _NELUCUDA_SG if _NELUCUDA_SG is not None else _NELU_SG
 +_NILU_SG_CLS = _NiLUCUDA_SG if _NiLUCUDA_SG is not None else _NiLU_SG
 +_ACT_CLS_MAP = {
-+    "gelu":    _nn.GELU,
-+    "silu":    _nn.SiLU,
-+    "nelu":    _NELU_CLS,
-+    "nilu":    _NILU_CLS,
-+    "nelu_sg": _NELU_SG_CLS,
-+    "nilu_sg": _NILU_SG_CLS,
++    "gelu":      _nn.GELU,
++    "silu":      _nn.SiLU,
++    "nelu":      _NELU_CLS,
++    "nilu":      _NILU_CLS,
++    "nelu_sg":   _NELU_SG_CLS,
++    "nilu_sg":   _NILU_SG_CLS,
++    "nelu_beta": _NELU_Beta,    # learnable β, SG, pure Python + compile
++    "nilu_beta": _NiLU_Beta,
 +}
 +
 +def _replace_act(module, baseline_cls, target_cls):
@@ -66,7 +69,7 @@ index 3c8dd07..ac74922 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +217,18 @@ def get_args_parser():
+@@ -185,6 +220,19 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -74,7 +77,8 @@ index 3c8dd07..ac74922 100644
 +    # NELU paper: activation swap (gelu/silu/nelu/nilu). Patch for our experiments.
 +    parser.add_argument('--act', default='gelu', type=str,
 +                        choices=['gelu', 'silu', 'nelu', 'nilu',
-+                                 'nelu_sg', 'nilu_sg'],
++                                 'nelu_sg', 'nilu_sg',
++                                 'nelu_beta', 'nilu_beta'],
 +                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
 +    parser.add_argument('--torch-compile', action='store_true', default=False,
 +                        help='Wrap model in torch.compile after DDP wrap.')
@@ -85,7 +89,7 @@ index 3c8dd07..ac74922 100644
      return parser
  
  
-@@ -193,6 +237,21 @@ def main(args):
+@@ -193,6 +241,21 @@ def main(args):
  
      print(args)
  
@@ -107,7 +111,7 @@ index 3c8dd07..ac74922 100644
      if args.distillation_type != 'none' and args.finetune and not args.eval:
          raise NotImplementedError("Finetuning with distillation not yet supported")
  
-@@ -270,7 +329,15 @@ def main(args):
+@@ -270,7 +333,15 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -124,7 +128,7 @@ index 3c8dd07..ac74922 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -344,6 +411,31 @@ def main(args):
+@@ -344,6 +415,31 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
@@ -156,7 +160,21 @@ index 3c8dd07..ac74922 100644
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)
      if not args.unscale_lr:
-@@ -476,6 +568,19 @@ def main(args):
+@@ -468,6 +564,13 @@ def main(args):
+                      **{f'test_{k}': v for k, v in test_stats.items()},
+                      'epoch': epoch,
+                      'n_parameters': n_parameters}
++
++        # NELU paper: log per-layer β values for NELU_Beta / NiLU_Beta
++        _beta_idx = 0
++        for _name, _mod in model_without_ddp.named_modules():
++            if hasattr(_mod, 'beta') and hasattr(_mod, '_raw_beta'):
++                log_stats[f'beta/{_beta_idx}_{_name}'] = _mod.beta.item()
++                _beta_idx += 1
+         
+         
+         
+@@ -476,6 +579,19 @@ def main(args):
              with (output_dir / "log.txt").open("a") as f:
                  f.write(json.dumps(log_stats) + "\n")
  

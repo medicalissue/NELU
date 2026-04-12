@@ -13,7 +13,8 @@ All share the same principle: dividing the gate argument by rms(z)
 gives exact forward scale invariance, f(alpha z) = alpha f(z).
 """
 
-from .activations import NELU, NiLU, NELU_SG, NiLU_SG, nelu, nilu
+from .activations import (NELU, NiLU, NELU_SG, NiLU_SG,
+                          NELU_Beta, NiLU_Beta, nelu, nilu)
 from .glu import SwiGLU, NiLUGLU, NELUGLU
 
 # NoSG CUDA kernels (backward has cross-term reduction)
