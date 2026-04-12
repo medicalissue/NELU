@@ -425,7 +425,7 @@ if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
         --color-jitter 0.3 --ThreeAugment \
         --torch-compile \
         --enable-wandb --wandb-project nelu \
-        --act nelu) \
+        --act nelu_sg) \
         2>&1 | tee logs/imnet_deit3_b_nelu.log || \
         echo "[WARN] DeiT-III ViT-B NELU train failed — continuing"
 fi
