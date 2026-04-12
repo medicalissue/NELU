@@ -54,6 +54,7 @@ class NELU(nn.Module):
         super().__init__()
         self.eps = eps
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         rho = _rms(z, self.eps)
         return z * 0.5 * (1.0 + torch.erf((z / rho) * _INV_SQRT2))
@@ -78,6 +79,7 @@ class NiLU(nn.Module):
         super().__init__()
         self.eps = eps
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         rho = _rms(z, self.eps)
         return z * torch.sigmoid(z / rho)
@@ -99,6 +101,7 @@ class NELU_SG(nn.Module):
         super().__init__()
         self.eps = eps
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         rho = _rms(z, self.eps).detach()
         return z * 0.5 * (1.0 + torch.erf((z / rho) * _INV_SQRT2))
@@ -114,6 +117,7 @@ class NiLU_SG(nn.Module):
         super().__init__()
         self.eps = eps
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         rho = _rms(z, self.eps).detach()
         return z * torch.sigmoid(z / rho)
@@ -146,6 +150,7 @@ class NELU_Beta(nn.Module):
     def beta(self) -> torch.Tensor:
         return F.softplus(self._raw_beta)
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         rho = _rms(z, self.eps)
         t = self.beta * z / rho
@@ -168,6 +173,7 @@ class NiLU_Beta(nn.Module):
     def beta(self) -> torch.Tensor:
         return F.softplus(self._raw_beta)
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         rho = _rms(z, self.eps)
         t = self.beta * z / rho
@@ -193,6 +199,8 @@ class NELU_Gamma(nn.Module):
 
     Like RMSNorm's affine weight but inside the activation gate.
     NoSG — gradient flows through rms. γ initialized to 1.
+
+    Forces fp32 inside AMP autocast to prevent fp16 overflow in z/rho.
     """
 
     def __init__(self, eps: float = 1e-6):
@@ -200,6 +208,7 @@ class NELU_Gamma(nn.Module):
         self.eps = eps
         self.gamma = None  # lazy: materialized on first forward
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if self.gamma is None:
             dim = z.size(1) if z.dim() == 4 else z.size(-1)
@@ -222,6 +231,7 @@ class NiLU_Gamma(nn.Module):
         self.eps = eps
         self.gamma = None
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if self.gamma is None:
             dim = z.size(1) if z.dim() == 4 else z.size(-1)
