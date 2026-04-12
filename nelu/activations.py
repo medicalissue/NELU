@@ -86,6 +86,42 @@ class NiLU(nn.Module):
         return f"eps={self.eps}"
 
 
+# ── Stop-Gradient variants ───────────────────────────────────────
+#
+# rho is detached so the backward has NO cross-term reduction.
+# Gradient is purely element-wise: dz_j = g_j * h(t_j).
+# More stable with LAMB / high-lr recipes.
+
+class NELU_SG(nn.Module):
+    """NELU with stop-gradient on rms — no cross-term in backward."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        rho = _rms(z, self.eps).detach()
+        return z * 0.5 * (1.0 + torch.erf((z / rho) * _INV_SQRT2))
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}"
+
+
+class NiLU_SG(nn.Module):
+    """NiLU with stop-gradient on rms — no cross-term in backward."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        rho = _rms(z, self.eps).detach()
+        return z * torch.sigmoid(z / rho)
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}"
+
+
 # ── Functional interfaces ─────────────────────────────────────────
 
 def nelu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

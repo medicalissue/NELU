@@ -13,9 +13,10 @@ All share the same principle: dividing the gate argument by rms(z)
 gives exact forward scale invariance, f(alpha z) = alpha f(z).
 """
 
-from .activations import NELU, NiLU, nelu, nilu
+from .activations import NELU, NiLU, NELU_SG, NiLU_SG, nelu, nilu
 from .glu import SwiGLU, NiLUGLU, NELUGLU
 
+# NoSG CUDA kernels (backward has cross-term reduction)
 try:
     from .cuda_kernel import NELUCUDA, nelu_cuda
 except Exception:
@@ -28,13 +29,30 @@ except Exception:
     NiLUCUDA = None
     nilu_cuda = None
 
+# SG CUDA kernels (backward is purely element-wise, no cross-term)
+try:
+    from .cuda_kernel_sg import NELUCUDA_SG, nelu_cuda_sg
+except Exception:
+    NELUCUDA_SG = None
+    nelu_cuda_sg = None
+
+try:
+    from .nilu_cuda_kernel_sg import NiLUCUDA_SG, nilu_cuda_sg
+except Exception:
+    NiLUCUDA_SG = None
+    nilu_cuda_sg = None
+
 __all__ = [
-    # pointwise
-    "NELU", "nelu",
-    "NiLU", "nilu",
+    # pointwise (NoSG)
+    "NELU", "nelu", "NiLU", "nilu",
+    # pointwise (SG)
+    "NELU_SG", "NiLU_SG",
     # GLU FFN blocks
     "SwiGLU", "NiLUGLU", "NELUGLU",
-    # Fused CUDA kernels
+    # Fused CUDA — NoSG
     "NELUCUDA", "nelu_cuda",
     "NiLUCUDA", "nilu_cuda",
+    # Fused CUDA — SG
+    "NELUCUDA_SG", "nelu_cuda_sg",
+    "NiLUCUDA_SG", "nilu_cuda_sg",
 ]
