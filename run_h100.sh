@@ -461,21 +461,20 @@ imnet_eval_baseline efficientnet_b2.ra_in1k imnet_effnet_b2_silu_eval
 
 if ! skip_if_done "results/imagenet/efficientnet_b2_nilu/result.json"; then
     echo "[$(date +%H:%M)] EfficientNet-B2 NiLU from scratch (timm/train.py)"
-    # Wightman B2 RA recipe (from hfdocs/source/training_script.mdx).
-    # Original: -b 128 × 2 GPU = 256 effective at lr 0.016.
-    # We use 8 GPU × -b 128 = 1024 effective with linearly scaled lr 0.064
-    # (matches Wightman's B0 scaling: 3× effective batch ⇒ 3× lr).
-    torchrun --nproc_per_node=8 experiments/train_imagenet_timm.py \
+    # Wightman B2 RA recipe — VERBATIM from hfdocs/source/training_script.mdx:
+    #   ./distributed_train.sh 2 ... -b 128 --lr .016 ...
+    # 2 GPU × 128 = 256 effective. No batch/lr scaling. Bit-exact.
+    torchrun --nproc_per_node=2 experiments/train_imagenet_timm.py \
         --our-act nilu \
         "$IMNET_DATA" \
         --model efficientnet_b2 -b 128 \
         --sched step --epochs 450 --decay-epochs 2.4 --decay-rate .97 \
-        --opt rmsproptf --opt-eps .001 -j 10 \
-        --warmup-lr 1e-6 --warmup-epochs 5 --weight-decay 1e-5 \
+        --opt rmsproptf --opt-eps .001 -j 8 \
+        --warmup-lr 1e-6 --weight-decay 1e-5 \
         --drop 0.3 --drop-path 0.2 \
         --model-ema --model-ema-decay 0.9999 \
         --aa rand-m9-mstd0.5 --remode pixel --reprob 0.2 \
-        --amp --amp-dtype float16 --lr .064 \
+        --amp --lr .016 \
         --torchcompile inductor \
         --output "$RESACT_DIR/results/imagenet/efficientnet_b2_nilu" \
         --experiment efficientnet_b2_nilu \
