@@ -17,7 +17,7 @@ index 8d6640d..88b9b25 100644
  import numpy as np
  from torchvision import datasets, transforms
 diff --git a/main.py b/main.py
-index 3c8dd07..19d7785 100644
+index 3c8dd07..ac74922 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -28,7 +28,7 @@ index 3c8dd07..19d7785 100644
  import torch.backends.cudnn as cudnn
  import json
  
-@@ -28,6 +29,30 @@ import models_v2
+@@ -28,6 +29,37 @@ import models_v2
  
  import utils
  
@@ -36,15 +36,22 @@ index 3c8dd07..19d7785 100644
 +# `nelu` package must be importable; the launcher (ResAct/run_h100.sh)
 +# prepends ResAct to PYTHONPATH for this run.
 +import torch.nn as _nn
-+from nelu import NELU as _NELU, NiLU as _NiLU, NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA
++from nelu import (NELU as _NELU, NiLU as _NiLU,
++                  NELU_SG as _NELU_SG, NiLU_SG as _NiLU_SG,
++                  NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA,
++                  NELUCUDA_SG as _NELUCUDA_SG, NiLUCUDA_SG as _NiLUCUDA_SG)
 +
-+_NELU_CLS = _NELUCUDA if _NELUCUDA is not None else _NELU
-+_NILU_CLS = _NiLUCUDA if _NiLUCUDA is not None else _NiLU
++_NELU_CLS    = _NELUCUDA    if _NELUCUDA    is not None else _NELU
++_NILU_CLS    = _NiLUCUDA    if _NiLUCUDA    is not None else _NiLU
++_NELU_SG_CLS = _NELUCUDA_SG if _NELUCUDA_SG is not None else _NELU_SG
++_NILU_SG_CLS = _NiLUCUDA_SG if _NiLUCUDA_SG is not None else _NiLU_SG
 +_ACT_CLS_MAP = {
-+    "gelu": _nn.GELU,
-+    "silu": _nn.SiLU,
-+    "nelu": _NELU_CLS,
-+    "nilu": _NILU_CLS,
++    "gelu":    _nn.GELU,
++    "silu":    _nn.SiLU,
++    "nelu":    _NELU_CLS,
++    "nilu":    _NILU_CLS,
++    "nelu_sg": _NELU_SG_CLS,
++    "nilu_sg": _NILU_SG_CLS,
 +}
 +
 +def _replace_act(module, baseline_cls, target_cls):
@@ -59,21 +66,48 @@ index 3c8dd07..19d7785 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +210,13 @@ def get_args_parser():
+@@ -185,6 +217,18 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 +
 +    # NELU paper: activation swap (gelu/silu/nelu/nilu). Patch for our experiments.
 +    parser.add_argument('--act', default='gelu', type=str,
-+                        choices=['gelu', 'silu', 'nelu', 'nilu'],
++                        choices=['gelu', 'silu', 'nelu', 'nilu',
++                                 'nelu_sg', 'nilu_sg'],
 +                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
 +    parser.add_argument('--torch-compile', action='store_true', default=False,
 +                        help='Wrap model in torch.compile after DDP wrap.')
++    parser.add_argument('--enable-wandb', action='store_true', default=False,
++                        help='Log to Weights & Biases (rank 0 only).')
++    parser.add_argument('--wandb-project', default='nelu', type=str,
++                        help='W&B project name.')
      return parser
  
  
-@@ -270,7 +302,15 @@ def main(args):
+@@ -193,6 +237,21 @@ def main(args):
+ 
+     print(args)
+ 
++    # NELU paper: wandb logging (rank 0 only)
++    _wandb_run = None
++    if getattr(args, 'enable_wandb', False) and utils.is_main_process():
++        try:
++            import wandb
++            _wandb_run = wandb.init(
++                project=getattr(args, 'wandb_project', 'nelu'),
++                name=f"{args.model}_{args.act}",
++                group="imagenet",
++                config=vars(args),
++                resume="allow",
++            )
++        except Exception as e:
++            print(f"  [WARN] wandb init failed: {e}")
++
+     if args.distillation_type != 'none' and args.finetune and not args.eval:
+         raise NotImplementedError("Finetuning with distillation not yet supported")
+ 
+@@ -270,7 +329,15 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -90,7 +124,7 @@ index 3c8dd07..19d7785 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -344,6 +384,31 @@ def main(args):
+@@ -344,6 +411,31 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
@@ -122,3 +156,23 @@ index 3c8dd07..19d7785 100644
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)
      if not args.unscale_lr:
+@@ -476,6 +568,19 @@ def main(args):
+             with (output_dir / "log.txt").open("a") as f:
+                 f.write(json.dumps(log_stats) + "\n")
+ 
++        # NELU paper: wandb epoch-level log
++        if _wandb_run is not None:
++            try:
++                _wandb_run.log(log_stats)
++            except Exception:
++                pass
++
++    if _wandb_run is not None:
++        try:
++            _wandb_run.finish()
++        except Exception:
++            pass
++
+     total_time = time.time() - start_time
+     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+     print('Training time {}'.format(total_time_str))
