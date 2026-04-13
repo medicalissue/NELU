@@ -402,33 +402,34 @@ imnet_eval_baseline() {
 #   Phase 4: ConvNeXt-T  ~30h    (was Phase 3)
 #   Phase 5: EffNet-B2   ~22h    (was Phase 4)
 
-# ─────────── Phase 3: DeiT-III ViT-B (FB deit main.py) ───────────
-echo -e "\n═══ Phase 3: ImageNet DeiT-III ViT-B (GELU vs NELU) ═══"
-imnet_eval_baseline deit3_base_patch16_224.fb_in1k imnet_deit3_b_gelu_eval
 
-if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
-    echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch (FB deit main.py)"
-    # README_revenge ImageNet-1k pretraining cmd (line 412 of README_revenge.md).
-    (cd "$DEIT_DIR" && \
-     PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
-     torchrun --nproc_per_node=8 main.py \
-        --model deit_base_patch16_LS \
-        --data-path "$IMNET_DATA" \
-        --output_dir "$RESACT_DIR/results/imagenet/deit3_base_nelu" \
-        --batch 256 --lr 3e-3 --epochs 800 --weight-decay 0.05 \
-        --sched cosine --input-size 192 --eval-crop-ratio 1.0 \
-        --reprob 0.0 --smoothing 0.0 --warmup-epochs 5 \
-        --drop 0.0 --seed 0 \
-        --opt fusedlamb --warmup-lr 1e-6 \
-        --mixup .8 --drop-path 0.2 --cutmix 1.0 \
-        --unscale-lr --repeated-aug --bce-loss \
-        --color-jitter 0.3 --ThreeAugment \
-        --torch-compile \
-        --enable-wandb --wandb-project nelu \
-        --act nelu_surr) \
-        2>&1 | tee logs/imnet_deit3_b_nelu.log || \
-        echo "[WARN] DeiT-III ViT-B NELU train failed — continuing"
-fi
+# ─────────── Phase 3: DeiT-III ViT-B (FB deit main.py) ───────────
+# echo -e "\n═══ Phase 3: ImageNet DeiT-III ViT-B (GELU vs NELU) ═══"
+# imnet_eval_baseline deit3_base_patch16_224.fb_in1k imnet_deit3_b_gelu_eval
+
+# if ! skip_if_done "results/imagenet/deit3_base_nelu/result.json"; then
+#     echo "[$(date +%H:%M)] DeiT-III ViT-B NELU from scratch (FB deit main.py)"
+#     # README_revenge ImageNet-1k pretraining cmd (line 412 of README_revenge.md).
+#     (cd "$DEIT_DIR" && \
+#      PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
+#      torchrun --nproc_per_node=8 main.py \
+#         --model deit_base_patch16_LS \
+#         --data-path "$IMNET_DATA" \
+#         --output_dir "$RESACT_DIR/results/imagenet/deit3_base_nelu" \
+#         --batch 256 --lr 3e-3 --epochs 800 --weight-decay 0.05 \
+#         --sched cosine --input-size 192 --eval-crop-ratio 1.0 \
+#         --reprob 0.0 --smoothing 0.0 --warmup-epochs 5 \
+#         --drop 0.0 --seed 0 \
+#         --opt fusedlamb --warmup-lr 1e-6 \
+#         --mixup .8 --drop-path 0.2 --cutmix 1.0 \
+#         --unscale-lr --repeated-aug --bce-loss \
+#         --color-jitter 0.3 --ThreeAugment \
+#         --torch-compile \
+#         --enable-wandb --wandb-project nelu \
+#         --act nelu) \
+#         2>&1 | tee logs/imnet_deit3_b_nelu.log || \
+#         echo "[WARN] DeiT-III ViT-B NELU train failed — continuing"
+# fi
 
 # ─────────── Phase 4: ConvNeXt-T (FB ConvNeXt main.py) ───────────
 echo -e "\n═══ Phase 4: ImageNet ConvNeXt-T (GELU vs NELU) ═══"

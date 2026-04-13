@@ -17,17 +17,10 @@ index 8d6640d..88b9b25 100644
  import numpy as np
  from torchvision import datasets, transforms
 diff --git a/engine.py b/engine.py
-index 1f036cf..5faafb6 100644
+index 1f036cf..d705d33 100644
 --- a/engine.py
 +++ b/engine.py
-@@ -20,44 +20,53 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
-                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
--                    set_training_mode=True, args = None):
-+                    set_training_mode=True, args = None, diag = None):
-     model.train(set_training_mode)
-     metric_logger = utils.MetricLogger(delimiter="  ")
+@@ -26,33 +26,33 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
      metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
      header = 'Epoch: [{}]'.format(epoch)
      print_freq = 10
@@ -37,15 +30,10 @@ index 1f036cf..5faafb6 100644
          criterion = torch.nn.BCEWithLogitsLoss()
 -        
 +
-+    _global_step = epoch * len(data_loader)
-+
      for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
          samples = samples.to(device, non_blocking=True)
          targets = targets.to(device, non_blocking=True)
  
-+        if diag is not None:
-+            diag.step_forward_done()  # reset hook accumulators
-+
          if mixup_fn is not None:
              samples, targets = mixup_fn(samples, targets)
 -            
@@ -74,35 +62,8 @@ index 1f036cf..5faafb6 100644
  
          loss_value = loss.item()
  
-         if not math.isfinite(loss_value):
-             print("Loss is {}, stopping training".format(loss_value))
-+            # NELU diag: dump final diagnostics before dying
-+            if diag is not None:
-+                print("  [DIAG] dumping final diagnostics before exit")
-+                diag.step(_global_step)
-             sys.exit(1)
- 
-         optimizer.zero_grad()
-@@ -68,11 +77,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
-                     parameters=model.parameters(), create_graph=is_second_order)
- 
-         torch.cuda.synchronize()
-+
-+        # NELU diagnostics: log grad norms + rho + activation stats
-+        if diag is not None:
-+            diag.step(_global_step)
-+
-         if model_ema is not None:
-             model_ema.update(model)
- 
-         metric_logger.update(loss=loss_value)
-         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-+        _global_step += 1
-     # gather the stats from all processes
-     metric_logger.synchronize_between_processes()
-     print("Averaged stats:", metric_logger)
 diff --git a/main.py b/main.py
-index 3c8dd07..315ce5e 100644
+index 3c8dd07..f49199b 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -113,7 +74,7 @@ index 3c8dd07..315ce5e 100644
  import torch.backends.cudnn as cudnn
  import json
  
-@@ -28,6 +29,52 @@ import models_v2
+@@ -28,6 +29,30 @@ import models_v2
  
  import utils
  
@@ -121,38 +82,16 @@ index 3c8dd07..315ce5e 100644
 +# `nelu` package must be importable; the launcher (ResAct/run_h100.sh)
 +# prepends ResAct to PYTHONPATH for this run.
 +import torch.nn as _nn
-+from nelu import (NELU as _NELU, NiLU as _NiLU,
-+                  NELU_SG as _NELU_SG, NiLU_SG as _NiLU_SG,
-+                  NELU_Beta as _NELU_Beta, NiLU_Beta as _NiLU_Beta,
-+                  NELU_Gamma as _NELU_Gamma, NiLU_Gamma as _NiLU_Gamma,
-+                  NELU_Surr as _NELU_Surr, NiLU_Surr as _NiLU_Surr,
-+                  NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA,
-+                  NELUCUDA_SG as _NELUCUDA_SG, NiLUCUDA_SG as _NiLUCUDA_SG)
-+try:
-+    from nelu.cuda_kernel_surr import NELUCUDA_Surr as _NELUCUDA_Surr
-+except Exception:
-+    _NELUCUDA_Surr = None
++from nelu import NELU as _NELU, NiLU as _NiLU, NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA
 +
-+_NELU_CLS    = _NELUCUDA    if _NELUCUDA    is not None else _NELU
-+_NILU_CLS    = _NiLUCUDA    if _NiLUCUDA    is not None else _NiLU
-+_NELU_SG_CLS = _NELUCUDA_SG if _NELUCUDA_SG is not None else _NELU_SG
-+_NILU_SG_CLS = _NiLUCUDA_SG if _NiLUCUDA_SG is not None else _NiLU_SG
++_NELU_CLS = _NELUCUDA if _NELUCUDA is not None else _NELU
++_NILU_CLS = _NiLUCUDA if _NiLUCUDA is not None else _NiLU
 +_ACT_CLS_MAP = {
-+    "gelu":       _nn.GELU,
-+    "silu":       _nn.SiLU,
-+    "nelu":       _NELU_CLS,
-+    "nilu":       _NILU_CLS,
-+    "nelu_sg":    _NELU_SG_CLS,
-+    "nilu_sg":    _NILU_SG_CLS,
-+    "nelu_beta":  _NELU_Beta,
-+    "nilu_beta":  _NiLU_Beta,
-+    "nelu_gamma": _NELU_Gamma,   # per-channel γ, RMSNorm-style, NoSG
-+    "nilu_gamma": _NiLU_Gamma,
-+    "nelu_surr":  _NELUCUDA_Surr if _NELUCUDA_Surr is not None else _NELU_Surr,
-+    "nilu_surr":  _NiLU_Surr,  # NiLU surr CUDA TODO
++    "gelu": _nn.GELU,
++    "silu": _nn.SiLU,
++    "nelu": _NELU_CLS,
++    "nilu": _NILU_CLS,
 +}
-+# Variants with lazy-init parameters (need dummy forward before DDP wrap)
-+_LAZY_ACT_VARIANTS = {"nelu_gamma", "nilu_gamma"}
 +
 +def _replace_act(module, baseline_cls, target_cls):
 +    """Recursively replace every `baseline_cls` instance with `target_cls()`."""
@@ -166,18 +105,14 @@ index 3c8dd07..315ce5e 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +232,21 @@ def get_args_parser():
+@@ -185,6 +210,17 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 +
-+    # NELU paper: activation swap (gelu/silu/nelu/nilu). Patch for our experiments.
++    # NELU paper: activation swap (gelu/silu/nelu/nilu).
 +    parser.add_argument('--act', default='gelu', type=str,
-+                        choices=['gelu', 'silu', 'nelu', 'nilu',
-+                                 'nelu_sg', 'nilu_sg',
-+                                 'nelu_beta', 'nilu_beta',
-+                                 'nelu_gamma', 'nilu_gamma',
-+                                 'nelu_surr', 'nilu_surr'],
++                        choices=['gelu', 'silu', 'nelu', 'nilu'],
 +                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
 +    parser.add_argument('--torch-compile', action='store_true', default=False,
 +                        help='Wrap model in torch.compile after DDP wrap.')
@@ -188,7 +123,7 @@ index 3c8dd07..315ce5e 100644
      return parser
  
  
-@@ -193,6 +255,21 @@ def main(args):
+@@ -193,6 +229,21 @@ def main(args):
  
      print(args)
  
@@ -210,7 +145,7 @@ index 3c8dd07..315ce5e 100644
      if args.distillation_type != 'none' and args.finetune and not args.eval:
          raise NotImplementedError("Finetuning with distillation not yet supported")
  
-@@ -270,7 +347,15 @@ def main(args):
+@@ -270,7 +321,15 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -227,24 +162,7 @@ index 3c8dd07..315ce5e 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -331,6 +416,16 @@ def main(args):
-             
-     model.to(device)
- 
-+    # NELU paper: lazy-init γ parameters (NELU_Gamma / NiLU_Gamma) need a
-+    # dummy forward before DDP wrap so all parameters exist and get synced.
-+    if args.act in _LAZY_ACT_VARIANTS:
-+        with torch.no_grad():
-+            _dummy = torch.randn(1, 3, args.input_size, args.input_size, device=device)
-+            model(_dummy)
-+        if utils.is_main_process():
-+            total_gamma = sum(p.numel() for n, p in model.named_parameters() if 'gamma' in n)
-+            print(f"  [NELU] materialized gamma: {total_gamma} params")
-+
-     model_ema = None
-     if args.model_ema:
-         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-@@ -344,6 +439,31 @@ def main(args):
+@@ -344,6 +403,31 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
@@ -276,54 +194,7 @@ index 3c8dd07..315ce5e 100644
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)
      if not args.unscale_lr:
-@@ -414,6 +534,17 @@ def main(args):
-         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-         return
- 
-+    # NELU paper: training diagnostics (grad norms, ρ, activation stats)
-+    _diag = None
-+    if args.act != 'gelu' and utils.is_main_process():
-+        try:
-+            from nelu.diagnostics import NELUDiagnostics
-+            _diag = NELUDiagnostics(model_without_ddp, log_every=50,
-+                                     wandb_run=_wandb_run)
-+            print(f"  [DIAG] diagnostics enabled (log every 50 steps)")
-+        except Exception as e:
-+            print(f"  [DIAG] WARNING: failed to init diagnostics: {e}")
-+
-     print(f"Start training for {args.epochs} epochs")
-     start_time = time.time()
-     max_accuracy = 0.0
-@@ -427,6 +558,7 @@ def main(args):
-             args.clip_grad, model_ema, mixup_fn,
-             set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
-             args = args,
-+            diag = _diag,
-         )
- 
-         lr_scheduler.step(epoch)
-@@ -468,6 +600,20 @@ def main(args):
-                      **{f'test_{k}': v for k, v in test_stats.items()},
-                      'epoch': epoch,
-                      'n_parameters': n_parameters}
-+
-+        # NELU paper: log per-layer learnable gate params (β or γ)
-+        _act_idx = 0
-+        for _name, _mod in model_without_ddp.named_modules():
-+            if hasattr(_mod, 'beta') and hasattr(_mod, '_raw_beta'):
-+                log_stats[f'beta/{_act_idx}_{_name}'] = _mod.beta.item()
-+                _act_idx += 1
-+            elif hasattr(_mod, 'gamma') and isinstance(getattr(_mod, 'gamma', None), torch.nn.Parameter):
-+                _g = _mod.gamma.detach()
-+                log_stats[f'gamma_mean/{_act_idx}_{_name}'] = _g.mean().item()
-+                log_stats[f'gamma_std/{_act_idx}_{_name}'] = _g.std().item()
-+                log_stats[f'gamma_min/{_act_idx}_{_name}'] = _g.min().item()
-+                log_stats[f'gamma_max/{_act_idx}_{_name}'] = _g.max().item()
-+                _act_idx += 1
-         
-         
-         
-@@ -476,6 +622,19 @@ def main(args):
+@@ -476,6 +560,19 @@ def main(args):
              with (output_dir / "log.txt").open("a") as f:
                  f.write(json.dumps(log_stats) + "\n")
  
