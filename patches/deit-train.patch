@@ -63,7 +63,7 @@ index 1f036cf..d705d33 100644
          loss_value = loss.item()
  
 diff --git a/main.py b/main.py
-index 3c8dd07..77ae615 100644
+index 3c8dd07..681619a 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -93,8 +93,8 @@ index 3c8dd07..77ae615 100644
 +    "silu":    _nn.SiLU,
 +    "nelu":    _NELU_CLS,
 +    "nilu":    _NILU_CLS,
-+    "nelu_gn": _NELU_GN,   # gate-normalized: f = c·z·Φ(z/ρ), non-expansive
-+    "nilu_gn": _NiLU_GN,
++    "nelu_gn":  _NELU_GN,   # gate-normalized: f = c·z·Φ(z/ρ), non-expansive
++    "nilu_gn":  _NiLU_GN,
 +}
 +
 +def _replace_act(module, baseline_cls, target_cls):

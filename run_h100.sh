@@ -446,13 +446,14 @@ if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
      torchrun --nproc_per_node=8 main.py \
         --model convnext_tiny --drop_path 0.1 \
         --batch_size 512 --lr 4e-3 --update_freq 1 \
+        --weight_decay 0.1 \
         --model_ema true --model_ema_eval true \
         --data_path "$IMNET_DATA" \
         --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu" \
         --use_amp true --auto_resume true \
         --enable_wandb true --project nelu \
         --torch_compile true \
-        --act nelu_gn) \
+        --act nelu) \
         2>&1 | tee logs/imnet_convnext_t_nelu.log || \
         echo "[WARN] ConvNeXt-T NELU train failed — continuing"
 fi
