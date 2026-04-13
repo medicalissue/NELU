@@ -88,6 +88,70 @@ class NiLU(nn.Module):
         return f"eps={self.eps}"
 
 
+# ── Gate-normalized variants ──────────────────────────────────────
+#
+# f(z)_i = c_g · z_i · g(z_i / ρ)
+#
+# c_g is the non-expansive constant chosen so that |∂f_i/∂z_i| ≤ 1:
+#
+#   NELU (g = Φ):   c_g = 1 / h_Φ(√2)     ≈ 0.8858148
+#   NiLU (g = σ):   c_g = 1 / h_σ(t*)     ≈ 0.9092237    where t* ≈ 2.3994
+#
+# Homogeneity is preserved because c_g is a constant:
+#   f(α·z) = c_g · α·z · g(α·z / α·ρ) = α · f(z)
+#
+# Spectral bound: diagonal Jacobian |∂f_i/∂z_i| ≤ 1 (ReLU-like).
+# Non-monotonicity preserved: c_g · h_g(-t*) ≈ -0.11 (NELU), -0.09 (NiLU).
+#
+# At ρ = 1 this is just a scalar rescale of GELU/SiLU by c_g.
+
+_C_NELU = 0.8858148004   # 1 / (Φ(√2) + √2 · φ(√2))
+_C_NILU = 0.9092237218   # 1 / h_σ(t*)  where 2 + t*(1 - 2σ(t*)) = 0
+
+
+class NELU_GN(nn.Module):
+    """Gate-normalized NELU: f(z) = c · z · Φ(z/ρ),  c ≈ 0.8858.
+
+    Scalar multiplier on top of NELU making the activation non-expansive
+    (|∂f_i/∂z_i| ≤ 1). Homogeneity and non-monotonicity preserved.
+    Uses the fused CUDA NELU kernel if available.
+    """
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        try:
+            from .cuda_kernel import NELUCUDA as _NELUCUDA
+            self._inner = _NELUCUDA(eps=eps) if _NELUCUDA is not None else NELU(eps=eps)
+        except Exception:
+            self._inner = NELU(eps=eps)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return _C_NELU * self._inner(z)
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}, c={_C_NELU:.6f}"
+
+
+class NiLU_GN(nn.Module):
+    """Gate-normalized NiLU: f(z) = c · z · σ(z/ρ),  c ≈ 0.9092."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        try:
+            from .nilu_cuda_kernel import NiLUCUDA as _NiLUCUDA
+            self._inner = _NiLUCUDA(eps=eps) if _NiLUCUDA is not None else NiLU(eps=eps)
+        except Exception:
+            self._inner = NiLU(eps=eps)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return _C_NILU * self._inner(z)
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}, c={_C_NILU:.6f}"
+
+
 # ── Functional interfaces ─────────────────────────────────────────
 
 def nelu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

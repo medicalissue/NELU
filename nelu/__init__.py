@@ -13,7 +13,7 @@ All share the same principle: dividing the gate argument by rms(z)
 gives exact forward scale invariance, f(alpha z) = alpha f(z).
 """
 
-from .activations import NELU, NiLU, nelu, nilu
+from .activations import NELU, NiLU, NELU_GN, NiLU_GN, nelu, nilu
 from .glu import SwiGLU, NiLUGLU, NELUGLU
 
 try:
@@ -32,6 +32,8 @@ __all__ = [
     # pointwise
     "NELU", "nelu",
     "NiLU", "nilu",
+    # gate-normalized (non-expansive Jacobian)
+    "NELU_GN", "NiLU_GN",
     # GLU FFN blocks
     "SwiGLU", "NiLUGLU", "NELUGLU",
     # Fused CUDA kernels

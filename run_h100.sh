@@ -452,7 +452,7 @@ if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
         --use_amp true --auto_resume true \
         --enable_wandb true --project nelu \
         --torch_compile true \
-        --act nelu) \
+        --act nelu_gn) \
         2>&1 | tee logs/imnet_convnext_t_nelu.log || \
         echo "[WARN] ConvNeXt-T NELU train failed — continuing"
 fi
