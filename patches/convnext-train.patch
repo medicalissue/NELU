@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index e3e40e3..e800346 100644
+index e3e40e3..1ce0a6c 100644
 --- a/main.py
 +++ b/main.py
 @@ -11,6 +11,7 @@ import datetime
@@ -73,7 +73,7 @@ index e3e40e3..e800346 100644
      return parser
  
  def main(args):
-@@ -276,14 +326,23 @@ def main(args):
+@@ -276,20 +326,29 @@ def main(args):
              label_smoothing=args.smoothing, num_classes=args.nb_classes)
  
      model = create_model(
@@ -100,6 +100,13 @@ index e3e40e3..e800346 100644
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
+                 args.finetune, map_location='cpu', check_hash=True)
+         else:
+-            checkpoint = torch.load(args.finetune, map_location='cpu')
++            checkpoint = torch.load(args.finetune, map_location='cpu', weights_only=False)
+ 
+         print("Load ckpt from %s" % args.finetune)
+         checkpoint_model = None
 @@ -347,6 +406,31 @@ def main(args):
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
          model_without_ddp = model.module
@@ -178,7 +185,7 @@ index ec5c003..11f3da0 100644
  from timm.optim.sgdp import SGDP
  
 diff --git a/utils.py b/utils.py
-index a34c480..7939180 100644
+index a34c480..16637f2 100644
 --- a/utils.py
 +++ b/utils.py
 @@ -18,7 +18,11 @@ from pathlib import Path
@@ -194,3 +201,12 @@ index a34c480..7939180 100644
  
  from tensorboardX import SummaryWriter
  
+@@ -488,7 +492,7 @@ def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, mode
+             checkpoint = torch.hub.load_state_dict_from_url(
+                 args.resume, map_location='cpu', check_hash=True)
+         else:
+-            checkpoint = torch.load(args.resume, map_location='cpu')
++            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+         model_without_ddp.load_state_dict(checkpoint['model'])
+         print("Resume checkpoint %s" % args.resume)
+         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
