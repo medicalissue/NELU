@@ -158,44 +158,49 @@ fi
 
 
 # ─── 5: Clear torch_extensions cache ─────────────────────────────
-# hdr "[4/8] Clearing torch_extensions cache (forces NELU/NiLU recompile)"
-# EXT_DIR="$HOME/.cache/torch_extensions"
-# if [ -d "$EXT_DIR" ]; then
-#     for sub in "$EXT_DIR"/*/nelu_cuda "$EXT_DIR"/*/nilu_cuda; do
-#         [ -e "$sub" ] && rm -rf "$sub" && ok "removed $sub"
-#     done
-# else
-#     ok "no extension cache yet (clean machine)"
-# fi
+# Kernel signature changed — stale .so files would crash. Force rebuild.
+hdr "[4/8] Clearing torch_extensions cache (forces NELU/NiLU recompile)"
+EXT_DIR="$HOME/.cache/torch_extensions"
+if [ -d "$EXT_DIR" ]; then
+    for sub in "$EXT_DIR"/*/nelu_cuda "$EXT_DIR"/*/nilu_cuda; do
+        [ -e "$sub" ] && rm -rf "$sub" && ok "removed $sub"
+    done
+else
+    ok "no extension cache yet (clean machine)"
+fi
 
 
 # ─── 6: Smoke test the kernels ───────────────────────────────────
 hdr "[5/8] Compiling + smoke-testing NELU/NiLU CUDA kernels"
 python - <<'PY' || { err "kernel smoke test failed"; exit 1; }
-import sys, math, torch
+import sys, torch
 sys.path.insert(0, ".")
 
 print("  importing nelu...", flush=True)
-from nelu import NELU, NiLU, NELUCUDA, NiLUCUDA
+from nelu import NELU, NiLU
 from nelu.cuda_kernel import nelu_cuda
 from nelu.nilu_cuda_kernel import nilu_cuda
 
-assert NELUCUDA is not None, "NELUCUDA failed to load"
-assert NiLUCUDA is not None, "NiLUCUDA failed to load"
-
-# Forward + backward sanity (fp32, fp16, bf16) at three sizes
-for shape in [(2, 768), (4, 4096), (2, 64, 14, 14)]:
+# Forward + backward sanity (fp32, fp16, bf16) at three shapes.
+# All shapes put channel on the LAST dim (the only layout the kernel
+# supports): ViT token form, ConvNeXt NHWC form, GLU hidden form.
+shapes = [(2, 768), (2, 197, 768), (2, 14, 14, 256)]
+for shape in shapes:
+    C = shape[-1]
     for dt in [torch.float32, torch.float16, torch.bfloat16]:
         z = torch.randn(*shape, device="cuda", dtype=dt, requires_grad=True)
+        gamma = torch.full((C,), 0.1, device="cuda",
+                           dtype=torch.float32, requires_grad=True)
         for fn, name in [(nelu_cuda, "NELU"), (nilu_cuda, "NiLU")]:
-            y = fn(z)
-            g = torch.randn_like(y)
-            y.backward(g)
+            z2 = z.detach().clone().requires_grad_(True)
+            g2 = gamma.detach().clone().requires_grad_(True)
+            y = fn(z2, g2)
+            (y.float().pow(2).sum()).backward()
             assert torch.isfinite(y).all(), f"{name} {shape} {dt} fwd nan"
-            assert torch.isfinite(z.grad).all(), f"{name} {shape} {dt} bwd nan"
-            z.grad = None
+            assert torch.isfinite(z2.grad).all(), f"{name} {shape} {dt} dz nan"
+            assert torch.isfinite(g2.grad).all(), f"{name} {shape} {dt} dgamma nan"
 
-print("  ✓ NELU + NiLU forward + backward OK across fp32/fp16/bf16")
+print("  ✓ NELU + NiLU forward + backward (dz & dgamma) OK")
 print("  ✓ kernels recompiled for local compute capability")
 PY
 ok "kernel smoke test passed"
