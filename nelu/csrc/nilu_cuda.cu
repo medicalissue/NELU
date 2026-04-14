@@ -578,6 +578,92 @@ void launch_bwd(const scalar_t* z, const float* rho, const scalar_t* dy,
 }
 
 
+// ════════════════════════════════════════════════════════════════
+//  SG BACKWARD — element-wise, no cross-term.
+//  dz_j = g_j * (sigma(t_j) + t_j * sigma'(t_j))
+// ════════════════════════════════════════════════════════════════
+
+template <typename T, int BLOCK>
+__global__ void bwd_sg_vec(
+    const T* __restrict__ z,
+    const float* __restrict__ rho_in,
+    const T* __restrict__ dy,
+    T* __restrict__ dz,
+    int N)
+{
+    constexpr int K = VecK<T>::K;
+    int r = blockIdx.x;
+    float inv = 1.f / rho_in[r];
+    const T* zr  = z  + (long)r * N;
+    const T* dyr = dy + (long)r * N;
+    T*       dzr = dz + (long)r * N;
+    int Npack = N / K;
+
+    for (int i = threadIdx.x; i < Npack; i += BLOCK) {
+        float zv[K], gv[K];
+        load_pack(zr,  i, zv);
+        load_pack(dyr, i, gv);
+        float out[K];
+        #pragma unroll
+        for (int k = 0; k < K; ++k) {
+            float t  = zv[k] * inv;
+            float s  = nilu_sigmoid(t);
+            float sp = s * (1.f - s);
+            out[k] = gv[k] * (s + t * sp);
+        }
+        store_pack(dzr, i, out);
+    }
+}
+
+template <typename T, int BLOCK>
+__global__ void bwd_sg_scalar(
+    const T* __restrict__ z,
+    const float* __restrict__ rho_in,
+    const T* __restrict__ dy,
+    T* __restrict__ dz,
+    int N)
+{
+    int r = blockIdx.x;
+    float inv = 1.f / rho_in[r];
+    const T* zr  = z  + (long)r * N;
+    const T* dyr = dy + (long)r * N;
+    T*       dzr = dz + (long)r * N;
+
+    for (int i = threadIdx.x; i < N; i += BLOCK) {
+        float zi = (float)zr[i];
+        float gi = (float)dyr[i];
+        float t  = zi * inv;
+        float s  = nilu_sigmoid(t);
+        float sp = s * (1.f - s);
+        dzr[i] = (T)(gi * (s + t * sp));
+    }
+}
+
+template <typename scalar_t>
+void launch_bwd_sg(const scalar_t* z, const float* rho, const scalar_t* dy,
+                   scalar_t* dz, int M, int N, cudaStream_t s)
+{
+    const int  block = choose_block_size(N);
+    const bool vec   = is_vectorizable<scalar_t>(N);
+
+    #define LAUNCH_SG(KERN) KERN<<<M, block, 0, s>>>(z, rho, dy, dz, N)
+    if (vec) {
+        switch (block) {
+            case 128: LAUNCH_SG((bwd_sg_vec<scalar_t, 128>));  break;
+            case 256: LAUNCH_SG((bwd_sg_vec<scalar_t, 256>));  break;
+            case 512: LAUNCH_SG((bwd_sg_vec<scalar_t, 512>));  break;
+            default:  LAUNCH_SG((bwd_sg_vec<scalar_t, 1024>)); break;
+        }
+    } else {
+        switch (block) {
+            case 128: LAUNCH_SG((bwd_sg_scalar<scalar_t, 128>));  break;
+            case 256: LAUNCH_SG((bwd_sg_scalar<scalar_t, 256>));  break;
+            case 512: LAUNCH_SG((bwd_sg_scalar<scalar_t, 512>));  break;
+            default:  LAUNCH_SG((bwd_sg_scalar<scalar_t, 1024>)); break;
+        }
+    }
+    #undef LAUNCH_SG
+}
 
 
 // ════════════════════════════════════════════════════════════════
@@ -598,6 +684,22 @@ std::vector<torch::Tensor> forward_impl(torch::Tensor z, float eps) {
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {y.reshape_as(z), rho};
+}
+
+torch::Tensor backward_sg_impl(torch::Tensor z, torch::Tensor rho, torch::Tensor dy) {
+    auto z2  = z.reshape({-1, z.size(-1)}).contiguous();
+    auto dy2 = dy.reshape({-1, dy.size(-1)}).contiguous();
+    int M = z2.size(0), N = z2.size(1);
+    auto dz = torch::empty_like(z2);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
+        z.scalar_type(), "nilu_bwd_sg", [&] {
+        launch_bwd_sg(z2.data_ptr<scalar_t>(), rho.data_ptr<float>(),
+                      dy2.data_ptr<scalar_t>(), dz.data_ptr<scalar_t>(),
+                      M, N, stream);
+    });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return dz.reshape_as(z);
 }
 
 torch::Tensor backward_impl(torch::Tensor z, torch::Tensor rho, torch::Tensor dy) {
@@ -645,5 +747,6 @@ torch::Tensor nilu_autograd(torch::Tensor z, double eps) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward",       &nilu_cuda::forward_impl);
     m.def("backward",      &nilu_cuda::backward_impl);
+    m.def("backward_sg",   &nilu_cuda::backward_sg_impl);
     m.def("nilu_autograd", &nilu_cuda::nilu_autograd);
 }
