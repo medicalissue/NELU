@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index e3e40e3..9fa975c 100644
+index e3e40e3..91ff519 100644
 --- a/main.py
 +++ b/main.py
 @@ -11,6 +11,7 @@ import datetime
@@ -116,6 +116,26 @@ index e3e40e3..9fa975c 100644
      optimizer = create_optimizer(
          args, model_without_ddp, skip_list=None,
          get_num_layer=assigner.get_layer_id if assigner is not None else None, 
+@@ -460,6 +521,19 @@ def main(args):
+ 
+         if wandb_logger:
+             wandb_logger.log_epoch_metrics(log_stats)
++            # NELU paper: log effective gamma (softplus(raw_gamma)) per layer
++            # plus aggregates. Uses the underlying model (model_without_ddp)
++            # so keys are stable regardless of DDP/compile wrapping.
++            if args.act in ("nelu", "nilu") and utils.is_main_process():
++                try:
++                    from nelu import collect_gamma_stats
++                    stats = collect_gamma_stats(model_without_ddp)
++                    if stats:
++                        stats["epoch"] = epoch
++                        wandb_logger._wandb.log(stats, commit=False)
++                        wandb_logger._wandb.log({})  # flush
++                except Exception as e:
++                    print(f"  [NELU] gamma log failed: {e}")
+ 
+     if wandb_logger and args.wandb_ckpt and args.save_ckpt and args.output_dir:
+         wandb_logger.log_checkpoints()
 diff --git a/models/convnext.py b/models/convnext.py
 index 74c1e94..e2a52b9 100644
 --- a/models/convnext.py

@@ -63,7 +63,7 @@ index 1f036cf..d705d33 100644
          loss_value = loss.item()
  
 diff --git a/main.py b/main.py
-index 3c8dd07..381f767 100644
+index 3c8dd07..13f3227 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -217,15 +217,22 @@ index 3c8dd07..381f767 100644
          model_without_ddp.load_state_dict(checkpoint['model'])
          if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
              optimizer.load_state_dict(checkpoint['optimizer'])
-@@ -476,6 +558,19 @@ def main(args):
+@@ -476,6 +558,26 @@ def main(args):
              with (output_dir / "log.txt").open("a") as f:
                  f.write(json.dumps(log_stats) + "\n")
  
 +        # NELU paper: wandb epoch-level log
 +        if _wandb_run is not None:
 +            try:
++                # Include effective-gamma stats from each NELU/NiLU module.
++                if args.act in ("nelu", "nilu"):
++                    from nelu import collect_gamma_stats
++                    base_model = model_without_ddp if 'model_without_ddp' in dir() else model
++                    gamma_stats = collect_gamma_stats(base_model)
++                    log_stats.update(gamma_stats)
 +                _wandb_run.log(log_stats)
-+            except Exception:
++            except Exception as e:
++                print(f"  [NELU] wandb/gamma log failed: {e}")
 +                pass
 +
 +    if _wandb_run is not None:
