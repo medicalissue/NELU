@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index e3e40e3..1ce0a6c 100644
+index e3e40e3..9fa975c 100644
 --- a/main.py
 +++ b/main.py
 @@ -11,6 +11,7 @@ import datetime
@@ -10,7 +10,7 @@ index e3e40e3..1ce0a6c 100644
  import torch.nn as nn
  import torch.backends.cudnn as cudnn
  import json
-@@ -32,6 +33,48 @@ import utils
+@@ -32,6 +33,26 @@ import utils
  import models.convnext
  import models.convnext_isotropic
  
@@ -26,40 +26,18 @@ index e3e40e3..1ce0a6c 100644
 +    "nilu": _NiLU,
 +}
 +
-+def _infer_act_channels(parent, act_name):
-+    """Return the feature dim an activation sees, by scanning parent's
-+    children in definition order and remembering the most recent
-+    Linear/Conv out_features before the activation."""
-+    last_out = None
-+    for name, child in parent.named_children():
-+        if hasattr(child, "out_features"):
-+            last_out = child.out_features
-+        elif isinstance(child, (nn.Conv2d, nn.Conv1d, nn.Conv3d)):
-+            last_out = child.out_channels
-+        if name == act_name:
-+            return last_out
-+    return None
-+
-+
-+def _replace_act(module, baseline_cls, target_cls, needs_channels):
++def _replace_act(module, baseline_cls, target_cls):
 +    for name, child in module.named_children():
 +        if isinstance(child, baseline_cls):
-+            if needs_channels:
-+                C = _infer_act_channels(module, name)
-+                if C is None:
-+                    raise RuntimeError(
-+                        f"Could not infer channel count for {type(module).__name__}.{name}")
-+                setattr(module, name, target_cls(C))
-+            else:
-+                setattr(module, name, target_cls())
++            setattr(module, name, target_cls())
 +        else:
-+            _replace_act(child, baseline_cls, target_cls, needs_channels)
++            _replace_act(child, baseline_cls, target_cls)
 +    return module
 +
  def str2bool(v):
      """
      Converts string to bool type; enables command line 
-@@ -199,6 +242,13 @@ def get_args_parser():
+@@ -199,6 +220,13 @@ def get_args_parser():
      parser.add_argument('--wandb_ckpt', type=str2bool, default=False,
                          help="Save model checkpoints as W&B Artifacts.")
  
@@ -73,7 +51,7 @@ index e3e40e3..1ce0a6c 100644
      return parser
  
  def main(args):
-@@ -276,20 +326,29 @@ def main(args):
+@@ -276,20 +304,28 @@ def main(args):
              label_smoothing=args.smoothing, num_classes=args.nb_classes)
  
      model = create_model(
@@ -91,9 +69,8 @@ index e3e40e3..1ce0a6c 100644
 +    # NELU paper: swap GELU -> NELU (or other) BEFORE finetune-load / EMA / DDP.
 +    if args.act != "gelu":
 +        target_cls = _ACT_CLS_MAP[args.act]
-+        needs_channels = args.act in ("nelu", "nilu")
 +        # ConvNeXt baseline activation is GELU.
-+        _replace_act(model, nn.GELU, target_cls, needs_channels)
++        _replace_act(model, nn.GELU, target_cls)
 +        n = sum(1 for m in model.modules() if isinstance(m, target_cls))
 +        print(f"  [NELU] swapped GELU -> {args.act}  ({n} modules)")
 +
@@ -107,7 +84,7 @@ index e3e40e3..1ce0a6c 100644
  
          print("Load ckpt from %s" % args.finetune)
          checkpoint_model = None
-@@ -347,6 +406,31 @@ def main(args):
+@@ -347,6 +383,31 @@ def main(args):
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
          model_without_ddp = model.module
  
