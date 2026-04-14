@@ -1,26 +1,33 @@
 /*
- * NELU CUDA kernel — NoSG variant (gradient flows through rms).
+ * NELU CUDA kernel — learnable per-channel gamma.
+ *
+ * Each input tensor is reshaped to (M, N) with the last dim N being
+ * the feature / channel axis. gamma is a vector of length N; its
+ * gradient is a vector of length N, summed across all M rows.
  *
  * Forward:
- *     y_i = z_i * Phi(z_i / rho)              rho = sqrt(mean(z^2) + eps)
+ *     t[m,n] = gamma[n] * z[m,n] / rho[m]     rho[m] = sqrt(mean(z[m,:]^2) + eps)
+ *     y[m,n] = z[m,n] * Phi(t[m,n])
  *
- * Backward (autograd through rms):
- *     dz_j = g_j * h(t_j) - (z_j / (N*rho^3)) * S
- *     h(t)  = Phi(t) + t * phi(t)
- *     phi   = standard normal pdf,  Phi = cdf
- *     S     = sum_i( g_i * z_i^2 * phi(t_i) )
+ * Backward:
+ *     h(t) = Phi(t) + t * phi(t),      phi = standard normal pdf
+ *     S[m] = sum_n( dy[m,n] * z[m,n]^2 * phi(t[m,n]) )
  *
- * Optimizations
- * -------------
- *  1. Dynamic shared-memory cap queried at first launch
- *     (228 KB on H100, 164 KB on A100). The 40-KB hardcode is gone.
- *  2. Vectorized I/O: float4 (float) / __half2 (half) / __nv_bfloat162 (bf16).
- *     2-4x peak memory throughput on memory-bound paths.
- *  3. Backward "double-cached" path: when 2*N*sizeof(T) fits in smem,
- *     both z and dy are cached, so each is read from global EXACTLY ONCE.
- *  4. Adaptive block size by N (128/256/512/1024).
- *  5. __restrict__ everywhere + __expf intrinsic.
- *  6. C++ autograd Function — no Python dispatch in backward.
+ *     dz[m,n]    = dy[m,n] * h(t[m,n]) - ( t[m,n] / (N * rho[m]^2) ) * S[m]
+ *     dgamma[n] += sum_m( dy[m,n] * z[m,n]^2 * phi(t[m,n]) / rho[m] )
+ *
+ * Implementation notes:
+ *   - Forward kernels are almost unchanged; each thread reads gamma[col]
+ *     from global (well-cached; coalesced across the block).
+ *   - Backward kernels keep the same row-per-block layout. Each block
+ *     maintains a shared-memory buffer `sh_dg[N]` (fp32) that threads
+ *     atomicAdd into. At the end of the block, threads sweep the
+ *     buffer and atomicAdd it into the global dgamma vector.
+ *   - The shared-memory cost is now max(z-cache, dy-cache) + N*sizeof(float)
+ *     for dgamma. The launcher subtracts the fp32 cost from the
+ *     available budget when deciding which caching tier to use.
+ *   - fwd_warp / bwd_warp are used for N <= 32 (single-warp-per-row).
+ *   - Double / unaligned N fall back to scalar paths.
  */
 
 #include <torch/extension.h>
@@ -54,6 +61,7 @@ template <typename T>
 __global__ void fwd_warp(
     const T* __restrict__ z, T* __restrict__ y,
     float* __restrict__ rho_out,
+    const float* __restrict__ gamma,
     int N, int M, float eps)
 {
     int wid_g = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
@@ -61,14 +69,18 @@ __global__ void fwd_warp(
     if (wid_g >= M) return;
 
     const T* zr = z + (long)wid_g * N;
-    float val = 0.f, sq = 0.f;
-    if (lane < N) { val = (float)zr[lane]; sq = val * val; }
+    float val = 0.f, sq = 0.f, gc = 0.f;
+    if (lane < N) {
+        val = (float)zr[lane];
+        gc  = gamma[lane];
+        sq  = val * val;
+    }
     sq = warp_sum(sq);
 
     float inv = rsqrtf(sq / (float)N + eps);
     if (lane == 0) rho_out[wid_g] = 1.f / inv;
     if (lane < N) {
-        float t = val * inv;
+        float t = gc * val * inv;
         y[(long)wid_g*N + lane] = (T)(val * nelu_cdf(t));
     }
 }
@@ -78,6 +90,7 @@ template <typename T, int BLOCK>
 __global__ void fwd_cached_vec(
     const T* __restrict__ z, T* __restrict__ y,
     float* __restrict__ rho_out,
+    const float* __restrict__ gamma,
     int N, float eps)
 {
     constexpr int K = VecK<T>::K;
@@ -92,7 +105,6 @@ __global__ void fwd_cached_vec(
 
     int Npack = N / K;
 
-    // Pass 1: load z into smem cache, accumulate sum-of-squares
     float sq_local = 0.f;
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
         float vals[K];
@@ -102,19 +114,19 @@ __global__ void fwd_cached_vec(
         for (int k = 0; k < K; ++k) sq_local += vals[k] * vals[k];
     }
 
-    // block_sum_bcast also acts as the smem-store sync barrier
     float total = block_sum_bcast(sq_local, warp_buf, &bcast);
     float inv_rho = rsqrtf(total / (float)N + eps);
     if (threadIdx.x == 0) rho_out[r] = 1.f / inv_rho;
 
-    // Pass 2: read from smem, compute y, vectorized store
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float vals[K];
+        float vals[K], gs[K];
         load_pack(zc, i, vals);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gs[k] = gamma[K*i + k];
         float out[K];
         #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t = vals[k] * inv_rho;
+            float t = gs[k] * vals[k] * inv_rho;
             out[k] = vals[k] * nelu_cdf(t);
         }
         store_pack(yr, i, out);
@@ -126,6 +138,7 @@ template <typename T, int BLOCK>
 __global__ void fwd_cached_scalar(
     const T* __restrict__ z, T* __restrict__ y,
     float* __restrict__ rho_out,
+    const float* __restrict__ gamma,
     int N, float eps)
 {
     extern __shared__ unsigned char smem_bytes[];
@@ -149,7 +162,7 @@ __global__ void fwd_cached_scalar(
 
     for (int i = threadIdx.x; i < N; i += BLOCK) {
         float v = (float)zc[i];
-        float t = v * inv_rho;
+        float t = gamma[i] * v * inv_rho;
         yr[i] = (T)(v * nelu_cdf(t));
     }
 }
@@ -159,6 +172,7 @@ template <typename T, int BLOCK>
 __global__ void fwd_2pass_vec(
     const T* __restrict__ z, T* __restrict__ y,
     float* __restrict__ rho_out,
+    const float* __restrict__ gamma,
     int N, float eps)
 {
     constexpr int K = VecK<T>::K;
@@ -183,12 +197,14 @@ __global__ void fwd_2pass_vec(
     if (threadIdx.x == 0) rho_out[r] = 1.f / inv_rho;
 
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float vals[K];
-        load_pack(zr, i, vals);   // re-read from global
+        float vals[K], gs[K];
+        load_pack(zr, i, vals);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gs[k] = gamma[K*i + k];
         float out[K];
         #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t = vals[k] * inv_rho;
+            float t = gs[k] * vals[k] * inv_rho;
             out[k] = vals[k] * nelu_cdf(t);
         }
         store_pack(yr, i, out);
@@ -200,6 +216,7 @@ template <typename T, int BLOCK>
 __global__ void fwd_2pass_scalar(
     const T* __restrict__ z, T* __restrict__ y,
     float* __restrict__ rho_out,
+    const float* __restrict__ gamma,
     int N, float eps)
 {
     __shared__ float warp_buf[BLOCK / WARP];
@@ -220,7 +237,7 @@ __global__ void fwd_2pass_scalar(
 
     for (int i = threadIdx.x; i < N; i += BLOCK) {
         float v = (float)zr[i];
-        float t = v * inv_rho;
+        float t = gamma[i] * v * inv_rho;
         yr[i] = (T)(v * nelu_cdf(t));
     }
 }
@@ -228,36 +245,67 @@ __global__ void fwd_2pass_scalar(
 
 // ════════════════════════════════════════════════════════════════
 //  BACKWARD KERNELS
+//
+//  Each block is one row. Shared memory layout:
+//      sh_dg[N]     fp32   per-column dgamma partials for this block
+//      [z cache]    T      optional
+//      [dy cache]   T      optional
+//
+//  Layout: sh_dg first (fp32-aligned), then T caches after it.
 // ════════════════════════════════════════════════════════════════
 
+// Helper: zero the dgamma smem buffer.
+__device__ __forceinline__ void
+zero_dg_smem(float* sh_dg, int N) {
+    for (int i = threadIdx.x; i < N; i += blockDim.x) sh_dg[i] = 0.f;
+}
+
+// Helper: flush the dgamma smem buffer to global dgamma via atomicAdd.
+__device__ __forceinline__ void
+flush_dg_smem(const float* sh_dg, float* dgamma_out, int N) {
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float v = sh_dg[i];
+        if (v != 0.f) atomicAdd(dgamma_out + i, v);
+    }
+}
+
 // ──── bwd_warp ── (N <= 32)
+//
+// One warp per row. Each lane handles exactly one column, so the
+// dgamma contribution from this row is a single scalar per lane —
+// no smem atomics needed; direct global atomicAdd(dgamma[lane]).
 template <typename T>
 __global__ void bwd_warp(
     const T* __restrict__ z,
     const float* __restrict__ rho_in,
     const T* __restrict__ dy,
     T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
     int N, int M)
 {
     int wid_g = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
     int lane  = threadIdx.x & 31;
     if (wid_g >= M) return;
 
-    float inv = 1.f / rho_in[wid_g];
-    float zi = 0.f, gi = 0.f, t = 0.f, pdf = 0.f;
+    float rho = rho_in[wid_g];
+    float inv = 1.f / rho;
+    float zi = 0.f, gi = 0.f, gc = 0.f, t = 0.f, pdf = 0.f;
     if (lane < N) {
         zi  = (float)z[(long)wid_g*N + lane];
         gi  = (float)dy[(long)wid_g*N + lane];
-        t   = zi * inv;
+        gc  = gamma[lane];
+        t   = gc * zi * inv;
         pdf = nelu_pdf(t);
     }
-    // t-space reduction: avoids inv³ overflow in fp16/bf16.
-    // S_t = Σ gᵢ·tᵢ²·φ(tᵢ),  cross_j = (tⱼ/N)·S_t
-    float S_t = warp_sum(gi * t * t * pdf);
-    float cf = S_t / (float)N;
+    // S_m = sum_n  gi * zi^2 * pdf(t)
+    float contrib = (lane < N) ? (gi * zi * zi * pdf) : 0.f;
+    float S = warp_sum(contrib);
+    float cf = S * (inv * inv) / (float)N;   // S / (N * rho^2)
     if (lane < N) {
         float cdf = nelu_cdf(t);
-        dz[(long)wid_g*N + lane] = (T)(gi * (cdf + t*pdf) - cf*t);
+        dz[(long)wid_g*N + lane] = (T)(gi * (cdf + t * pdf) - cf * t);
+        atomicAdd(dgamma_out + lane, contrib * inv);
     }
 }
 
@@ -268,56 +316,71 @@ __global__ void bwd_double_cached_vec(
     const float* __restrict__ rho_in,
     const T* __restrict__ dy,
     T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
     int N)
 {
     constexpr int K = VecK<T>::K;
     extern __shared__ unsigned char smem_bytes[];
-    T* zc = reinterpret_cast<T*>(smem_bytes);
-    T* gc = zc + N;                     // dy cache right after z cache
+    // Layout: sh_dg[N] (fp32) | zc[N] (T) | gc[N] (T)
+    float* sh_dg = reinterpret_cast<float*>(smem_bytes);
+    T*     zc    = reinterpret_cast<T*>(sh_dg + N);
+    T*     gc    = zc + N;
     __shared__ float warp_buf[BLOCK / WARP];
     __shared__ float bcast;
 
     int r = blockIdx.x;
-    float inv = 1.f / rho_in[r];
+    float rho = rho_in[r];
+    float inv = 1.f / rho;
     const T* zr  = z  + (long)r * N;
     const T* dyr = dy + (long)r * N;
     T*       dzr = dz + (long)r * N;
 
     int Npack = N / K;
 
-    // Pass 1: load z and dy into smem, accumulate S
+    zero_dg_smem(sh_dg, N);
+    __syncthreads();
+
     float s_local = 0.f;
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
+        float zv[K], gv[K], gcs[K];
         load_pack(zr,  i, zv);
         load_pack(dyr, i, gv);
         store_pack(zc, i, zv);
         store_pack(gc, i, gv);
         #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
+        #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t   = zv[k] * inv;
+            float t   = gcs[k] * zv[k] * inv;
             float pdf = nelu_pdf(t);
-            s_local += gv[k] * t * t * pdf;  // t-space
+            float c   = gv[k] * zv[k] * zv[k] * pdf;
+            s_local += c;
+            // dgamma[K*i+k] += c * inv      (row contribution)
+            atomicAdd(sh_dg + (K*i + k), c * inv);
         }
     }
-    float S_t = block_sum_bcast(s_local, warp_buf, &bcast);
-    float cf = S_t / (float)N;
+    float S = block_sum_bcast(s_local, warp_buf, &bcast);
+    float cf = S * (inv * inv) / (float)N;
 
-    // Pass 2: read from smem, compute dz, vectorized store
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
+        float zv[K], gv[K], gcs[K];
         load_pack(zc, i, zv);
         load_pack(gc, i, gv);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
         float out[K];
         #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t   = zv[k] * inv;
+            float t   = gcs[k] * zv[k] * inv;
             float cdf = nelu_cdf(t);
             float pdf = nelu_pdf(t);
-            out[k] = gv[k] * (cdf + t*pdf) - cf * t;
+            out[k] = gv[k] * (cdf + t * pdf) - cf * t;
         }
         store_pack(dzr, i, out);
     }
+    __syncthreads();
+    flush_dg_smem(sh_dg, dgamma_out, N);
 }
 
 // ──── bwd_z_cached_vec ── (only z cached; dy re-read from global)
@@ -327,102 +390,133 @@ __global__ void bwd_z_cached_vec(
     const float* __restrict__ rho_in,
     const T* __restrict__ dy,
     T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
     int N)
 {
     constexpr int K = VecK<T>::K;
     extern __shared__ unsigned char smem_bytes[];
-    T* zc = reinterpret_cast<T*>(smem_bytes);
+    float* sh_dg = reinterpret_cast<float*>(smem_bytes);
+    T*     zc    = reinterpret_cast<T*>(sh_dg + N);
     __shared__ float warp_buf[BLOCK / WARP];
     __shared__ float bcast;
 
     int r = blockIdx.x;
-    float inv = 1.f / rho_in[r];
+    float rho = rho_in[r];
+    float inv = 1.f / rho;
     const T* zr  = z  + (long)r * N;
     const T* dyr = dy + (long)r * N;
     T*       dzr = dz + (long)r * N;
 
     int Npack = N / K;
 
+    zero_dg_smem(sh_dg, N);
+    __syncthreads();
+
     float s_local = 0.f;
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
+        float zv[K], gv[K], gcs[K];
         load_pack(zr,  i, zv);
         load_pack(dyr, i, gv);
         store_pack(zc, i, zv);
         #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
+        #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t = zv[k] * inv;
-            s_local += gv[k] * t * t * nelu_pdf(t);  // t-space
+            float t = gcs[k] * zv[k] * inv;
+            float c = gv[k] * zv[k] * zv[k] * nelu_pdf(t);
+            s_local += c;
+            atomicAdd(sh_dg + (K*i + k), c * inv);
         }
     }
-    float S_t = block_sum_bcast(s_local, warp_buf, &bcast);
-    float cf = S_t / (float)N;  // t-space: no inv³
+    float S = block_sum_bcast(s_local, warp_buf, &bcast);
+    float cf = S * (inv * inv) / (float)N;
 
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
+        float zv[K], gv[K], gcs[K];
         load_pack(zc,  i, zv);
-        load_pack(dyr, i, gv);              // re-read dy from global
+        load_pack(dyr, i, gv);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
         float out[K];
         #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t   = zv[k] * inv;
+            float t   = gcs[k] * zv[k] * inv;
             float cdf = nelu_cdf(t);
             float pdf = nelu_pdf(t);
-            out[k] = gv[k] * (cdf + t*pdf) - cf * t;
+            out[k] = gv[k] * (cdf + t * pdf) - cf * t;
         }
         store_pack(dzr, i, out);
     }
+    __syncthreads();
+    flush_dg_smem(sh_dg, dgamma_out, N);
 }
 
-// ──── bwd_2pass_vec ── (no caching, vectorized)
+// ──── bwd_2pass_vec ── (no z/dy caching, vectorized; still uses dgamma smem)
 template <typename T, int BLOCK>
 __global__ void bwd_2pass_vec(
     const T* __restrict__ z,
     const float* __restrict__ rho_in,
     const T* __restrict__ dy,
     T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
     int N)
 {
     constexpr int K = VecK<T>::K;
+    extern __shared__ unsigned char smem_bytes[];
+    float* sh_dg = reinterpret_cast<float*>(smem_bytes);
     __shared__ float warp_buf[BLOCK / WARP];
     __shared__ float bcast;
 
     int r = blockIdx.x;
-    float inv = 1.f / rho_in[r];
+    float rho = rho_in[r];
+    float inv = 1.f / rho;
     const T* zr  = z  + (long)r * N;
     const T* dyr = dy + (long)r * N;
     T*       dzr = dz + (long)r * N;
 
     int Npack = N / K;
 
+    zero_dg_smem(sh_dg, N);
+    __syncthreads();
+
     float s_local = 0.f;
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
+        float zv[K], gv[K], gcs[K];
         load_pack(zr,  i, zv);
         load_pack(dyr, i, gv);
         #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
+        #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t = zv[k] * inv;
-            s_local += gv[k] * t * t * nelu_pdf(t);  // t-space
+            float t = gcs[k] * zv[k] * inv;
+            float c = gv[k] * zv[k] * zv[k] * nelu_pdf(t);
+            s_local += c;
+            atomicAdd(sh_dg + (K*i + k), c * inv);
         }
     }
-    float S_t = block_sum_bcast(s_local, warp_buf, &bcast);
-    float cf = S_t / (float)N;  // t-space: no inv³
+    float S = block_sum_bcast(s_local, warp_buf, &bcast);
+    float cf = S * (inv * inv) / (float)N;
 
     for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
+        float zv[K], gv[K], gcs[K];
         load_pack(zr,  i, zv);
         load_pack(dyr, i, gv);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
         float out[K];
         #pragma unroll
         for (int k = 0; k < K; ++k) {
-            float t   = zv[k] * inv;
+            float t   = gcs[k] * zv[k] * inv;
             float cdf = nelu_cdf(t);
             float pdf = nelu_pdf(t);
-            out[k] = gv[k] * (cdf + t*pdf) - cf * t;
+            out[k] = gv[k] * (cdf + t * pdf) - cf * t;
         }
         store_pack(dzr, i, out);
     }
+    __syncthreads();
+    flush_dg_smem(sh_dg, dgamma_out, N);
 }
 
 // ──── bwd_2pass_scalar ── (no caching, scalar fallback)
@@ -432,35 +526,49 @@ __global__ void bwd_2pass_scalar(
     const float* __restrict__ rho_in,
     const T* __restrict__ dy,
     T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
     int N)
 {
+    extern __shared__ unsigned char smem_bytes[];
+    float* sh_dg = reinterpret_cast<float*>(smem_bytes);
     __shared__ float warp_buf[BLOCK / WARP];
     __shared__ float bcast;
 
     int r = blockIdx.x;
-    float inv = 1.f / rho_in[r];
+    float rho = rho_in[r];
+    float inv = 1.f / rho;
     const T* zr  = z  + (long)r * N;
     const T* dyr = dy + (long)r * N;
     T*       dzr = dz + (long)r * N;
+
+    zero_dg_smem(sh_dg, N);
+    __syncthreads();
 
     float s_local = 0.f;
     for (int i = threadIdx.x; i < N; i += BLOCK) {
         float zi = (float)zr[i];
         float gi = (float)dyr[i];
-        float t  = zi * inv;
-        s_local += gi * t * t * nelu_pdf(t);  // t-space
+        float gc = gamma[i];
+        float t  = gc * zi * inv;
+        float c  = gi * zi * zi * nelu_pdf(t);
+        s_local += c;
+        atomicAdd(sh_dg + i, c * inv);
     }
-    float S_t = block_sum_bcast(s_local, warp_buf, &bcast);
-    float cf = S_t / (float)N;  // t-space: no inv³
+    float S = block_sum_bcast(s_local, warp_buf, &bcast);
+    float cf = S * (inv * inv) / (float)N;
 
     for (int i = threadIdx.x; i < N; i += BLOCK) {
         float zi = (float)zr[i];
         float gi = (float)dyr[i];
-        float t   = zi * inv;
+        float gc = gamma[i];
+        float t   = gc * zi * inv;
         float cdf = nelu_cdf(t);
         float pdf = nelu_pdf(t);
-        dzr[i] = (T)(gi * (cdf + t*pdf) - cf * t);
+        dzr[i] = (T)(gi * (cdf + t * pdf) - cf * t);
     }
+    __syncthreads();
+    flush_dg_smem(sh_dg, dgamma_out, N);
 }
 
 
@@ -470,13 +578,13 @@ __global__ void bwd_2pass_scalar(
 
 template <typename scalar_t>
 void launch_fwd(const scalar_t* z, scalar_t* y, float* rho,
-                int M, int N, float eps, cudaStream_t s)
+                const float* gamma, int M, int N, float eps, cudaStream_t s)
 {
     if (N <= 32) {
         constexpr int BLOCK = 256;
         int wpb = BLOCK / WARP;
         int blocks = (M + wpb - 1) / wpb;
-        fwd_warp<scalar_t><<<blocks, BLOCK, 0, s>>>(z, y, rho, N, M, eps);
+        fwd_warp<scalar_t><<<blocks, BLOCK, 0, s>>>(z, y, rho, gamma, N, M, eps);
         return;
     }
 
@@ -486,42 +594,42 @@ void launch_fwd(const scalar_t* z, scalar_t* y, float* rho,
     const bool vec       = is_vectorizable<scalar_t>(N);
     const int  block     = choose_block_size(N);
 
-    #define LAUNCH_FWD(KERN, SMEM_BYTES)                                       \
-        do {                                                                   \
-            if ((SMEM_BYTES) > 48 * 1024)                                      \
-                enable_dynamic_smem((const void*)KERN, (SMEM_BYTES));          \
-            KERN<<<M, block, (SMEM_BYTES), s>>>(z, y, rho, N, eps);            \
+    #define LAUNCH_FWD(KERN, SMEM_BYTES)                                          \
+        do {                                                                      \
+            if ((SMEM_BYTES) > 48 * 1024)                                         \
+                enable_dynamic_smem((const void*)KERN, (SMEM_BYTES));             \
+            KERN<<<M, block, (SMEM_BYTES), s>>>(z, y, rho, gamma, N, eps);        \
         } while (0)
 
     if (can_cache) {
         if (vec) {
             switch (block) {
-                case 128: LAUNCH_FWD((fwd_cached_vec<scalar_t, 128>), sm_z); break;
-                case 256: LAUNCH_FWD((fwd_cached_vec<scalar_t, 256>), sm_z); break;
-                case 512: LAUNCH_FWD((fwd_cached_vec<scalar_t, 512>), sm_z); break;
+                case 128: LAUNCH_FWD((fwd_cached_vec<scalar_t, 128>),  sm_z); break;
+                case 256: LAUNCH_FWD((fwd_cached_vec<scalar_t, 256>),  sm_z); break;
+                case 512: LAUNCH_FWD((fwd_cached_vec<scalar_t, 512>),  sm_z); break;
                 default:  LAUNCH_FWD((fwd_cached_vec<scalar_t, 1024>), sm_z); break;
             }
         } else {
             switch (block) {
-                case 128: LAUNCH_FWD((fwd_cached_scalar<scalar_t, 128>), sm_z); break;
-                case 256: LAUNCH_FWD((fwd_cached_scalar<scalar_t, 256>), sm_z); break;
-                case 512: LAUNCH_FWD((fwd_cached_scalar<scalar_t, 512>), sm_z); break;
+                case 128: LAUNCH_FWD((fwd_cached_scalar<scalar_t, 128>),  sm_z); break;
+                case 256: LAUNCH_FWD((fwd_cached_scalar<scalar_t, 256>),  sm_z); break;
+                case 512: LAUNCH_FWD((fwd_cached_scalar<scalar_t, 512>),  sm_z); break;
                 default:  LAUNCH_FWD((fwd_cached_scalar<scalar_t, 1024>), sm_z); break;
             }
         }
     } else {
         if (vec) {
             switch (block) {
-                case 128: LAUNCH_FWD((fwd_2pass_vec<scalar_t, 128>), 0); break;
-                case 256: LAUNCH_FWD((fwd_2pass_vec<scalar_t, 256>), 0); break;
-                case 512: LAUNCH_FWD((fwd_2pass_vec<scalar_t, 512>), 0); break;
+                case 128: LAUNCH_FWD((fwd_2pass_vec<scalar_t, 128>),  0); break;
+                case 256: LAUNCH_FWD((fwd_2pass_vec<scalar_t, 256>),  0); break;
+                case 512: LAUNCH_FWD((fwd_2pass_vec<scalar_t, 512>),  0); break;
                 default:  LAUNCH_FWD((fwd_2pass_vec<scalar_t, 1024>), 0); break;
             }
         } else {
             switch (block) {
-                case 128: LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 128>), 0); break;
-                case 256: LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 256>), 0); break;
-                case 512: LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 512>), 0); break;
+                case 128: LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 128>),  0); break;
+                case 256: LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 256>),  0); break;
+                case 512: LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 512>),  0); break;
                 default:  LAUNCH_FWD((fwd_2pass_scalar<scalar_t, 1024>), 0); break;
             }
         }
@@ -531,31 +639,32 @@ void launch_fwd(const scalar_t* z, scalar_t* y, float* rho,
 
 template <typename scalar_t>
 void launch_bwd(const scalar_t* z, const float* rho, const scalar_t* dy,
-                scalar_t* dz, int M, int N, cudaStream_t s)
+                scalar_t* dz, const float* gamma, float* dgamma,
+                int M, int N, cudaStream_t s)
 {
     if (N <= 32) {
         constexpr int BLOCK = 256;
         int wpb = BLOCK / WARP;
         int blocks = (M + wpb - 1) / wpb;
-        bwd_warp<scalar_t><<<blocks, BLOCK, 0, s>>>(z, rho, dy, dz, N, M);
+        bwd_warp<scalar_t><<<blocks, BLOCK, 0, s>>>(z, rho, dy, dz, gamma, dgamma, N, M);
         return;
     }
 
-    const int max_smem  = max_dynamic_smem_bytes();
-    const int sm_z      = (int)(N * sizeof(scalar_t));
-    const int sm_zg     = (int)(2 * N * sizeof(scalar_t));
-    const bool vec      = is_vectorizable<scalar_t>(N);
-    const int  block    = choose_block_size(N);
+    const int max_smem = max_dynamic_smem_bytes();
+    const int sm_dg    = (int)(N * sizeof(float));      // dgamma smem (always)
+    const int sm_z     = sm_dg + (int)(N * sizeof(scalar_t));
+    const int sm_zg    = sm_dg + (int)(2 * N * sizeof(scalar_t));
+    const bool vec     = is_vectorizable<scalar_t>(N);
+    const int  block   = choose_block_size(N);
 
-    #define LAUNCH_BWD(KERN, SMEM_BYTES)                                       \
-        do {                                                                   \
-            if ((SMEM_BYTES) > 48 * 1024)                                      \
-                enable_dynamic_smem((const void*)KERN, (SMEM_BYTES));          \
-            KERN<<<M, block, (SMEM_BYTES), s>>>(z, rho, dy, dz, N);            \
+    #define LAUNCH_BWD(KERN, SMEM_BYTES)                                              \
+        do {                                                                          \
+            if ((SMEM_BYTES) > 48 * 1024)                                             \
+                enable_dynamic_smem((const void*)KERN, (SMEM_BYTES));                 \
+            KERN<<<M, block, (SMEM_BYTES), s>>>(z, rho, dy, dz, gamma, dgamma, N);    \
         } while (0)
 
     if (vec && sm_zg <= max_smem) {
-        // Best path: both z and dy in smem
         switch (block) {
             case 128: LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 128>),  sm_zg); break;
             case 256: LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 256>),  sm_zg); break;
@@ -563,7 +672,6 @@ void launch_bwd(const scalar_t* z, const float* rho, const scalar_t* dy,
             default:  LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 1024>), sm_zg); break;
         }
     } else if (vec && sm_z <= max_smem) {
-        // Only z fits in smem
         switch (block) {
             case 128: LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 128>),  sm_z); break;
             case 256: LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 256>),  sm_z); break;
@@ -571,20 +679,18 @@ void launch_bwd(const scalar_t* z, const float* rho, const scalar_t* dy,
             default:  LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 1024>), sm_z); break;
         }
     } else if (vec) {
-        // Too big even for z; vectorized 2-pass
         switch (block) {
-            case 128: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 128>),  0); break;
-            case 256: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 256>),  0); break;
-            case 512: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 512>),  0); break;
-            default:  LAUNCH_BWD((bwd_2pass_vec<scalar_t, 1024>), 0); break;
+            case 128: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 128>),  sm_dg); break;
+            case 256: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 256>),  sm_dg); break;
+            case 512: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 512>),  sm_dg); break;
+            default:  LAUNCH_BWD((bwd_2pass_vec<scalar_t, 1024>), sm_dg); break;
         }
     } else {
-        // Unaligned N — scalar fallback
         switch (block) {
-            case 128: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 128>),  0); break;
-            case 256: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 256>),  0); break;
-            case 512: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 512>),  0); break;
-            default:  LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 1024>), 0); break;
+            case 128: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 128>),  sm_dg); break;
+            case 256: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 256>),  sm_dg); break;
+            case 512: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 512>),  sm_dg); break;
+            default:  LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 1024>), sm_dg); break;
         }
     }
     #undef LAUNCH_BWD
@@ -592,187 +698,19 @@ void launch_bwd(const scalar_t* z, const float* rho, const scalar_t* dy,
 
 
 // ════════════════════════════════════════════════════════════════
-//  STOP-GRADIENT (SG) BACKWARD — element-wise only, no cross-term.
-//
-//  dz_j = g_j * h(t_j)    where h(t) = Phi(t) + t * phi(t)
-//
-//  No reduction, no shared memory. Embarrassingly parallel.
+//  C++ DISPATCH
 // ════════════════════════════════════════════════════════════════
 
-template <typename T, int BLOCK>
-__global__ void bwd_sg_vec(
-    const T* __restrict__ z,
-    const float* __restrict__ rho_in,
-    const T* __restrict__ dy,
-    T* __restrict__ dz,
-    int N)
-{
-    constexpr int K = VecK<T>::K;
-    int r = blockIdx.x;
-    float inv = 1.f / rho_in[r];
-    const T* zr  = z  + (long)r * N;
-    const T* dyr = dy + (long)r * N;
-    T*       dzr = dz + (long)r * N;
-    int Npack = N / K;
-
-    for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
-        load_pack(zr,  i, zv);
-        load_pack(dyr, i, gv);
-        float out[K];
-        #pragma unroll
-        for (int k = 0; k < K; ++k) {
-            float t   = zv[k] * inv;
-            float cdf = nelu_cdf(t);
-            float pdf = nelu_pdf(t);
-            out[k] = gv[k] * (cdf + t * pdf);
-        }
-        store_pack(dzr, i, out);
-    }
-}
-
-template <typename T, int BLOCK>
-__global__ void bwd_sg_scalar(
-    const T* __restrict__ z,
-    const float* __restrict__ rho_in,
-    const T* __restrict__ dy,
-    T* __restrict__ dz,
-    int N)
-{
-    int r = blockIdx.x;
-    float inv = 1.f / rho_in[r];
-    const T* zr  = z  + (long)r * N;
-    const T* dyr = dy + (long)r * N;
-    T*       dzr = dz + (long)r * N;
-
-    for (int i = threadIdx.x; i < N; i += BLOCK) {
-        float zi = (float)zr[i];
-        float gi = (float)dyr[i];
-        float t   = zi * inv;
-        float cdf = nelu_cdf(t);
-        float pdf = nelu_pdf(t);
-        dzr[i] = (T)(gi * (cdf + t * pdf));
-    }
-}
-
-template <typename scalar_t>
-void launch_bwd_sg(const scalar_t* z, const float* rho, const scalar_t* dy,
-                   scalar_t* dz, int M, int N, cudaStream_t s)
-{
-    const int  block = choose_block_size(N);
-    const bool vec   = is_vectorizable<scalar_t>(N);
-
-    #define LAUNCH_SG(KERN) KERN<<<M, block, 0, s>>>(z, rho, dy, dz, N)
-    if (vec) {
-        switch (block) {
-            case 128: LAUNCH_SG((bwd_sg_vec<scalar_t, 128>));  break;
-            case 256: LAUNCH_SG((bwd_sg_vec<scalar_t, 256>));  break;
-            case 512: LAUNCH_SG((bwd_sg_vec<scalar_t, 512>));  break;
-            default:  LAUNCH_SG((bwd_sg_vec<scalar_t, 1024>)); break;
-        }
-    } else {
-        switch (block) {
-            case 128: LAUNCH_SG((bwd_sg_scalar<scalar_t, 128>));  break;
-            case 256: LAUNCH_SG((bwd_sg_scalar<scalar_t, 256>));  break;
-            case 512: LAUNCH_SG((bwd_sg_scalar<scalar_t, 512>));  break;
-            default:  LAUNCH_SG((bwd_sg_scalar<scalar_t, 1024>)); break;
-        }
-    }
-    #undef LAUNCH_SG
-}
-
-
-// ════════════════════════════════════════════════════════════════
-//  SURROGATE BACKWARD — h(z) instead of h(z/ρ). GELU-like damping.
-//  dz_j = g_j · h(z_j)   where h uses RAW z, not normalized z̃.
-//  Even simpler than SG: rho_in is unused.
-// ════════════════════════════════════════════════════════════════
-
-template <typename T, int BLOCK>
-__global__ void bwd_surr_vec(
-    const T* __restrict__ z,
-    const T* __restrict__ dy,
-    T* __restrict__ dz,
-    int N)
-{
-    constexpr int K = VecK<T>::K;
-    int r = blockIdx.x;
-    const T* zr  = z  + (long)r * N;
-    const T* dyr = dy + (long)r * N;
-    T*       dzr = dz + (long)r * N;
-    int Npack = N / K;
-
-    for (int i = threadIdx.x; i < Npack; i += BLOCK) {
-        float zv[K], gv[K];
-        load_pack(zr,  i, zv);
-        load_pack(dyr, i, gv);
-        float out[K];
-        #pragma unroll
-        for (int k = 0; k < K; ++k) {
-            // h(z) — raw z, not z/ρ. Saturates at large |z| → damping.
-            float cdf = nelu_cdf(zv[k]);
-            float pdf = nelu_pdf(zv[k]);
-            out[k] = gv[k] * (cdf + zv[k] * pdf);
-        }
-        store_pack(dzr, i, out);
-    }
-}
-
-template <typename T, int BLOCK>
-__global__ void bwd_surr_scalar(
-    const T* __restrict__ z,
-    const T* __restrict__ dy,
-    T* __restrict__ dz,
-    int N)
-{
-    int r = blockIdx.x;
-    const T* zr  = z  + (long)r * N;
-    const T* dyr = dy + (long)r * N;
-    T*       dzr = dz + (long)r * N;
-
-    for (int i = threadIdx.x; i < N; i += BLOCK) {
-        float zi = (float)zr[i];
-        float gi = (float)dyr[i];
-        float cdf = nelu_cdf(zi);
-        float pdf = nelu_pdf(zi);
-        dzr[i] = (T)(gi * (cdf + zi * pdf));
-    }
-}
-
-template <typename scalar_t>
-void launch_bwd_surr(const scalar_t* z, const scalar_t* dy,
-                     scalar_t* dz, int M, int N, cudaStream_t s)
-{
-    const int  block = choose_block_size(N);
-    const bool vec   = is_vectorizable<scalar_t>(N);
-
-    #define LAUNCH_SURR(KERN) KERN<<<M, block, 0, s>>>(z, dy, dz, N)
-    if (vec) {
-        switch (block) {
-            case 128: LAUNCH_SURR((bwd_surr_vec<scalar_t, 128>));  break;
-            case 256: LAUNCH_SURR((bwd_surr_vec<scalar_t, 256>));  break;
-            case 512: LAUNCH_SURR((bwd_surr_vec<scalar_t, 512>));  break;
-            default:  LAUNCH_SURR((bwd_surr_vec<scalar_t, 1024>)); break;
-        }
-    } else {
-        switch (block) {
-            case 128: LAUNCH_SURR((bwd_surr_scalar<scalar_t, 128>));  break;
-            case 256: LAUNCH_SURR((bwd_surr_scalar<scalar_t, 256>));  break;
-            case 512: LAUNCH_SURR((bwd_surr_scalar<scalar_t, 512>));  break;
-            default:  LAUNCH_SURR((bwd_surr_scalar<scalar_t, 1024>)); break;
-        }
-    }
-    #undef LAUNCH_SURR
-}
-
-
-// ════════════════════════════════════════════════════════════════
-//  C++ DISPATCH + AUTOGRAD
-// ════════════════════════════════════════════════════════════════
-
-std::vector<torch::Tensor> forward_impl(torch::Tensor z, float eps) {
+std::vector<torch::Tensor> forward_impl(torch::Tensor z, torch::Tensor gamma,
+                                        double eps) {
     TORCH_CHECK(z.is_cuda());
+    TORCH_CHECK(gamma.is_cuda());
+    TORCH_CHECK(gamma.scalar_type() == torch::kFloat32,
+                "gamma must be float32");
+    TORCH_CHECK(gamma.numel() == z.size(-1),
+                "gamma length must match last dim of z");
     auto z2 = z.reshape({-1, z.size(-1)}).contiguous();
+    auto g1 = gamma.contiguous();
     int M = z2.size(0), N = z2.size(1);
     auto y   = torch::empty_like(z2);
     auto rho = torch::empty({M}, z.options().dtype(torch::kFloat32));
@@ -780,90 +718,38 @@ std::vector<torch::Tensor> forward_impl(torch::Tensor z, float eps) {
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
         z.scalar_type(), "nelu_fwd", [&] {
         launch_fwd(z2.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(),
-                   rho.data_ptr<float>(), M, N, eps, stream);
+                   rho.data_ptr<float>(), g1.data_ptr<float>(),
+                   M, N, (float)eps, stream);
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {y.reshape_as(z), rho};
 }
 
-torch::Tensor backward_surr_impl(torch::Tensor z, torch::Tensor dy) {
+std::vector<torch::Tensor> backward_impl(torch::Tensor z, torch::Tensor rho,
+                                         torch::Tensor dy, torch::Tensor gamma) {
+    TORCH_CHECK(gamma.scalar_type() == torch::kFloat32);
     auto z2  = z.reshape({-1, z.size(-1)}).contiguous();
     auto dy2 = dy.reshape({-1, dy.size(-1)}).contiguous();
+    auto g1  = gamma.contiguous();
     int M = z2.size(0), N = z2.size(1);
-    auto dz = torch::empty_like(z2);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
-        z.scalar_type(), "nelu_bwd_surr", [&] {
-        launch_bwd_surr(z2.data_ptr<scalar_t>(),
-                        dy2.data_ptr<scalar_t>(), dz.data_ptr<scalar_t>(),
-                        M, N, stream);
-    });
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return dz.reshape_as(z);
-}
-
-torch::Tensor backward_sg_impl(torch::Tensor z, torch::Tensor rho, torch::Tensor dy) {
-    auto z2  = z.reshape({-1, z.size(-1)}).contiguous();
-    auto dy2 = dy.reshape({-1, dy.size(-1)}).contiguous();
-    int M = z2.size(0), N = z2.size(1);
-    auto dz = torch::empty_like(z2);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
-        z.scalar_type(), "nelu_bwd_sg", [&] {
-        launch_bwd_sg(z2.data_ptr<scalar_t>(), rho.data_ptr<float>(),
-                      dy2.data_ptr<scalar_t>(), dz.data_ptr<scalar_t>(),
-                      M, N, stream);
-    });
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return dz.reshape_as(z);
-}
-
-torch::Tensor backward_impl(torch::Tensor z, torch::Tensor rho, torch::Tensor dy) {
-    auto z2  = z.reshape({-1, z.size(-1)}).contiguous();
-    auto dy2 = dy.reshape({-1, dy.size(-1)}).contiguous();
-    int M = z2.size(0), N = z2.size(1);
-    auto dz = torch::empty_like(z2);
+    auto dz     = torch::empty_like(z2);
+    auto dgamma = torch::zeros({N}, z.options().dtype(torch::kFloat32));
     auto stream = at::cuda::getCurrentCUDAStream();
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
         z.scalar_type(), "nelu_bwd", [&] {
         launch_bwd(z2.data_ptr<scalar_t>(), rho.data_ptr<float>(),
                    dy2.data_ptr<scalar_t>(), dz.data_ptr<scalar_t>(),
+                   g1.data_ptr<float>(), dgamma.data_ptr<float>(),
                    M, N, stream);
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return dz.reshape_as(z);
-}
-
-class NELUFunction : public torch::autograd::Function<NELUFunction> {
-public:
-    static torch::Tensor forward(
-        torch::autograd::AutogradContext *ctx,
-        torch::Tensor z, double eps) {
-        auto z_contig = z.contiguous();
-        auto results = forward_impl(z_contig, (float)eps);
-        ctx->save_for_backward({z_contig, results[1]});  // z, rho
-        return results[0];
-    }
-    static torch::autograd::variable_list backward(
-        torch::autograd::AutogradContext *ctx,
-        torch::autograd::variable_list grad_outputs) {
-        auto saved = ctx->get_saved_variables();
-        auto dz = backward_impl(saved[0], saved[1], grad_outputs[0]);
-        return {dz, torch::Tensor()};
-    }
-};
-
-torch::Tensor nelu_autograd(torch::Tensor z, double eps) {
-    return NELUFunction::apply(z, eps);
+    return {dz.reshape_as(z), dgamma};
 }
 
 }  // namespace nelu_cuda
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward",       &nelu_cuda::forward_impl);
-    m.def("backward",      &nelu_cuda::backward_impl);
-    m.def("backward_sg",   &nelu_cuda::backward_sg_impl);
-    m.def("backward_surr", &nelu_cuda::backward_surr_impl);
-    m.def("nelu_autograd", &nelu_cuda::nelu_autograd);
+    m.def("forward",  &nelu_cuda::forward_impl);
+    m.def("backward", &nelu_cuda::backward_impl);
 }

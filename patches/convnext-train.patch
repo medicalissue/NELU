@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index e3e40e3..f040b00 100644
+index e3e40e3..e800346 100644
 --- a/main.py
 +++ b/main.py
 @@ -11,6 +11,7 @@ import datetime
@@ -10,46 +10,62 @@ index e3e40e3..f040b00 100644
  import torch.nn as nn
  import torch.backends.cudnn as cudnn
  import json
-@@ -32,6 +33,31 @@ import utils
+@@ -32,6 +33,48 @@ import utils
  import models.convnext
  import models.convnext_isotropic
  
 +# NELU paper: import our activations + define recursive swap helper.
 +# `nelu` package must be importable; the launcher (ResAct/run_h100.sh)
 +# prepends ResAct to PYTHONPATH for this run.
-+from nelu import (NELU as _NELU, NiLU as _NiLU,
-+                  NELU_GN as _NELU_GN, NiLU_GN as _NiLU_GN,
-+                  NELUCUDA as _NELUCUDA, NiLUCUDA as _NiLUCUDA)
-+_NELU_CLS = _NELUCUDA if _NELUCUDA is not None else _NELU
-+_NILU_CLS = _NiLUCUDA if _NiLUCUDA is not None else _NiLU
++from nelu import NELU as _NELU, NiLU as _NiLU
++
 +_ACT_CLS_MAP = {
-+    "gelu":    nn.GELU,
-+    "silu":    nn.SiLU,
-+    "nelu":    _NELU_CLS,
-+    "nilu":    _NILU_CLS,
-+    "nelu_gn":  _NELU_GN,   # gate-normalized: f = c·z·Φ(z/ρ), non-expansive
-+    "nilu_gn":  _NiLU_GN,
++    "gelu": nn.GELU,
++    "silu": nn.SiLU,
++    "nelu": _NELU,
++    "nilu": _NiLU,
 +}
 +
-+def _replace_act(module, baseline_cls, target_cls):
++def _infer_act_channels(parent, act_name):
++    """Return the feature dim an activation sees, by scanning parent's
++    children in definition order and remembering the most recent
++    Linear/Conv out_features before the activation."""
++    last_out = None
++    for name, child in parent.named_children():
++        if hasattr(child, "out_features"):
++            last_out = child.out_features
++        elif isinstance(child, (nn.Conv2d, nn.Conv1d, nn.Conv3d)):
++            last_out = child.out_channels
++        if name == act_name:
++            return last_out
++    return None
++
++
++def _replace_act(module, baseline_cls, target_cls, needs_channels):
 +    for name, child in module.named_children():
 +        if isinstance(child, baseline_cls):
-+            setattr(module, name, target_cls())
++            if needs_channels:
++                C = _infer_act_channels(module, name)
++                if C is None:
++                    raise RuntimeError(
++                        f"Could not infer channel count for {type(module).__name__}.{name}")
++                setattr(module, name, target_cls(C))
++            else:
++                setattr(module, name, target_cls())
 +        else:
-+            _replace_act(child, baseline_cls, target_cls)
++            _replace_act(child, baseline_cls, target_cls, needs_channels)
 +    return module
 +
  def str2bool(v):
      """
      Converts string to bool type; enables command line 
-@@ -199,6 +225,14 @@ def get_args_parser():
+@@ -199,6 +242,13 @@ def get_args_parser():
      parser.add_argument('--wandb_ckpt', type=str2bool, default=False,
                          help="Save model checkpoints as W&B Artifacts.")
  
 +    # NELU paper: activation swap. Patches every nn.GELU in the model.
 +    parser.add_argument('--act', default='gelu', type=str,
-+                        choices=['gelu', 'silu', 'nelu', 'nilu',
-+                                 'nelu_gn', 'nilu_gn'],
++                        choices=['gelu', 'silu', 'nelu', 'nilu'],
 +                        help='Activation. nelu/nilu replace nn.GELU after model creation.')
 +    parser.add_argument('--torch_compile', type=str2bool, default=False,
 +                        help='Wrap model in torch.compile after DDP wrap.')
@@ -57,7 +73,7 @@ index e3e40e3..f040b00 100644
      return parser
  
  def main(args):
-@@ -276,14 +310,22 @@ def main(args):
+@@ -276,14 +326,23 @@ def main(args):
              label_smoothing=args.smoothing, num_classes=args.nb_classes)
  
      model = create_model(
@@ -75,15 +91,16 @@ index e3e40e3..f040b00 100644
 +    # NELU paper: swap GELU -> NELU (or other) BEFORE finetune-load / EMA / DDP.
 +    if args.act != "gelu":
 +        target_cls = _ACT_CLS_MAP[args.act]
++        needs_channels = args.act in ("nelu", "nilu")
 +        # ConvNeXt baseline activation is GELU.
-+        _replace_act(model, nn.GELU, target_cls)
++        _replace_act(model, nn.GELU, target_cls, needs_channels)
 +        n = sum(1 for m in model.modules() if isinstance(m, target_cls))
 +        print(f"  [NELU] swapped GELU -> {args.act}  ({n} modules)")
 +
      if args.finetune:
          if args.finetune.startswith('https'):
              checkpoint = torch.hub.load_state_dict_from_url(
-@@ -347,6 +389,31 @@ def main(args):
+@@ -347,6 +406,31 @@ def main(args):
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
          model_without_ddp = model.module
  
