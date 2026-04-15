@@ -443,10 +443,12 @@ def main():
     # γ schedule controls (only used for --modes nelu_sched)
     ap.add_argument("--gamma-warmup-epochs", type=int, default=None,
                     help="Epochs to ramp γ from γ_start to γ_end, then HOLD. "
-                         "Default: 10%% of --epochs (e.g. 20 for 200ep).")
-    ap.add_argument("--gamma-warmup-frac", type=float, default=0.1,
+                         "Default: 5%% of --epochs (e.g. 10 for 200ep).")
+    ap.add_argument("--gamma-warmup-frac", type=float, default=0.05,
                     help="Fraction of total epochs to use for γ warmup if "
-                         "--gamma-warmup-epochs is not given. Default 0.1 (10%%).")
+                         "--gamma-warmup-epochs is not given. Default 0.05 (5%%). "
+                         "Matches ConvNeXt/Swin LR-warmup convention (6.7%%) roughly. "
+                         "For ImageNet later, sync this to each architecture's LR warmup.")
     ap.add_argument("--gamma-start", type=float, default=1e-4,
                     help="Starting γ for scheduled mode.")
     ap.add_argument("--gamma-end", type=float, default=1.0,
