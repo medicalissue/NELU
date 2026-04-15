@@ -24,6 +24,18 @@ set -u  # error on unset vars; tolerate individual run failures
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
+# ─── Isolate from any ambient WANDB env vars ─────────────────────
+# If the parent shell had WANDB_RUN_ID / WANDB_RESUME exported (e.g.
+# from an earlier resume of a ConvNeXt run), every child process here
+# would try to resume that run and pollute its history with CIFAR
+# metrics. Explicitly unset these so each run creates its own fresh
+# wandb run keyed by the --name we pass via the Python script.
+unset WANDB_RUN_ID WANDB_RESUME WANDB_NAME WANDB_RUN_GROUP 2>/dev/null || true
+echo "[isolate] unset WANDB_RUN_ID / WANDB_RESUME / WANDB_NAME / WANDB_RUN_GROUP"
+if [[ -n "${WANDB_PROJECT:-}" ]]; then
+    echo "[isolate] note: WANDB_PROJECT=$WANDB_PROJECT inherited (ok if intended)"
+fi
+
 EPOCHS=${EPOCHS:-200}
 LOG_DIR=${LOG_DIR:-logs/cifar_gamma_ablation}
 RESULTS_DIR="results/ablation_gamma_mode"
