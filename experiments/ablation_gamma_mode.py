@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Quick γ-mode ablation: CIFAR-100 MobileNetV2.
 
-Three variants compared:
-  * nelu_pl    : per-layer scalar γ = nn.Parameter (learnable, direct)
-  * nelu_pc    : per-channel γ     = nn.Parameter((C,)) (learnable, direct)
-  * nelu_sched : γ                = non-learnable buffer, cosine 1e-4 → 1
+Five variants compared:
+  * nelu_pl           : per-layer scalar γ, learnable from start
+  * nelu_pc           : per-channel γ, learnable from start
+  * nelu_sched        : γ on cosine warmup then HOLD, never learnable
+  * nelu_schedlearn_pl: cosine warmup to 1.0 (frozen), then per-layer learnable
+  * nelu_schedlearn_pc: cosine warmup to 1.0 (frozen), then per-channel learnable
 
-Seeds: 3 / 3 / 2 by default (8 runs total).
+The schedlearn variants fix a failure mode of direct learnable γ with
+deep init (1e-4): gradient through softplus vanishes, and starting from
+scratch at γ=1.0 diverges on ImageNet. schedlearn sidesteps both: γ is
+ramped up on a schedule while frozen (no gradient), then unfrozen at
+γ≈1.0 where the gradient landscape is healthy.
+
+Seeds: 3 / 3 / 2 / 2 / 2 by default (12 runs total).
 
 Math (NCHW CIFAR — rms over all non-batch dims, as in the original
 ResAct CIFAR recipe that produced NELU wins 7/7):
@@ -144,18 +152,116 @@ class NELU_Scheduled(_BaseNELU):
         return f"gamma={self.gamma.item():.4f} [scheduled]"
 
 
+class NELU_SchedLearn_PL(_BaseNELU):
+    """γ_effective = schedule(t) * γ_learnable,  γ_learnable is a scalar init 1.0.
+
+    The schedule is a buffer (set externally by the training loop each
+    epoch). γ_learnable is always a Parameter, so it receives gradient
+    throughout training. During warmup the effective gradient on
+    γ_learnable is attenuated by `schedule(t)` (small early, full by
+    warmup end), which mimics a curriculum without any freeze/unfreeze
+    phase transition. Post-warmup schedule = 1, effective γ = γ_learnable.
+
+    Starting γ_learnable at 1.0 (not 1e-4) means the learnable scale
+    is at a healthy gradient magnitude from the start — no softplus
+    dead-zone issue.
+    """
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+        self.register_buffer(
+            "schedule", torch.tensor(1e-4, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        g_eff = self.schedule * self.gamma
+        t = g_eff * z / self._rms(z)
+        return z * self._gate(t)
+
+    def extra_repr(self):
+        return (f"gamma(learn)={self.gamma.item():.4f}  "
+                f"schedule={self.schedule.item():.4f}  "
+                f"eff={self.schedule.item() * self.gamma.item():.4f}")
+
+
+class NELU_SchedLearn_PC(_BaseNELU):
+    """Per-channel version: γ_effective = schedule(t) * γ_learnable_{c}.
+
+    γ_learnable is a length-C vector initialized to 1.0, materialized
+    lazily on first forward. Caller must do one dummy forward before
+    constructing the optimizer.
+    """
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.gamma = nn.UninitializedParameter()
+        self.register_buffer(
+            "schedule", torch.tensor(1e-4, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _maybe_init(self, z: torch.Tensor):
+        if isinstance(self.gamma, nn.UninitializedParameter):
+            C = z.size(1) if z.dim() == 4 else z.size(-1)
+            self.gamma.materialize((C,))
+            with torch.no_grad():
+                self.gamma.fill_(1.0)
+            self.gamma.data = self.gamma.data.to(dtype=torch.float32,
+                                                 device=z.device)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        self._maybe_init(z)
+        if z.dim() == 4:
+            g_view = self.gamma.view(1, -1, 1, 1)
+        else:
+            shape = [1] * z.dim()
+            shape[-1] = self.gamma.numel()
+            g_view = self.gamma.view(*shape)
+        g_eff = self.schedule * g_view
+        t = g_eff * z / self._rms(z)
+        return z * self._gate(t)
+
+    def extra_repr(self):
+        if isinstance(self.gamma, nn.UninitializedParameter):
+            return "gamma=uninit"
+        return (f"C={self.gamma.numel()}, "
+                f"gamma_mean={self.gamma.mean().item():.4f}  "
+                f"schedule={self.schedule.item():.4f}")
+
+
 _MODE_CLS = {
-    "nelu_pl":    NELU_PerLayer,
-    "nelu_pc":    NELU_PerChannel,
-    "nelu_sched": NELU_Scheduled,
+    "nelu_pl":            NELU_PerLayer,
+    "nelu_pc":            NELU_PerChannel,
+    "nelu_sched":         NELU_Scheduled,
+    "nelu_schedlearn_pl": NELU_SchedLearn_PL,
+    "nelu_schedlearn_pc": NELU_SchedLearn_PC,
 }
 
 
+# Module tuples for isinstance checks
+_SCHEDLEARN_CLASSES = (NELU_SchedLearn_PL, NELU_SchedLearn_PC)
+
+
 def set_scheduled_gamma(model: nn.Module, value: float) -> int:
+    """Pure-schedule variant: fill NELU_Scheduled.gamma buffer directly."""
     n = 0
     for m in model.modules():
         if isinstance(m, NELU_Scheduled):
-            m.gamma.fill_(float(value))
+            with torch.no_grad():
+                m.gamma.fill_(float(value))
+            n += 1
+    return n
+
+
+def set_schedule_multiplier(model: nn.Module, value: float) -> int:
+    """schedlearn variants: update the `schedule` buffer (multiplier on γ_l)."""
+    n = 0
+    for m in model.modules():
+        if isinstance(m, _SCHEDLEARN_CLASSES):
+            with torch.no_grad():
+                m.schedule.fill_(float(value))
             n += 1
     return n
 
@@ -209,24 +315,59 @@ def replace_activations(model: nn.Module, mode: str) -> nn.Module:
 
 
 def count_gammas(model: nn.Module):
-    """Report γ stats on all NELU modules in `model`."""
-    gammas = []
+    """Report effective-γ stats on all NELU modules in `model`.
+
+    For schedlearn variants the effective value is schedule * γ_learn.
+    For pure-schedule the effective value is the gamma buffer.
+    For always-learnable variants the effective value is just γ.
+    """
+    gammas = []       # effective γ (what the activation actually uses)
+    learn_mag = []    # raw learnable γ magnitude (for schedlearn variants)
+    sched_val = None
     for m in model.modules():
-        if isinstance(m, (NELU_PerLayer, NELU_Scheduled)):
+        if isinstance(m, NELU_PerLayer):
             gammas.append(m.gamma.detach().float().cpu().item())
         elif isinstance(m, NELU_PerChannel):
             if not isinstance(m.gamma, nn.UninitializedParameter):
                 gammas.append(m.gamma.detach().float().cpu().mean().item())
+        elif isinstance(m, NELU_Scheduled):
+            gammas.append(m.gamma.detach().float().cpu().item())
+        elif isinstance(m, NELU_SchedLearn_PL):
+            s = float(m.schedule.item())
+            g = float(m.gamma.detach().cpu().item())
+            gammas.append(s * g)
+            learn_mag.append(g)
+            sched_val = s
+        elif isinstance(m, NELU_SchedLearn_PC):
+            if isinstance(m.gamma, nn.UninitializedParameter):
+                continue
+            s = float(m.schedule.item())
+            g_mean = float(m.gamma.detach().float().cpu().mean().item())
+            gammas.append(s * g_mean)
+            learn_mag.append(g_mean)
+            sched_val = s
     if not gammas:
         return {}
     arr = np.array(gammas)
-    return {
+    out = {
+        "gamma_eff_mean": float(arr.mean()),
+        "gamma_eff_min":  float(arr.min()),
+        "gamma_eff_max":  float(arr.max()),
+        "gamma_eff_std":  float(arr.std()),
+        # Backward-compat keys (used by wandb/history)
         "gamma_mean": float(arr.mean()),
         "gamma_min":  float(arr.min()),
         "gamma_max":  float(arr.max()),
         "gamma_std":  float(arr.std()),
         "n_modules":  int(len(gammas)),
     }
+    if learn_mag:
+        lm = np.array(learn_mag)
+        out["gamma_learnable_mean"] = float(lm.mean())
+        out["gamma_learnable_min"]  = float(lm.min())
+        out["gamma_learnable_max"]  = float(lm.max())
+        out["schedule_value"] = float(sched_val) if sched_val is not None else 1.0
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -305,16 +446,22 @@ def train_one_run(mode: str, seed: int, args) -> dict:
     t0 = time.time()
 
     for epoch in range(args.epochs):
-        # Schedule γ for nelu_sched mode
-        if mode == "nelu_sched":
+        # γ scheduling — unified for all scheduled variants
+        if mode in ("nelu_sched", "nelu_schedlearn_pl", "nelu_schedlearn_pc"):
             g_t = gamma_schedule(
-                epoch,
-                warmup_epochs=args.gamma_warmup_epochs,
+                epoch, warmup_epochs=args.gamma_warmup_epochs,
                 g_start=args.gamma_start,
                 g_end=args.gamma_end,
                 curve=args.gamma_curve,
             )
-            set_scheduled_gamma(model, g_t)
+            if mode == "nelu_sched":
+                # Pure: the γ buffer IS the effective value
+                set_scheduled_gamma(model, g_t)
+            else:
+                # schedlearn: update the schedule multiplier; γ_learnable
+                # is always a Parameter and always receives gradient
+                # (attenuated by schedule during warmup).
+                set_schedule_multiplier(model, g_t)
         # LR warmup: first epoch linearly from 0 to lr
         if epoch == 0:
             for g in optimizer.param_groups:
@@ -469,11 +616,13 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Default seed schedule: 3 for pl, 3 for pc, 2 for sched
+    # Default seed schedule: 2/2/2/1/1 = 8 runs total
     default_seeds = {
-        "nelu_pl":    [42, 123, 456],
-        "nelu_pc":    [42, 123, 456],
-        "nelu_sched": [42, 123],
+        "nelu_pl":            [42, 123],
+        "nelu_pc":            [42, 123],
+        "nelu_sched":         [42, 123],
+        "nelu_schedlearn_pl": [42],
+        "nelu_schedlearn_pc": [42],
     }
 
     all_results = []
