@@ -63,7 +63,7 @@ index 1f036cf..d705d33 100644
          loss_value = loss.item()
  
 diff --git a/main.py b/main.py
-index 3c8dd07..13f3227 100644
+index 3c8dd07..3146198 100644
 --- a/main.py
 +++ b/main.py
 @@ -5,6 +5,7 @@ import datetime
@@ -103,7 +103,7 @@ index 3c8dd07..13f3227 100644
  
  def get_args_parser():
      parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-@@ -185,6 +208,17 @@ def get_args_parser():
+@@ -185,6 +208,28 @@ def get_args_parser():
      parser.add_argument('--world_size', default=1, type=int,
                          help='number of distributed processes')
      parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -118,10 +118,21 @@ index 3c8dd07..13f3227 100644
 +                        help='Log to Weights & Biases (rank 0 only).')
 +    parser.add_argument('--wandb-project', default='nelu', type=str,
 +                        help='W&B project name.')
++    # NELU paper: scheduled gamma curriculum (non-learnable).
++    # Default warmup epochs = LR warmup (5 for DeiT-III).
++    parser.add_argument('--gamma-start', type=float, default=1e-4,
++                        help='Initial γ value for NELU/NiLU (near-linear start).')
++    parser.add_argument('--gamma-end', type=float, default=1.0,
++                        help='Final γ value after warmup; held constant to end.')
++    parser.add_argument('--gamma-warmup-epochs', type=int, default=None,
++                        help='Epochs to ramp γ. Default: same as --warmup-epochs.')
++    parser.add_argument('--gamma-curve', type=str, default='cosine',
++                        choices=['cosine', 'linear', 'exp'],
++                        help='Shape of the γ warmup segment.')
      return parser
  
  
-@@ -193,6 +227,21 @@ def main(args):
+@@ -193,6 +238,21 @@ def main(args):
  
      print(args)
  
@@ -143,7 +154,7 @@ index 3c8dd07..13f3227 100644
      if args.distillation_type != 'none' and args.finetune and not args.eval:
          raise NotImplementedError("Finetuning with distillation not yet supported")
  
-@@ -270,13 +319,21 @@ def main(args):
+@@ -270,13 +330,21 @@ def main(args):
          img_size=args.input_size
      )
  
@@ -167,7 +178,7 @@ index 3c8dd07..13f3227 100644
  
          checkpoint_model = checkpoint['model']
          state_dict = model.state_dict()
-@@ -344,6 +401,31 @@ def main(args):
+@@ -344,6 +412,31 @@ def main(args):
      if args.distributed:
          model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
          model_without_ddp = model.module
@@ -199,7 +210,7 @@ index 3c8dd07..13f3227 100644
      n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
      print('number of params:', n_parameters)
      if not args.unscale_lr:
-@@ -381,7 +463,7 @@ def main(args):
+@@ -381,7 +474,7 @@ def main(args):
              checkpoint = torch.hub.load_state_dict_from_url(
                  args.teacher_path, map_location='cpu', check_hash=True)
          else:
@@ -208,7 +219,7 @@ index 3c8dd07..13f3227 100644
          teacher_model.load_state_dict(checkpoint['model'])
          teacher_model.to(device)
          teacher_model.eval()
-@@ -398,7 +480,7 @@ def main(args):
+@@ -398,7 +491,7 @@ def main(args):
              checkpoint = torch.hub.load_state_dict_from_url(
                  args.resume, map_location='cpu', check_hash=True)
          else:
@@ -217,22 +228,58 @@ index 3c8dd07..13f3227 100644
          model_without_ddp.load_state_dict(checkpoint['model'])
          if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
              optimizer.load_state_dict(checkpoint['optimizer'])
-@@ -476,6 +558,26 @@ def main(args):
+@@ -415,12 +508,36 @@ def main(args):
+         return
+ 
+     print(f"Start training for {args.epochs} epochs")
++    # NELU paper: resolve γ warmup default = LR warmup length
++    if args.act in ("nelu", "nilu") and args.gamma_warmup_epochs is None:
++        args.gamma_warmup_epochs = args.warmup_epochs
++        if utils.is_main_process():
++            print(f"  [NELU] γ warmup synced to LR warmup: "
++                  f"{args.gamma_warmup_epochs} epochs (of {args.epochs})")
++
+     start_time = time.time()
+     max_accuracy = 0.0
+     for epoch in range(args.start_epoch, args.epochs):
+         if args.distributed:
+             data_loader_train.sampler.set_epoch(epoch)
+ 
++        # NELU paper: deterministic γ schedule. Zero learnable parameters;
++        # γ is a per-module buffer set each epoch by this helper.
++        if args.act in ("nelu", "nilu"):
++            from nelu import set_gamma_all, gamma_schedule
++            gamma_t = gamma_schedule(
++                epoch=epoch,
++                warmup_epochs=args.gamma_warmup_epochs,
++                g_start=args.gamma_start,
++                g_end=args.gamma_end,
++                curve=args.gamma_curve,
++            )
++            n_set = set_gamma_all(model, gamma_t)
++            if utils.is_main_process() and (epoch < args.gamma_warmup_epochs + 2
++                                             or epoch % 20 == 0):
++                print(f"  [NELU] epoch {epoch}: γ = {gamma_t:.4f} "
++                      f"(set on {n_set} modules)")
++
+         train_stats = train_one_epoch(
+             model, criterion, data_loader_train,
+             optimizer, device, epoch, loss_scaler,
+@@ -476,6 +593,25 @@ def main(args):
              with (output_dir / "log.txt").open("a") as f:
                  f.write(json.dumps(log_stats) + "\n")
  
-+        # NELU paper: wandb epoch-level log
++        # NELU paper: wandb epoch-level log. γ is deterministic via
++        # schedule (set earlier in this loop iteration) so we just log
++        # the single scalar current value.
 +        if _wandb_run is not None:
 +            try:
-+                # Include effective-gamma stats from each NELU/NiLU module.
 +                if args.act in ("nelu", "nilu"):
-+                    from nelu import collect_gamma_stats
-+                    base_model = model_without_ddp if 'model_without_ddp' in dir() else model
-+                    gamma_stats = collect_gamma_stats(base_model)
-+                    log_stats.update(gamma_stats)
++                    from nelu import current_gamma
++                    log_stats["nelu/gamma"] = current_gamma(model)
 +                _wandb_run.log(log_stats)
 +            except Exception as e:
-+                print(f"  [NELU] wandb/gamma log failed: {e}")
++                print(f"  [NELU] wandb log failed: {e}")
 +                pass
 +
 +    if _wandb_run is not None:

@@ -435,12 +435,15 @@ imnet_eval_baseline() {
 echo -e "\n═══ Phase 4: ImageNet ConvNeXt-T (GELU vs NELU) ═══"
 imnet_eval_baseline convnext_tiny.fb_in1k imnet_convnext_t_gelu_eval
 
-if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
-    echo "[$(date +%H:%M)] ConvNeXt-T NELU from scratch (FB ConvNeXt main.py)"
+if ! skip_if_done "results/imagenet/convnext_tiny_nelu_sched/result.json"; then
+    echo "[$(date +%H:%M)] ConvNeXt-T NELU (scheduled γ) from scratch (FB ConvNeXt main.py)"
     # Effective batch = 8 GPU × 512 × 1 = 4096 (canonical recipe).
     # Original FB cmd was 8 GPU × 128 × 4=4096; we drop grad-accum so the
     # 4 forward/backward+sync passes per step collapse to 1, ~4x faster
     # per step. Memory: ~40 GB / 80 GB on H100.
+    # NELU γ schedule synced to LR warmup (20 epochs for ConvNeXt-T 300ep).
+    # γ = 1e-4 → 1.0 cosine over the first 20 epochs then HOLD at 1.0.
+    # γ is a non-learnable buffer (buffer-based NELU — zero extra params).
     (cd "$CONVNEXT_DIR" && \
      PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
      torchrun --nproc_per_node=8 main.py \
@@ -448,11 +451,13 @@ if ! skip_if_done "results/imagenet/convnext_tiny_nelu/result.json"; then
         --batch_size 512 --lr 4e-3 --update_freq 1 \
         --model_ema true --model_ema_eval true \
         --data_path "$IMNET_DATA" \
-        --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu" \
+        --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu_sched" \
         --use_amp true --auto_resume true \
         --enable_wandb true --project nelu \
         --torch_compile true \
-        --act nelu) \
+        --act nelu \
+        --gamma_start 1e-4 --gamma_end 1.0 \
+        --gamma_warmup_epochs 20 --gamma_curve cosine) \
         2>&1 | tee logs/imnet_convnext_t_nelu.log || \
         echo "[WARN] ConvNeXt-T NELU train failed — continuing"
 fi
