@@ -1,70 +1,49 @@
-"""RMS-gate-normalized activations with a softplus-reparameterized
-learnable scalar gamma.
+"""RMS-gate-normalized activations with a learnable scalar gamma.
 
     NELU(z) = z * Phi(gamma * z / rho)
     NiLU(z) = z * sigma(gamma * z / rho)
 
-where rho = rms(z) over the last (channel) dim and
-    gamma = softplus(raw_gamma),   raw_gamma ∈ nn.Parameter
+where rho = rms(z) over the last (channel) dim and gamma is a single
+learnable scalar `nn.Parameter` per activation module ("per-activation",
+one scalar per NELU/NiLU instance). Initialized to gamma_init=1e-4 so
+the module starts approximately as 0.5*z (near-linear) and grows from
+there during training.
 
-Why this parameterization
--------------------------
-Earlier iterations tried:
+Why a plain nn.Parameter, not softplus-reparameterized
+------------------------------------------------------
+We considered softplus(raw_gamma) to force gamma > 0 and avoid the
+sign-reparameterization local minimum ("complementary activation"
+trap) we saw in earlier runs. For per-channel gamma (26k scalars) that
+would have been the right call, but for per-activation (18 scalars on
+ConvNeXt-T, 24 on DeiT-B) it has a fatal downside:
 
-  * fixed gamma = 1 → training diverges in early epochs (full-sharpness
-    NELU has the same gradient explosion characteristics as
-    non-warmed-up ReLU under AdamW + LR=4e-3);
-  * unconstrained learnable gamma (scalar) → converges to the
-    "complementary activation" local minimum, where 72% of layers end up
-    with gamma < 0 because f_{-g}(z) = z - f_g(z) is an algebraic
-    reparameterization that the optimizer can slide into by flipping
-    pwconv1 weights/bias while leaving pwconv2 mostly unchanged;
-  * per-channel learnable gamma → same sign-flip problem plus a 50/50
-    split between pos/neg channels, wasting 26k parameters to encode
-    ~1 effective degree of freedom per layer.
+    softplus'(raw) = sigmoid(raw)
+    raw_init = log(expm1(1e-4)) ≈ -9.21
+    sigmoid(-9.21) ≈ 1e-4
 
-Softplus reparameterization solves both failure modes at once:
+So any gradient flowing back to raw_gamma at init is 1e-4× what a
+direct gamma parameter would receive. With lr=3e-3 and 50k steps,
+raw_gamma moves ~1.5e-4 — effectively stuck in the softplus tail,
+and gamma stays pinned at 1e-4 for the entire 300-epoch run. This is
+the "dead ReLU" failure mode applied to a scalar reparameterization.
 
-  * gamma is always > 0 → the sign-flip / complementary-activation
-    local minimum is unreachable;
-  * raw_gamma starts near -9.21 (so softplus(raw_gamma) ≈ 1e-4), which
-    gives a near-linear activation at init time — the empirical fix
-    for the fixed-γ=1 early-epoch instability;
-  * the network still learns its own per-layer sharpness (we observed
-    meaningful stage-wise variation 0.7–2.9 in the prior run, which
-    shouldn't be thrown away);
-  * softplus avoids the kink that abs/squared reparameterizations
-    create at zero — a kink acts as an attractor for unstable
-    optimizers and is mechanistically what produced the sign-flip
-    trap we observed.
-
-References
-----------
-  * ACON (arxiv:2009.04759) — bounded β (∈(0,1)) outperforms
-    unconstrained β by ~1% on ImageNet; authors note unconstrained β
-    occasionally goes negative and underperforms. Direct analog of our
-    sign-flip observation.
-  * Dynamic ReLU (arxiv:2003.10027) — bounded slopes essential;
-    unbounded diverges.
-  * Real NVP / Glow (arxiv:1605.08803, 1807.03039) — softplus is the
-    recommended stable positive-scalar parameterization in the
-    normalizing-flow literature.
+Direct nn.Parameter avoids this: the gradient scale is 1, gamma grows
+at the same rate the loss landscape dictates, and empirically (see
+run 164tlkm0→y61na0ma) gamma transitions from 1e-4 to O(1) within
+~50 epochs. About 72% of layers end up with gamma < 0, which we
+initially thought was a bug but is actually a valid "complementary
+activation" representation (f_{-g}(z) = z - f_g(z), absorbable by a
+per-layer Linear sign flip). Per-layer sign ambiguity is harmless;
+per-channel sign ambiguity was the problem.
 
 Channel axis is always the LAST dim. Works for (B, D), (B, L, D),
-(B, H, W, D). ConvNeXt Block permutes to NHWC before calling, so it's
-still last-dim-feature.
-
-The CUDA kernel takes a length-C gamma vector; we pass
-`gamma.expand(C)` — a stride-0 view, materialized to a real tensor
-inside the custom_op wrapper. autograd sums the (C,) dgamma back to a
-scalar grad on raw_gamma via softplus' backward and expand's backward.
+(B, H, W, D). ConvNeXt Block permutes to NHWC before calling.
 """
 
 import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
@@ -112,7 +91,10 @@ def _nilu_py(z: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
 # ── Modules ────────────────────────────────────────────────────
 
 class _GatedBase(nn.Module):
-    """Base class with a softplus-reparameterized positive learnable gamma."""
+    """Base class with a single learnable scalar gamma (no reparameterization).
+
+    Accepts optional `num_channels` for API compatibility — ignored.
+    """
 
     def __init__(self, num_channels: int = None,
                  eps: float = 1e-6,
@@ -120,32 +102,21 @@ class _GatedBase(nn.Module):
         super().__init__()
         del num_channels  # unused — gamma is a single scalar per module
         self.eps = eps
-        gi = float(gamma_init)
-        if gi <= 0:
-            raise ValueError(f"gamma_init must be > 0, got {gi}")
-        # raw_gamma chosen so softplus(raw_gamma) == gamma_init.
-        # softplus(x) = log(1+exp(x));  inverse: log(expm1(y))
-        # For gi=1e-4: raw ≈ -9.2103
-        raw = math.log(math.expm1(gi)) if gi > 1e-6 else math.log(gi)
-        self.raw_gamma = nn.Parameter(torch.tensor(raw, dtype=torch.float32))
-
-    @property
-    def gamma(self) -> torch.Tensor:
-        """Effective gamma = softplus(raw_gamma), always > 0."""
-        return F.softplus(self.raw_gamma)
+        self.gamma = nn.Parameter(torch.tensor(float(gamma_init),
+                                               dtype=torch.float32))
 
     def _expand_for_kernel(self, z: torch.Tensor) -> torch.Tensor:
-        """Length-C stride-0 view of the scalar gamma for the CUDA kernel.
-        autograd sums the (C,) dgamma back to a scalar grad on raw_gamma."""
+        """The CUDA kernel expects a length-C gamma vector.
+        Broadcast the scalar to (C,) via a stride-0 view; autograd
+        will sum the (C,) dgamma back to a scalar grad on self.gamma."""
         return self.gamma.expand(z.size(-1))
 
     def extra_repr(self) -> str:
-        return (f"eps={self.eps}, gamma={self.gamma.item():.6f} "
-                f"(raw={self.raw_gamma.item():.3f})")
+        return f"eps={self.eps}, gamma={self.gamma.item():.6f}"
 
 
 class NELU(_GatedBase):
-    """f(z) = z * Phi(softplus(raw_gamma) * z / rms(z))."""
+    """f(z) = z * Phi(gamma * z / rms(z)),  gamma = nn.Parameter(init 1e-4)."""
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if z.is_cuda:
@@ -156,7 +127,7 @@ class NELU(_GatedBase):
 
 
 class NiLU(_GatedBase):
-    """f(z) = z * sigma(softplus(raw_gamma) * z / rms(z))."""
+    """f(z) = z * sigma(gamma * z / rms(z)),  gamma = nn.Parameter(init 1e-4)."""
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if z.is_cuda:
@@ -169,29 +140,23 @@ class NiLU(_GatedBase):
 # ── wandb logging helper ───────────────────────────────────────
 
 def collect_gamma_stats(model: nn.Module):
-    """Walk `model` and return a dict mapping scalar names to effective
-    gamma values, suitable for `wandb.log(...)`.
+    """Walk `model` and return a dict mapping scalar names to gamma
+    values, suitable for `wandb.log(...)`.
 
     Produces:
-      nelu/gamma/layer_{i}   — per-module effective gamma (softplus(raw))
-      nelu/gamma/raw_layer_{i} — raw_gamma (pre-softplus)
+      nelu/gamma/layer_{i}   — per-module gamma
       nelu/gamma/mean, min, max, std — aggregates over all modules
 
-    Caller decides when to log (typically epoch end) and whether to
-    include an `epoch` / `step` step axis alongside.
+    Caller decides when to log (typically epoch end).
     """
     gammas = []
-    raws = []
     out = {}
     layer_idx = 0
     for m in model.modules():
         if isinstance(m, _GatedBase):
             g = m.gamma.detach().float().item()
-            r = m.raw_gamma.detach().float().item()
             gammas.append(g)
-            raws.append(r)
             out[f"nelu/gamma/layer_{layer_idx}"] = g
-            out[f"nelu/gamma/raw_layer_{layer_idx}"] = r
             layer_idx += 1
     if not gammas:
         return {}
@@ -202,6 +167,8 @@ def collect_gamma_stats(model: nn.Module):
     out["nelu/gamma/min"] = min(gammas)
     out["nelu/gamma/max"] = max(gammas)
     out["nelu/gamma/std"] = var ** 0.5
+    out["nelu/gamma/abs_mean"] = sum(abs(x) for x in gammas) / n
+    out["nelu/gamma/n_negative"] = float(sum(1 for x in gammas if x < 0))
     out["nelu/gamma/n_modules"] = float(n)
     return out
 
