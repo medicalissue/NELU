@@ -435,11 +435,13 @@ imnet_eval_baseline() {
 echo -e "\n═══ Phase 4: ImageNet ConvNeXt-T (GELU vs NELU) ═══"
 imnet_eval_baseline convnext_tiny.fb_in1k imnet_convnext_t_gelu_eval
 
-if ! skip_if_done "results/imagenet/convnext_tiny_nelu_scalar/result.json"; then
-    echo "[$(date +%H:%M)] ConvNeXt-T NELU (per-layer learnable γ) from scratch (FB ConvNeXt main.py)"
+if ! skip_if_done "results/imagenet/convnext_tiny_nelu_pl/result.json"; then
+    echo "[$(date +%H:%M)] ConvNeXt-T NELU (per-layer learnable γ, fresh) from scratch"
+    # Fresh run — γ = nn.Parameter scalar per NELU module, init 1e-4,
+    # directly learnable. Prior runs (164tlkm0 per-channel, y61na0ma
+    # per-layer scalar) are archived in their own output_dirs; this
+    # output_dir is clean so auto_resume won't pick up stale ckpts.
     # Effective batch = 8 GPU × 512 × 1 = 4096 (canonical recipe).
-    # γ = nn.Parameter scalar per NELU module, init 1e-4, directly learnable.
-    # Output dir matches wandb run y61na0ma (resume-friendly).
     (cd "$CONVNEXT_DIR" && \
      PYTHONPATH="$RESACT_DIR:${PYTHONPATH:-}" \
      torchrun --nproc_per_node=8 main.py \
@@ -447,12 +449,12 @@ if ! skip_if_done "results/imagenet/convnext_tiny_nelu_scalar/result.json"; then
         --batch_size 512 --lr 4e-3 --update_freq 1 \
         --model_ema true --model_ema_eval true \
         --data_path "$IMNET_DATA" \
-        --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu_scalar" \
+        --output_dir "$RESACT_DIR/results/imagenet/convnext_tiny_nelu_pl" \
         --use_amp true --auto_resume true \
         --enable_wandb true --project nelu \
         --torch_compile true \
         --act nelu) \
-        2>&1 | tee -a logs/imnet_convnext_t_nelu_scalar.log || \
+        2>&1 | tee logs/imnet_convnext_t_nelu_pl.log || \
         echo "[WARN] ConvNeXt-T NELU train failed — continuing"
 fi
 
