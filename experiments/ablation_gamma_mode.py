@@ -394,8 +394,11 @@ def train_one_run(mode: str, seed: int, args) -> dict:
     replace_activations(model, mode)
     model.to(device)
 
-    # Dummy forward to trigger lazy-init for nelu_pc
-    if mode == "nelu_pc":
+    # Dummy forward to trigger lazy-init for ANY per-channel variant
+    # (nelu_pc uses UninitializedParameter directly; nelu_schedlearn_pc
+    # also uses it for its learnable γ). Without this, `model.parameters()`
+    # would crash on .numel() of the uninitialized tensor.
+    if mode in ("nelu_pc", "nelu_schedlearn_pc"):
         model.eval()
         with torch.no_grad():
             x_dummy = torch.zeros(2, 3, 32, 32, device=device)
