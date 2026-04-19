@@ -142,7 +142,8 @@ pip install -q \
     torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -q \
     timm==1.0.11 wandb tqdm scikit-learn scipy ninja matplotlib \
-    pyyaml autoattack fvcore
+    pyyaml fvcore
+pip install -q git+https://github.com/fra31/auto-attack.git || true  # optional, for adversarial eval
 
 # ── 3. Clone repos ───────────────────────────────────────────
 echo ""
