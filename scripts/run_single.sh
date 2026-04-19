@@ -238,6 +238,19 @@ case "$PHASE" in
             "${EXTRA_ARGS[@]+${EXTRA_ARGS[@]}}"
         )
         ;;
+    eval)
+        # Robustness evaluation (ImageNet-C, -A, -R, -O)
+        # MODEL = model name, ACT = activation, EXTRA_ARGS should contain --checkpoint
+        TRAIN_CMD=(
+            python "${REPO_ROOT}/eval/eval_robustness.py"
+            --model "$MODEL"
+            --activation "$ACT"
+            --data-root /data
+            --output "${OUTPUT_DIR}/robustness.json"
+            --batch-size 256
+            "${EXTRA_ARGS[@]+${EXTRA_ARGS[@]}}"
+        )
+        ;;
     *)
         echo "ERROR: Unknown phase: $PHASE"
         exit 1

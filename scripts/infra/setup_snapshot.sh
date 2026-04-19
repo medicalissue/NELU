@@ -141,6 +141,34 @@ if [ ! -d /data/CIFAR-100-C ]; then
     aws s3 sync "${S3_BUCKET}/CIFAR-100-C/" /data/CIFAR-100-C/ --quiet
 fi
 
+# Robustness benchmarks (ImageNet-C, -A, -R, -O)
+if [ ! -d /data/ImageNet-C ]; then
+    echo "  Syncing ImageNet-C (~30GB)..."
+    aws s3 sync "${S3_BUCKET}/ImageNet-C/" /data/ImageNet-C/ --quiet || \
+        echo "  WARNING: ImageNet-C not on S3, download manually from hendrycks/robustness"
+fi
+
+if [ ! -d /data/imagenet-a ]; then
+    echo "  Downloading ImageNet-A (~800MB)..."
+    wget -q https://people.eecs.berkeley.edu/~hendrycks/imagenet-a.tar -O /tmp/imagenet-a.tar && \
+        tar xf /tmp/imagenet-a.tar -C /data/ && rm /tmp/imagenet-a.tar || \
+        echo "  WARNING: ImageNet-A download failed"
+fi
+
+if [ ! -d /data/imagenet-r ]; then
+    echo "  Downloading ImageNet-R (~2GB)..."
+    wget -q https://people.eecs.berkeley.edu/~hendrycks/imagenet-r.tar -O /tmp/imagenet-r.tar && \
+        tar xf /tmp/imagenet-r.tar -C /data/ && rm /tmp/imagenet-r.tar || \
+        echo "  WARNING: ImageNet-R download failed"
+fi
+
+if [ ! -d /data/imagenet-o ]; then
+    echo "  Downloading ImageNet-O (~20MB)..."
+    wget -q https://people.eecs.berkeley.edu/~hendrycks/imagenet-o.tar -O /tmp/imagenet-o.tar && \
+        tar xf /tmp/imagenet-o.tar -C /data/ && rm /tmp/imagenet-o.tar || \
+        echo "  WARNING: ImageNet-O download failed"
+fi
+
 # ── 6. Verify ────────────────────────────────────────────────
 echo ""
 echo "── 6. Verification ──"
