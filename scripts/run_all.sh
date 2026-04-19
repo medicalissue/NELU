@@ -22,9 +22,71 @@
 
 set -euo pipefail
 
+# wandb rate-limit mitigation: when 8 GPU jobs init simultaneously,
+# the wandb service port-file poll and init handshake can time out.
+export WANDB__SERVICE_WAIT=3600
+export WANDB_INIT_TIMEOUT=600
+export WANDB_DISABLE_CODE=true
+export WANDB_HTTP_TIMEOUT=120
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
 SHUTDOWN_WHEN_DONE="${SHUTDOWN_WHEN_DONE:-true}"
+
+# ── GPU slot pool for single-GPU jobs ──────────────────────────
+# Runs up to NUM_GPUS single-GPU jobs in parallel using a FIFO semaphore.
+# Multi-GPU jobs (imagenet, ablation) drain the pool first, then run alone.
+
+NUM_GPUS=${NUM_GPUS:-8}
+SLOT_FIFO="/tmp/nelu_gpu_slots.$$"
+SLOT_PIDS=()
+
+slot_init() {
+    rm -f "$SLOT_FIFO"
+    mkfifo "$SLOT_FIFO"
+    exec 9<>"$SLOT_FIFO"
+    for g in $(seq 0 $((NUM_GPUS - 1))); do
+        echo $g >&9
+    done
+    SLOT_PIDS=()
+}
+
+slot_run() {
+    local tag="$1"; shift
+    local g
+    read -u 9 g
+    local logf="logs/${tag}.log"
+    local ind_cache="/tmp/inductor_cache_gpu${g}"
+    local triton_cache="/tmp/triton_cache_gpu${g}"
+    mkdir -p "$ind_cache" "$triton_cache"
+    (
+        echo "[$(date +%H:%M:%S)] [gpu $g] start $tag"
+        TORCHINDUCTOR_CACHE_DIR="$ind_cache" \
+        TRITON_CACHE_DIR="$triton_cache" \
+        CUDA_VISIBLE_DEVICES=$g eval "$@" > "$logf" 2>&1
+        local rc=$?
+        if [ $rc -eq 0 ]; then
+            echo "[$(date +%H:%M:%S)] [gpu $g] done  $tag"
+        else
+            echo "[$(date +%H:%M:%S)] [gpu $g] FAIL  $tag (rc=$rc, see $logf)"
+        fi
+        echo $g >&9
+    ) &
+    SLOT_PIDS+=($!)
+}
+
+slot_drain() {
+    if [ ${#SLOT_PIDS[@]} -gt 0 ]; then
+        wait "${SLOT_PIDS[@]}" 2>/dev/null || true
+    fi
+    SLOT_PIDS=()
+}
+
+slot_cleanup() {
+    exec 9>&- 2>/dev/null || true
+    rm -f "$SLOT_FIFO"
+}
+trap slot_cleanup EXIT
 
 # ── Parse arguments ─────────────────────────────────────────────
 
@@ -57,6 +119,9 @@ echo "════════════════════════�
 echo ""
 
 # ── Run each job ────────────────────────────────────────────────
+
+mkdir -p logs
+slot_init
 
 JOB_NUM=0
 FAILED=0
@@ -96,15 +161,25 @@ while IFS= read -r line; do
         continue
     fi
 
-    # Run the experiment
-    if bash "${REPO_ROOT}/scripts/run_single.sh" "$PHASE" "$MODEL" "$ACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; then
-        echo "  Job $JOB_NUM complete."
+    # Decide single-GPU vs multi-GPU based on phase
+    if [ "$PHASE" = "cifar100" ] || [ "$PHASE" = "eval" ]; then
+        # Single-GPU job — dispatch via slot pool
+        slot_run "$RUN_NAME" "bash '${REPO_ROOT}/scripts/run_single.sh' '$PHASE' '$MODEL' '$ACT' ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
     else
-        echo "  Job $JOB_NUM FAILED (exit code $?)."
-        FAILED=$((FAILED + 1))
+        # Multi-GPU job (imagenet, ablation) — drain single-GPU jobs first
+        slot_drain
+        if bash "${REPO_ROOT}/scripts/run_single.sh" "$PHASE" "$MODEL" "$ACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; then
+            echo "  Job $JOB_NUM complete."
+        else
+            echo "  Job $JOB_NUM FAILED (exit code $?)."
+            FAILED=$((FAILED + 1))
+        fi
     fi
 
 done < "$JOB_FILE"
+
+# Drain any remaining single-GPU jobs
+slot_drain
 
 # ── Summary ─────────────────────────────────────────────────────
 

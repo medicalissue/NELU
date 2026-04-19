@@ -15,6 +15,11 @@ exec > >(tee /var/log/nelu-setup.log) 2>&1
 
 S3_BUCKET="__S3_BUCKET__"
 NODE_ID="__NODE_ID__"
+export WANDB_API_KEY="__WANDB_API_KEY__"
+if [ -z "$WANDB_API_KEY" ]; then
+    export ENABLE_WANDB=0
+    echo "WARNING: WANDB_API_KEY not set — wandb logging disabled."
+fi
 
 echo "════════════════════════════════════════════════════════"
 echo "  NELU Training Node ${NODE_ID}"
@@ -128,6 +133,13 @@ echo "  Handler PID: $HANDLER_PID"
 
 echo ""
 echo "── Starting training ──"
+
+# wandb rate-limit mitigation: when 8 GPU jobs init simultaneously,
+# the wandb service port-file poll and init handshake can time out.
+export WANDB__SERVICE_WAIT=3600
+export WANDB_INIT_TIMEOUT=600
+export WANDB_DISABLE_CODE=true
+export WANDB_HTTP_TIMEOUT=120
 
 export S3_BUCKET
 cd "$WORKSPACE"

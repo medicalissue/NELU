@@ -41,6 +41,12 @@ if [ -z "$IAM_ROLE" ]; then
     exit 1
 fi
 
+WANDB_API_KEY="${WANDB_API_KEY:-}"
+if [ -z "$WANDB_API_KEY" ]; then
+    echo "WARNING: WANDB_API_KEY not set. wandb logging will be disabled on instances."
+    echo "  To enable: export WANDB_API_KEY=<your_key>"
+fi
+
 # Deep Learning AMI (Ubuntu 22.04) with CUDA pre-installed
 AMI="${AMI:-ami-0c02fb55956c7d316}"
 
@@ -110,6 +116,7 @@ for i in $(seq 1 "$N_NODES"); do
     USER_DATA=$(cat "$SCRIPT_DIR/user_data.sh" | \
         sed "s|__S3_BUCKET__|${S3_BUCKET}|g" | \
         sed "s|__NODE_ID__|${i}|g" | \
+        sed "s|__WANDB_API_KEY__|${WANDB_API_KEY}|g" | \
         base64 | tr -d '\n')
 
     # Request a spot instance (one-time / terminate on interruption)
