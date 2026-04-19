@@ -52,15 +52,15 @@ load_env_file "$ENV_FILE" "$REPO_ROOT"
 # ── Config (override via environment) ───────────────────────────
 
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-us-west-2}"
 KEY_NAME="${KEY_NAME:-nelu-training}"
 SECURITY_GROUP="${SECURITY_GROUP:-sg-CHANGEME}"
-SUBNET="${SUBNET:-subnet-CHANGEME}"
 IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
+SUBNET_CANDIDATES="$(normalize_subnet_candidates || true)"
 
 # Validate required settings
-if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ "$SUBNET" = "subnet-CHANGEME" ]; then
-    echo "ERROR: Set SECURITY_GROUP and SUBNET environment variables"
+if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ -z "$SUBNET_CANDIDATES" ]; then
+    echo "ERROR: Set SECURITY_GROUP and SUBNETS (or SUBNET) environment variables"
     exit 1
 fi
 
@@ -72,7 +72,7 @@ fi
 DATA_SNAPSHOT="${DATA_SNAPSHOT:-}"
 if [ -z "$DATA_SNAPSHOT" ]; then
     echo "ERROR: Set DATA_SNAPSHOT to the EBS snapshot ID containing the training environment"
-    echo "  Create one with: ./scripts/infra/setup_snapshot.sh"
+    echo "  Create one with: ./scripts/infra/launch_snapshot_setup.sh"
     exit 1
 fi
 
@@ -96,10 +96,11 @@ if [ $# -lt 2 ]; then
     echo ""
     echo "  Environment variables:"
     echo "    S3_BUCKET              S3 bucket for code/data/results (default: s3://nelu-datasets)"
-    echo "    AWS_REGION             AWS region (default: us-east-1)"
+    echo "    AWS_REGION             AWS region (default: us-west-2)"
     echo "    KEY_NAME               EC2 key pair name"
     echo "    SECURITY_GROUP         Security group ID (REQUIRED)"
-    echo "    SUBNET                 Subnet ID (REQUIRED)"
+    echo "    SUBNETS                Comma/space-separated subnet IDs to try (REQUIRED)"
+    echo "    SUBNET                 Single subnet fallback (legacy)"
     echo "    IAM_INSTANCE_PROFILE   ARN of instance profile with S3 access (REQUIRED)"
     echo "    INSTANCE_TYPE          EC2 instance type (default: p5.48xlarge)"
     echo ""
@@ -112,17 +113,12 @@ JOB_DIR="$2"
 AMI_ID="$(resolve_ami "$REGION")"
 
 echo "Using AMI: $AMI_ID"
+echo "Subnet candidates: $SUBNET_CANDIDATES"
 
 # ── Upload code to S3 ──────────────────────────────────────────
 
 echo "Uploading code to S3..."
-cd "$REPO_ROOT"
-tar czf /tmp/nelu-code.tar.gz \
-    --exclude='data' --exclude='results' --exclude='wandb' \
-    --exclude='.env' --exclude='.env.*' \
-    --exclude='__pycache__' --exclude='.git' --exclude='*.pyc' .
-aws s3 cp /tmp/nelu-code.tar.gz "${S3_BUCKET}/code/nelu-code.tar.gz" --quiet
-rm /tmp/nelu-code.tar.gz
+upload_repo_bundle "$REPO_ROOT" "${S3_BUCKET}/code/nelu-code.tar.gz"
 echo "  Code uploaded to ${S3_BUCKET}/code/"
 
 # ── Upload job files ────────────────────────────────────────────
@@ -151,22 +147,35 @@ for i in $(seq 1 "$N_NODES"); do
     echo "── Node $i ──"
 
     USER_DATA_FILE="$(render_user_data_file "$SCRIPT_DIR/user_data.sh" "$S3_BUCKET" "$i" "$WANDB_API_KEY")"
+    INSTANCE_ID=""
+    LAUNCHED_SUBNET=""
+    ERR_FILE="$(mktemp)"
 
     # Request a spot instance (one-time / terminate on interruption)
-    if ! INSTANCE_ID=$(aws ec2 run-instances \
-        --image-id "$AMI_ID" \
-        --instance-type "$INSTANCE_TYPE" \
-        --key-name "$KEY_NAME" \
-        --security-group-ids "$SECURITY_GROUP" \
-        --subnet-id "$SUBNET" \
-        --iam-instance-profile "Arn=$IAM_ROLE" \
-        --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
-        --user-data "file://${USER_DATA_FILE}" \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${i}},{Key=Project,Value=nelu}]" \
-        --region "$REGION" \
-        --query 'Instances[0].InstanceId' \
-        --output text); then
+    for SUBNET in $SUBNET_CANDIDATES; do
+        echo "  Trying subnet: $SUBNET"
+        if INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type "$INSTANCE_TYPE" \
+            --key-name "$KEY_NAME" \
+            --security-group-ids "$SECURITY_GROUP" \
+            --subnet-id "$SUBNET" \
+            --iam-instance-profile "Arn=$IAM_ROLE" \
+            --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
+            --user-data "file://${USER_DATA_FILE}" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${i}},{Key=Project,Value=nelu}]" \
+            --region "$REGION" \
+            --query 'Instances[0].InstanceId' \
+            --output text 2>"$ERR_FILE"); then
+            LAUNCHED_SUBNET="$SUBNET"
+            break
+        fi
+        sed 's/^/    /' "$ERR_FILE" >&2
+    done
+
+    rm -f "$ERR_FILE"
+    if [ -z "$INSTANCE_ID" ]; then
         rm -f "$USER_DATA_FILE"
         echo "ERROR: failed to launch node $i" >&2
         exit 1
@@ -174,6 +183,7 @@ for i in $(seq 1 "$N_NODES"); do
     rm -f "$USER_DATA_FILE"
 
     echo "  Instance: $INSTANCE_ID"
+    echo "  Subnet:   $LAUNCHED_SUBNET"
     echo "  Job file: jobs_node${i}.txt"
     echo "$INSTANCE_ID $i ${JOB_DIR}/jobs_node${i}.txt" >> "$INSTANCE_IDS_FILE"
 done

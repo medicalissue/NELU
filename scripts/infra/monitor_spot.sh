@@ -48,7 +48,7 @@ load_env_file "$ENV_FILE" "$REPO_ROOT"
 
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-us-west-2}"
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <instance_ids_file>"
@@ -56,6 +56,7 @@ if [ $# -lt 1 ]; then
     echo "  Monitors spot instances and re-launches terminated ones."
     echo "  The instance_ids_file is created by launch_spot.sh."
     echo "  Reads settings from ${REPO_ROOT}/.env when present."
+    echo "  Re-launch uses SUBNETS (or legacy SUBNET) candidates from that env file."
     exit 1
 fi
 
@@ -88,7 +89,7 @@ relaunch_instance() {
     local WANDB_KEY="${WANDB_API_KEY:-}"
     local KEY_NAME="${KEY_NAME:-nelu-training}"
     local SECURITY_GROUP="${SECURITY_GROUP:-sg-CHANGEME}"
-    local SUBNET="${SUBNET:-subnet-CHANGEME}"
+    local SUBNET_CANDIDATES
     local IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
     local INSTANCE_TYPE="${INSTANCE_TYPE:-p5.48xlarge}"
     local MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-30.00}"
@@ -96,9 +97,13 @@ relaunch_instance() {
     local USER_DATA_FILE
     local AMI_ID
     local NEW_ID
+    local SUBNET
+    local ERR_FILE
 
-    if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ "$SUBNET" = "subnet-CHANGEME" ] || [ -z "$IAM_ROLE" ]; then
-        log_err "ERROR: SECURITY_GROUP, SUBNET, and IAM_INSTANCE_PROFILE must be set for re-launch"
+    SUBNET_CANDIDATES="$(normalize_subnet_candidates || true)"
+
+    if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ -z "$SUBNET_CANDIDATES" ] || [ -z "$IAM_ROLE" ]; then
+        log_err "ERROR: SECURITY_GROUP, SUBNETS (or SUBNET), and IAM_INSTANCE_PROFILE must be set for re-launch"
         return 1
     fi
     if [ -z "$DATA_SNAPSHOT" ]; then
@@ -108,21 +113,32 @@ relaunch_instance() {
 
     AMI_ID="$(resolve_ami "$REGION")" || return 1
     USER_DATA_FILE="$(render_user_data_file "$SCRIPT_DIR/user_data.sh" "$S3_BUCKET" "$NODE_ID" "$WANDB_KEY")"
+    NEW_ID=""
+    ERR_FILE="$(mktemp)"
 
-    if ! NEW_ID=$(aws ec2 run-instances \
-        --image-id "$AMI_ID" \
-        --instance-type "$INSTANCE_TYPE" \
-        --key-name "$KEY_NAME" \
-        --security-group-ids "$SECURITY_GROUP" \
-        --subnet-id "$SUBNET" \
-        --iam-instance-profile "Arn=$IAM_ROLE" \
-        --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
-        --user-data "file://${USER_DATA_FILE}" \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${NODE_ID}},{Key=Project,Value=nelu}]" \
-        --region "$REGION" \
-        --query 'Instances[0].InstanceId' \
-        --output text); then
+    for SUBNET in $SUBNET_CANDIDATES; do
+        log_err "[$(date -u '+%H:%M:%S')] Trying subnet $SUBNET for node $NODE_ID"
+        if NEW_ID=$(aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type "$INSTANCE_TYPE" \
+            --key-name "$KEY_NAME" \
+            --security-group-ids "$SECURITY_GROUP" \
+            --subnet-id "$SUBNET" \
+            --iam-instance-profile "Arn=$IAM_ROLE" \
+            --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
+            --user-data "file://${USER_DATA_FILE}" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${NODE_ID}},{Key=Project,Value=nelu}]" \
+            --region "$REGION" \
+            --query 'Instances[0].InstanceId' \
+            --output text 2>"$ERR_FILE"); then
+            break
+        fi
+        sed 's/^/    /' "$ERR_FILE" >&2
+    done
+
+    rm -f "$ERR_FILE"
+    if [ -z "$NEW_ID" ]; then
         rm -f "$USER_DATA_FILE"
         log_err "[$(date -u '+%H:%M:%S')] Re-launch failed for node $NODE_ID"
         return 1

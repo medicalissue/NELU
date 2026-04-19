@@ -84,14 +84,21 @@ bash scripts/run_all.sh scripts/jobs_node3.txt
 ### AWS spot instances
 
 ```bash
+# Build the data snapshot once. This launches a temporary p5 instance,
+# runs setup_snapshot.sh via SSM, creates the EBS snapshot, updates
+# DATA_SNAPSHOT in .env, and terminates the setup instance.
+bash scripts/infra/launch_snapshot_setup.sh
+
 # Launch 3 spot instances with the job queue
 bash scripts/infra/launch_spot.sh 3 scripts/
 ```
 
 Notes:
 - Copy [.env.example](/Users/medicalissue/Desktop/NELU/.env.example) to `.env` and fill it in. The launcher, monitor, snapshot setup, and dataset prep scripts read `.env` automatically.
+- Set `SUBNETS=` to a comma-separated list of candidate subnets. The spot launcher and monitor try them in order until one accepts the request.
 - Keep `.env` local only. `launch_spot.sh` excludes it from the uploaded code tarball.
 - `launch_spot.sh` uploads the current local repo snapshot to `s3://.../code/nelu-code.tar.gz`, and instance user-data boots from that tarball.
+- `launch_snapshot_setup.sh` uploads the current local repo snapshot to S3 too, so the remote setup uses your current local infra scripts instead of whatever is on GitHub `main`.
 - If `AMI` is unset, the launcher resolves the latest AWS Deep Learning Base GPU Ubuntu 22.04 AMI from the public SSM parameter store. Override with `AMI` or `AMI_SSM_PARAM` if needed.
 
 ## Repository structure
