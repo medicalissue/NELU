@@ -59,7 +59,7 @@ AMI="${AMI:-ami-0c02fb55956c7d316}"
 
 # Instance type preference (H100 > A100 > A10G)
 INSTANCE_TYPE="${INSTANCE_TYPE:-p5.48xlarge}"
-MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-50.00}"
+MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-30.00}"  # p5.48xlarge spot ~$16-25, cap at $30
 
 # ── Parse arguments ─────────────────────────────────────────────
 

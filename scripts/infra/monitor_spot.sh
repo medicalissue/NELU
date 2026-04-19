@@ -53,9 +53,11 @@ relaunch_instance() {
     echo "[$(date -u '+%H:%M:%S')] Re-launching node $NODE_ID..."
 
     # Generate user data
+    local WANDB_KEY="${WANDB_API_KEY:-}"
     USER_DATA=$(cat "$SCRIPT_DIR/user_data.sh" | \
         sed "s|__S3_BUCKET__|${S3_BUCKET}|g" | \
         sed "s|__NODE_ID__|${NODE_ID}|g" | \
+        sed "s|__WANDB_API_KEY__|${WANDB_KEY}|g" | \
         base64 | tr -d '\n')
 
     local KEY_NAME="${KEY_NAME:-nelu-training}"
@@ -64,10 +66,15 @@ relaunch_instance() {
     local IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
     local AMI="${AMI:-ami-0c02fb55956c7d316}"
     local INSTANCE_TYPE="${INSTANCE_TYPE:-p5.48xlarge}"
-    local MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-50.00}"
+    local MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-30.00}"
+    local DATA_SNAPSHOT="${DATA_SNAPSHOT:-}"
 
     if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ "$SUBNET" = "subnet-CHANGEME" ] || [ -z "$IAM_ROLE" ]; then
         echo "ERROR: SECURITY_GROUP, SUBNET, and IAM_INSTANCE_PROFILE must be set for re-launch"
+        return 1
+    fi
+    if [ -z "$DATA_SNAPSHOT" ]; then
+        echo "ERROR: DATA_SNAPSHOT must be set for re-launch (EBS snapshot with training env)"
         return 1
     fi
 
@@ -79,7 +86,7 @@ relaunch_instance() {
         --subnet-id "$SUBNET" \
         --iam-instance-profile "Arn=$IAM_ROLE" \
         --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500}}]' \
+        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
         --user-data "$USER_DATA" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${NODE_ID}},{Key=Project,Value=nelu}]" \
         --region "$REGION" \
