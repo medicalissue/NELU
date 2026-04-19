@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/results}"
-UPSTREAM_DIR="${UPSTREAM_DIR:-${HOME}}"
+# UPSTREAM_DIR no longer needed — all models train via train_imagenet_timm.py
 ENABLE_WANDB="${ENABLE_WANDB:-1}"  # set to 0 to disable wandb
 
 # -- Parse arguments -------------------------------------------------
@@ -57,7 +57,7 @@ case "$MODEL" in
     efficientnet_b0)  CONFIG_FILE="configs/imagenet/efficientnet_b0.yaml" ;;
     efficientnet_b2)  CONFIG_FILE="configs/imagenet/efficientnet_b2.yaml" ;;
     efficientnet_b4)  CONFIG_FILE="configs/imagenet/efficientnet_b4.yaml" ;;
-    vit_base*)        CONFIG_FILE="configs/imagenet/vit_b16.yaml" ;;
+    deit_base*)       CONFIG_FILE="configs/imagenet/vit_b16.yaml" ;;
     vit_large*)       CONFIG_FILE="configs/imagenet/vit_l16.yaml" ;;
     resnet*)          CONFIG_FILE="configs/cifar100/default.yaml" ;;
     mobilenet*)       CONFIG_FILE="configs/cifar100/default.yaml" ;;
@@ -94,7 +94,7 @@ echo "  Act:       $ACT"
 echo "  Config:    $CONFIG_FILE"
 echo "  Output:    $OUTPUT_DIR"
 echo "  S3:        $S3_OUTPUT"
-echo "  Upstream:  $UPSTREAM_DIR"
+echo "  Repo:      $REPO_ROOT"
 echo "  Extra:     ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
 echo "==================================================================="
 
@@ -151,27 +151,21 @@ case "$PHASE" in
     imagenet)
         case "$MODEL" in
             convnext_*)
-                # ConvNeXt training script (patched to support --act)
-                # Upstream main.py does NOT support --config; pass flags directly.
-                # Config YAML serves as documentation only.
-                DROP_PATH=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['drop_path'])" 2>/dev/null || echo "0.1")
+                # ConvNeXt via train_imagenet_timm.py (timm has ConvNeXt built-in)
+                # No upstream repo needed.
                 TRAIN_CMD=(
                     torchrun
                     --nproc_per_node=8
-                    "${UPSTREAM_DIR}/convnext-train/main.py"
+                    "${REPO_ROOT}/train/train_imagenet_timm.py"
                     --model "$MODEL"
-                    --act "$ACT"
-                    --data_path /data/imagenet
-                    --output_dir "$OUTPUT_DIR"
-                    --drop_path "$DROP_PATH"
-                    --batch_size 128 --update_freq 4 --lr 4e-3
-                    --warmup_epochs 20 --epochs 300
-                    --model_ema true --model_ema_eval true
-                    --use_amp true
-                    --torch_compile true
-                    --enable_wandb true --project nelu
-                    --auto_resume true
-                    "${EXTRA_ARGS[@]}"
+                    --activation "$ACT"
+                    --data-dir /data/imagenet
+                    --output "$OUTPUT_DIR"
+                    --config "${REPO_ROOT}/${CONFIG_FILE}"
+                    --compile
+                    "${WANDB_ARGS[@]}"
+                    "${RESUME_ARGS[@]}"
+                    "${EXTRA_ARGS[@]+${EXTRA_ARGS[@]}}"
                 )
                 ;;
             efficientnet_*)
@@ -191,32 +185,22 @@ case "$PHASE" in
                     "${EXTRA_ARGS[@]}"
                 )
                 ;;
-            vit_*)
-                # DeiT III training script (patched to support --act)
-                # Upstream main.py does NOT support --config; pass flags directly.
-                # Config YAML serves as documentation only.
-                DROP_PATH=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['drop_path'])" 2>/dev/null || echo "0.2")
-                LR=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['lr'])" 2>/dev/null || echo "3e-3")
+            vit_*|deit_*)
+                # ViT training using DeiT recipe via train_imagenet_timm.py
+                # No upstream repo needed — AdamW + cosine + standard augmentation
                 TRAIN_CMD=(
                     torchrun
                     --nproc_per_node=8
-                    "${UPSTREAM_DIR}/deit-train/main.py"
-                    --model "deit_${MODEL#vit_}_LS"
-                    --act "$ACT"
-                    --data-path /data/imagenet
-                    --output_dir "$OUTPUT_DIR"
-                    --drop-path "$DROP_PATH"
-                    --lr "$LR"
-                    --batch 256 --epochs 300
-                    --warmup-epochs 5 --weight-decay 0.05
-                    --opt fusedlamb --warmup-lr 1e-6
-                    --mixup 0.8 --cutmix 1.0
-                    --smoothing 0.0 --reprob 0.0
-                    --color-jitter 0.3 --ThreeAugment
-                    --bce-loss --unscale-lr
-                    --enable_wandb true --project nelu
-                    --auto_resume true
-                    "${EXTRA_ARGS[@]}"
+                    "${REPO_ROOT}/train/train_imagenet_timm.py"
+                    --model "$MODEL"
+                    --activation "$ACT"
+                    --data-dir /data/imagenet
+                    --output "$OUTPUT_DIR"
+                    --config "${REPO_ROOT}/${CONFIG_FILE}"
+                    --compile
+                    "${WANDB_ARGS[@]}"
+                    "${RESUME_ARGS[@]}"
+                    "${EXTRA_ARGS[@]+${EXTRA_ARGS[@]}}"
                 )
                 ;;
             *)
@@ -238,25 +222,20 @@ case "$PHASE" in
         )
         ;;
     ablation)
-        # Ablation uses ConvNeXt upstream script — no --config support.
-        DROP_PATH=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['drop_path'])" 2>/dev/null || echo "0.1")
+        # Ablation uses train_imagenet_timm.py with ConvNeXt config
         TRAIN_CMD=(
             torchrun
             --nproc_per_node=8
-            "${UPSTREAM_DIR}/convnext-train/main.py"
+            "${REPO_ROOT}/train/train_imagenet_timm.py"
             --model "$MODEL"
-            --act "$ACT"
-            --data_path /data/imagenet
-            --output_dir "$OUTPUT_DIR"
-            --drop_path "$DROP_PATH"
-            --batch_size 128 --update_freq 4 --lr 4e-3
-            --warmup_epochs 20 --epochs 300
-            --model_ema true --model_ema_eval true
-            --use_amp true
-            --torch_compile true
-            --enable_wandb true --project nelu
-            --auto_resume true
-            "${EXTRA_ARGS[@]}"
+            --activation "$ACT"
+            --data-dir /data/imagenet
+            --output "$OUTPUT_DIR"
+            --config "${REPO_ROOT}/${CONFIG_FILE}"
+            --compile
+            "${WANDB_ARGS[@]}"
+            "${RESUME_ARGS[@]}"
+            "${EXTRA_ARGS[@]+${EXTRA_ARGS[@]}}"
         )
         ;;
     *)

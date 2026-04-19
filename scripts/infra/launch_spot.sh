@@ -41,6 +41,13 @@ if [ -z "$IAM_ROLE" ]; then
     exit 1
 fi
 
+DATA_SNAPSHOT="${DATA_SNAPSHOT:-}"
+if [ -z "$DATA_SNAPSHOT" ]; then
+    echo "ERROR: Set DATA_SNAPSHOT to the EBS snapshot ID containing the training environment"
+    echo "  Create one with: ./scripts/infra/setup_snapshot.sh"
+    exit 1
+fi
+
 WANDB_API_KEY="${WANDB_API_KEY:-}"
 if [ -z "$WANDB_API_KEY" ]; then
     echo "WARNING: WANDB_API_KEY not set. wandb logging will be disabled on instances."
@@ -128,7 +135,7 @@ for i in $(seq 1 "$N_NODES"); do
         --subnet-id "$SUBNET" \
         --iam-instance-profile "Arn=$IAM_ROLE" \
         --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500}}]' \
+        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
         --user-data "$USER_DATA" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${i}},{Key=Project,Value=nelu}]" \
         --region "$REGION" \

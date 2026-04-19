@@ -5,8 +5,8 @@ model: efficientnet_b0
 dataset: imagenet
 data_path: /data/imagenet
 epochs: 450
-batch_size: 32          # per GPU; 32 * 8 = 256 effective (matches original 2 GPU * 128)
-lr: 0.016               # no scaling needed — effective batch matches original
+batch_size: 128         # per GPU; 128 * 8 = 1024 effective
+lr: 0.032               # 0.016 * sqrt(1024/256) — sqrt scaling from 2 GPU * 128
 opt: rmsproptf
 opt_eps: 0.001
 sched: step

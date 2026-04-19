@@ -14,7 +14,7 @@ imagenet efficientnet_b2 silu
 imagenet efficientnet_b2 nilu
 
 # ViT-Base/16 NELU (~25h)
-imagenet vit_base_patch16_224 nelu
+imagenet deit_base_patch16_224 nelu
 
 # Gamma initialization ablation (~6h each, 90 epoch runs)
 ablation convnext_tiny nelu --gamma_init 0.001

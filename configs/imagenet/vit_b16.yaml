@@ -1,22 +1,28 @@
 # ViT-Base/16 on ImageNet-1k
-# DeiT III recipe: https://github.com/facebookresearch/deit
-# Expected: ~83.8% top-1 (GELU baseline)
-# Training time: ~25h on 8xH100 per activation (300 epochs is the DeiT III standard)
-model: vit_base_patch16_224
+# DeiT recipe (Touvron et al., 2021) with AdamW
+# Expected: ~81.8% top-1 (DeiT-B baseline)
+# Training time: ~25h on 8xH100 per activation
+model: deit_base_patch16_224
 dataset: imagenet
 data_path: /data/imagenet
 epochs: 300
-batch_size: 256         # per GPU
-lr: 3.0e-3
-warmup_epochs: 5
+batch_size: 128          # per GPU; 128 * 8 = 1024 effective
+lr: 1.0e-3              # 5e-4 * (1024/512) linear scaling
+opt: adamw
 weight_decay: 0.05
-drop_path: 0.2
-opt: fusedlamb
-smoothing: 0.0
+sched: cosine
+warmup_epochs: 5
+warmup_lr: 1.0e-6
+min_lr: 1.0e-5
+drop_path: 0.1
 mixup: 0.8
 cutmix: 1.0
-reprob: 0.0
-bce_loss: true
-three_augment: true
+smoothing: 0.1
+reprob: 0.25
+remode: pixel
+aa: rand-m9-mstd0.5-inc1
 color_jitter: 0.3
-use_amp: true
+amp: true
+compile: true
+model_ema: true
+model_ema_decay: 0.99996

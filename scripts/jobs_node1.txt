@@ -6,4 +6,4 @@ imagenet vit_large_patch16_224 gelu
 imagenet vit_large_patch16_224 nelu
 
 # ViT-Base/16 GELU baseline (~25h)
-imagenet vit_base_patch16_224 gelu
+imagenet deit_base_patch16_224 gelu
