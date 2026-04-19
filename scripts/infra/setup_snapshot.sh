@@ -71,27 +71,23 @@ echo ""
 echo "── 1. Setting up /data volume ──"
 
 # Find the additional EBS volume (not the root)
-# Find the EBS data volume.  We attached it as /dev/sdf in the launch
-# template, but NVMe-backed instances may rename it.  Prefer the EBS
-# volume over any instance-store NVMe by checking the serial / model.
+# Find the EBS data volume.  We attached it as /dev/sdf, but NVMe
+# instances rename it.  Strategy: find any block device that is NOT
+# the root device and NOT already mounted.
 DATA_DEV=""
-# First try the explicit device names
-for dev in /dev/sdf /dev/xvdf; do
-    if [ -b "$dev" ]; then
-        DATA_DEV="$dev"
-        break
-    fi
+ROOT_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null || echo "")
+for dev in /dev/sdf /dev/xvdf /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1; do
+    [ -b "$dev" ] || continue
+    # Skip if this is the root device or a partition of it
+    devbase=$(basename "$dev")
+    [ "$devbase" = "$ROOT_DEV" ] && continue
+    [[ "$devbase" == "${ROOT_DEV}"* ]] && continue
+    # Skip if already mounted
+    mountpoint -q "$dev" 2>/dev/null && continue
+    findmnt -rn -S "$dev" >/dev/null 2>&1 && continue
+    DATA_DEV="$dev"
+    break
 done
-# On NVMe instances, /dev/sdf maps to /dev/nvmeXn1.  Find it by
-# looking for an NVMe device whose model contains "Amazon Elastic".
-if [ -z "$DATA_DEV" ]; then
-    for dev in /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
-        if [ -b "$dev" ] && nvme id-ctrl "$dev" 2>/dev/null | grep -qi "Amazon Elastic"; then
-            DATA_DEV="$dev"
-            break
-        fi
-    done
-fi
 
 if [ -z "$DATA_DEV" ]; then
     echo "WARNING: No additional volume found. Using root volume /data/"
@@ -129,6 +125,10 @@ if [ -z "$CONDA_SH" ]; then
 fi
 
 source "$CONDA_SH"
+
+# Accept conda TOS (required since conda 25.x)
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
 
 # Create env on the data volume so it's in the snapshot
 if [ ! -d /data/env/nelu/bin ]; then
