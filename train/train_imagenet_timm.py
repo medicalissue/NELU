@@ -86,6 +86,7 @@ def parse_args():
                    help="YAML config file (overrides CLI defaults)")
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     p.add_argument("--wandb-project", type=str, default="nelu-imagenet")
+    p.add_argument("--compile", action="store_true", help="Use torch.compile")
 
     # Model
     p.add_argument("--model", type=str, default="efficientnet_b0")
@@ -276,6 +277,12 @@ def main():
         print(f"Parameters: {param_count:,}, swapped activations: {n_swapped}")
 
     model = model.to(device)
+
+    # torch.compile
+    if args.compile and hasattr(torch, 'compile'):
+        model = torch.compile(model)
+        if is_primary(rank):
+            print("Model compiled with torch.compile")
 
     # EMA
     model_ema = None

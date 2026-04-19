@@ -23,14 +23,11 @@ ablation convnext_tiny nelu --gamma_init 0.1
 ablation convnext_tiny nelu --gamma_init 0.5
 ablation convnext_tiny nelu --gamma_init 1.0
 
-# CIFAR-100 — all 7 architectures x 5 activations
-# Baselines (relu/gelu/silu): 1 seed each
-# Ours (nelu/nilu): 3 seeds each
+# CIFAR-100 — 7 architectures x 2 activations (nelu/nilu) x 3 seeds = 42 jobs
+# Baselines (relu/gelu/silu) are reused from S3 — they were trained with the
+# same recipe (AMP + compile + MultiStepLR [60,120,160] gamma=0.2, 1-epoch warmup).
 
 # resnet20
-cifar100 resnet20 relu
-cifar100 resnet20 gelu
-cifar100 resnet20 silu
 cifar100 resnet20 nelu --seed 42
 cifar100 resnet20 nelu --seed 123
 cifar100 resnet20 nelu --seed 456
@@ -39,9 +36,6 @@ cifar100 resnet20 nilu --seed 123
 cifar100 resnet20 nilu --seed 456
 
 # resnet56
-cifar100 resnet56 relu
-cifar100 resnet56 gelu
-cifar100 resnet56 silu
 cifar100 resnet56 nelu --seed 42
 cifar100 resnet56 nelu --seed 123
 cifar100 resnet56 nelu --seed 456
@@ -50,9 +44,6 @@ cifar100 resnet56 nilu --seed 123
 cifar100 resnet56 nilu --seed 456
 
 # resnet110
-cifar100 resnet110 relu
-cifar100 resnet110 gelu
-cifar100 resnet110 silu
 cifar100 resnet110 nelu --seed 42
 cifar100 resnet110 nelu --seed 123
 cifar100 resnet110 nelu --seed 456
@@ -61,9 +52,6 @@ cifar100 resnet110 nilu --seed 123
 cifar100 resnet110 nilu --seed 456
 
 # wrn28_10
-cifar100 wrn28_10 relu
-cifar100 wrn28_10 gelu
-cifar100 wrn28_10 silu
 cifar100 wrn28_10 nelu --seed 42
 cifar100 wrn28_10 nelu --seed 123
 cifar100 wrn28_10 nelu --seed 456
@@ -72,9 +60,6 @@ cifar100 wrn28_10 nilu --seed 123
 cifar100 wrn28_10 nilu --seed 456
 
 # densenet100
-cifar100 densenet100 relu
-cifar100 densenet100 gelu
-cifar100 densenet100 silu
 cifar100 densenet100 nelu --seed 42
 cifar100 densenet100 nelu --seed 123
 cifar100 densenet100 nelu --seed 456
@@ -83,9 +68,6 @@ cifar100 densenet100 nilu --seed 123
 cifar100 densenet100 nilu --seed 456
 
 # mobilenetv2
-cifar100 mobilenetv2 relu
-cifar100 mobilenetv2 gelu
-cifar100 mobilenetv2 silu
 cifar100 mobilenetv2 nelu --seed 42
 cifar100 mobilenetv2 nelu --seed 123
 cifar100 mobilenetv2 nelu --seed 456
@@ -94,9 +76,6 @@ cifar100 mobilenetv2 nilu --seed 123
 cifar100 mobilenetv2 nilu --seed 456
 
 # shufflenetv1
-cifar100 shufflenetv1 relu
-cifar100 shufflenetv1 gelu
-cifar100 shufflenetv1 silu
 cifar100 shufflenetv1 nelu --seed 42
 cifar100 shufflenetv1 nelu --seed 123
 cifar100 shufflenetv1 nelu --seed 456

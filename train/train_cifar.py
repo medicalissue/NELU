@@ -342,7 +342,8 @@ def get_dataloaders(data_dir, batch_size, num_workers=4):
 #  Training loop
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, loader, optimizer, scheduler, device, epoch):
+def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
+                    scaler=None, use_amp=False):
     model.train()
     total_loss = 0.0
     correct = 0
@@ -350,10 +351,16 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch):
     for inputs, targets in loader:
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = F.cross_entropy(outputs, targets)
-        loss.backward()
-        optimizer.step()
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(inputs)
+            loss = F.cross_entropy(outputs, targets)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         total_loss += loss.item() * inputs.size(0)
         _, predicted = outputs.max(1)
         correct += predicted.eq(targets).sum().item()
@@ -363,15 +370,16 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, use_amp=False):
     model.eval()
     total_loss = 0.0
     correct = 0
     total = 0
     for inputs, targets in loader:
         inputs, targets = inputs.to(device), targets.to(device)
-        outputs = model(inputs)
-        loss = F.cross_entropy(outputs, targets)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(inputs)
+            loss = F.cross_entropy(outputs, targets)
         total_loss += loss.item() * inputs.size(0)
         _, predicted = outputs.max(1)
         correct += predicted.eq(targets).sum().item()
@@ -400,6 +408,8 @@ def parse_args():
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     p.add_argument("--data_dir", type=str, default="/data")
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--amp", action="store_true", help="Use AMP (mixed precision)")
+    p.add_argument("--compile", action="store_true", help="Use torch.compile")
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     p.add_argument("--wandb_project", type=str, default="nelu-cifar")
     p.add_argument("--config", type=str, default=None, help="YAML config (overrides defaults)")
@@ -443,10 +453,23 @@ def main():
     print(f"Model: {args.model}, activation: {args.activation}, "
           f"params: {param_count:,}, device: {device}")
 
-    # Optimizer + scheduler
+    # torch.compile
+    if args.compile and hasattr(torch, 'compile'):
+        model = torch.compile(model)
+        print("Model compiled with torch.compile")
+
+    # AMP scaler
+    scaler = torch.amp.GradScaler('cuda') if args.amp else None
+
+    # Optimizer + scheduler (MultiStepLR with 1-epoch linear warmup)
     optimizer = optim.SGD(model.parameters(), lr=args.lr,
                           momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    main_scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=[60, 120, 160], gamma=0.2)
+    warmup_scheduler = optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-3, total_iters=1)
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[1])
 
     # Resume
     start_epoch = 0
@@ -488,8 +511,9 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer,
-                                                 scheduler, device, epoch)
-        test_loss, test_acc = evaluate(model, test_loader, device)
+                                                 scheduler, device, epoch,
+                                                 scaler=scaler, use_amp=args.amp)
+        test_loss, test_acc = evaluate(model, test_loader, device, use_amp=args.amp)
         elapsed = time.time() - t0
 
         is_best = test_acc > best_acc

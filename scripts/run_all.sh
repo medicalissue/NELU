@@ -86,7 +86,6 @@ slot_cleanup() {
     exec 9>&- 2>/dev/null || true
     rm -f "$SLOT_FIFO"
 }
-trap slot_cleanup EXIT
 
 # ── Parse arguments ─────────────────────────────────────────────
 
@@ -122,6 +121,26 @@ echo ""
 
 mkdir -p logs
 slot_init
+
+# ── Background S3 sync — upload checkpoints every 10 minutes ──
+# This ensures that if spot interruption handler fails or checkpoint
+# is large, we still have recent checkpoints on S3.
+RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/results}"
+S3_SYNC_INTERVAL="${S3_SYNC_INTERVAL:-600}"  # 10 minutes
+SYNC_PID=""
+if aws sts get-caller-identity --output text >/dev/null 2>&1; then
+    (
+        while true; do
+            sleep "$S3_SYNC_INTERVAL"
+            aws s3 sync "${RESULTS_DIR}" "${S3_BUCKET}/results/" \
+                --exclude "*.log" --exclude "wandb/*" --quiet 2>/dev/null || true
+        done
+    ) &
+    SYNC_PID=$!
+    echo "[$(date +%H:%M:%S)] [s3-sync] background loop started (PID $SYNC_PID, every ${S3_SYNC_INTERVAL}s)"
+fi
+# Kill the sync loop when run_all exits
+trap "[ -n \"$SYNC_PID\" ] && kill $SYNC_PID 2>/dev/null; slot_cleanup" EXIT
 
 JOB_NUM=0
 FAILED=0

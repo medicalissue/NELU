@@ -1,5 +1,5 @@
-# CIFAR-100 default recipe
-# Standard SGD + cosine schedule, used for ResNet-20/56 and MobileNetV2
+# CIFAR-100 default recipe (matches original pytorch-cifar100 standard)
+# SGD + MultiStepLR with 1-epoch linear warmup
 model: resnet20
 dataset: cifar100
 data_path: /data
@@ -9,6 +9,9 @@ lr: 0.1
 opt: sgd
 momentum: 0.9
 weight_decay: 5.0e-4
-scheduler: cosine
-warmup_epochs: 0
-use_amp: false
+scheduler: multistep
+milestones: [60, 120, 160]
+lr_gamma: 0.2
+warmup_epochs: 1
+amp: true
+compile: true

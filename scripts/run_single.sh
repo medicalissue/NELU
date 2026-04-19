@@ -168,6 +168,7 @@ case "$PHASE" in
                     --warmup_epochs 20 --epochs 300
                     --model_ema true --model_ema_eval true
                     --use_amp true
+                    --torch_compile true
                     --enable_wandb true --project nelu
                     --auto_resume true
                     "${EXTRA_ARGS[@]}"
@@ -184,6 +185,7 @@ case "$PHASE" in
                     --data-dir /data/imagenet
                     --output "$OUTPUT_DIR"
                     --config "${REPO_ROOT}/${CONFIG_FILE}"
+                    --compile
                     "${WANDB_ARGS[@]}"
                     "${RESUME_ARGS[@]}"
                     "${EXTRA_ARGS[@]}"
@@ -251,6 +253,7 @@ case "$PHASE" in
             --warmup_epochs 20 --epochs 300
             --model_ema true --model_ema_eval true
             --use_amp true
+            --torch_compile true
             --enable_wandb true --project nelu
             --auto_resume true
             "${EXTRA_ARGS[@]}"

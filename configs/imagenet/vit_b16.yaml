@@ -1,6 +1,7 @@
 # ViT-Base/16 on ImageNet-1k
 # DeiT III recipe: https://github.com/facebookresearch/deit
 # Expected: ~83.8% top-1 (GELU baseline)
+# Training time: ~25h on 8xH100 per activation (300 epochs is the DeiT III standard)
 model: vit_base_patch16_224
 dataset: imagenet
 data_path: /data/imagenet
