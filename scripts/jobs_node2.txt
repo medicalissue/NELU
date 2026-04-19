@@ -1,0 +1,14 @@
+# Node 2 — Medium jobs (~153 GPU-hours on 8xH100)
+# ConvNeXt-B, ConvNeXt-S, EfficientNet-B4
+
+# ConvNeXt-Base (~30h each)
+imagenet convnext_base gelu
+imagenet convnext_base nelu
+
+# ConvNeXt-Small (~20h each)
+imagenet convnext_small gelu
+imagenet convnext_small nelu
+
+# EfficientNet-B4 (~18h each)
+imagenet efficientnet_b4 silu
+imagenet efficientnet_b4 nilu

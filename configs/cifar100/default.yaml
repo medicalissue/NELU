@@ -1,0 +1,14 @@
+# CIFAR-100 default recipe
+# Standard SGD + cosine schedule, used for ResNet-20/56 and MobileNetV2
+model: resnet20
+dataset: cifar100
+data_path: /data
+epochs: 200
+batch_size: 128
+lr: 0.1
+opt: sgd
+momentum: 0.9
+weight_decay: 5.0e-4
+scheduler: cosine
+warmup_epochs: 0
+use_amp: false

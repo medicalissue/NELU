@@ -1,0 +1,34 @@
+# Node 3 — Light + diverse jobs (~128 GPU-hours on 8xH100)
+# ConvNeXt-T, EfficientNet-B0/B2, ViT-B NELU, gamma ablation, CIFAR-100
+
+# ConvNeXt-Tiny (~10h each)
+imagenet convnext_tiny gelu
+imagenet convnext_tiny nelu
+
+# EfficientNet-B0 (~4h each)
+imagenet efficientnet_b0 silu
+imagenet efficientnet_b0 nilu
+
+# EfficientNet-B2 (~7h each)
+imagenet efficientnet_b2 silu
+imagenet efficientnet_b2 nilu
+
+# ViT-Base/16 NELU (~25h)
+imagenet vit_base_patch16_224 nelu
+
+# Gamma initialization ablation (~6h each, 90 epoch runs)
+ablation convnext_tiny nelu --gamma_init 0.001
+ablation convnext_tiny nelu --gamma_init 0.01
+ablation convnext_tiny nelu --gamma_init 0.1
+ablation convnext_tiny nelu --gamma_init 0.5
+ablation convnext_tiny nelu --gamma_init 1.0
+
+# CIFAR-100 — quick sanity checks + seed variance
+cifar100 resnet20 gelu
+cifar100 resnet20 nelu --seed 42
+cifar100 resnet20 nelu --seed 123
+cifar100 resnet20 nelu --seed 456
+cifar100 resnet20 silu
+cifar100 resnet20 nilu --seed 42
+cifar100 resnet20 nilu --seed 123
+cifar100 resnet20 nilu --seed 456

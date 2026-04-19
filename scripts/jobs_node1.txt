@@ -1,0 +1,9 @@
+# Node 1 — Heaviest jobs (~205 GPU-hours on 8xH100)
+# ViT-L (2x) and ViT-B GELU baseline
+
+# ViT-Large/16 — longest single job (~80h each)
+imagenet vit_large_patch16_224 gelu
+imagenet vit_large_patch16_224 nelu
+
+# ViT-Base/16 GELU baseline (~25h)
+imagenet vit_base_patch16_224 gelu
