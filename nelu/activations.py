@@ -5,7 +5,7 @@
 
 where rho = rms(z) over the last (channel) dim and gamma is a single
 learnable scalar nn.Parameter per activation module, initialized to
-1e-4 (near-linear start). Training grows gamma as the optimization
+1e-6 (near-linear start, matching LayerScale convention). Training grows gamma as the optimization
 landscape dictates.
 
 Design choice rationale
@@ -36,7 +36,7 @@ import torch.nn as nn
 
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
-_DEFAULT_GAMMA_INIT = 1e-4
+_DEFAULT_GAMMA_INIT = 1e-6
 
 
 # ── CUDA backend detection (lazy) ───────────────────────────────
@@ -106,7 +106,7 @@ class _GatedBase(nn.Module):
 
 
 class NELU(_GatedBase):
-    """f(z) = z * Phi(gamma * z / rms(z)),  gamma = nn.Parameter(init 1e-4)."""
+    """f(z) = z * Phi(gamma * z / rms(z)),  gamma = nn.Parameter(init 1e-6)."""
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if z.is_cuda:
@@ -117,7 +117,7 @@ class NELU(_GatedBase):
 
 
 class NiLU(_GatedBase):
-    """f(z) = z * sigma(gamma * z / rms(z)),  gamma = nn.Parameter(init 1e-4)."""
+    """f(z) = z * sigma(gamma * z / rms(z)),  gamma = nn.Parameter(init 1e-6)."""
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if z.is_cuda:

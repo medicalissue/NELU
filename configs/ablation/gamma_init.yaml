@@ -2,21 +2,20 @@
 # Tests how sensitive NELU/NiLU are to the initial value of gamma.
 # Each value is run with ConvNeXt-Tiny on ImageNet for 90 epochs.
 #
-# The default (1e-4) starts near-linear and lets the optimizer
-# discover the right gating strength. Larger inits start with
-# stronger gating; gamma=1.0 is equivalent to no warmup.
+# The default (1e-6) matches the LayerScale convention (CaiT, ConvNeXt)
+# and starts near-linear. Larger inits start with stronger gating;
+# gamma=1.0 is equivalent to no curriculum.
 model: convnext_tiny
 dataset: imagenet
 data_path: /data/imagenet
 epochs: 90              # shortened sweep — 90 epochs is enough to see the trend
 batch_size: 128
-update_freq: 1
 lr: 4.0e-3
 warmup_epochs: 20
 weight_decay: 0.05
 drop_path: 0.1
 opt: adamw
-use_amp: true
+amp: true
 model_ema: false        # skip EMA for speed in ablation
 mixup: 0.8
 cutmix: 1.0
@@ -26,8 +25,8 @@ color_jitter: 0.4
 
 # Values to sweep (run one job per value)
 gamma_init_values:
-  - 0.001
+  - 1.0e-6              # default (LayerScale-like)
+  - 1.0e-4
   - 0.01
   - 0.1
-  - 0.5
-  - 1.0
+  - 1.0                 # no curriculum

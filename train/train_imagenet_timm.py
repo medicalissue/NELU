@@ -80,7 +80,7 @@ def parse_args():
     p.add_argument("--activation", type=str, default="silu",
                    choices=["relu", "gelu", "silu", "nelu", "nilu"],
                    help="Activation function to use")
-    p.add_argument("--gamma-init", type=float, default=1e-4,
+    p.add_argument("--gamma-init", type=float, default=1e-6,
                    help="Initial gamma for NELU/NiLU")
     p.add_argument("--config", type=str, default=None,
                    help="YAML config file (overrides CLI defaults)")
