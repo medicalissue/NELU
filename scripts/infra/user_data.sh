@@ -15,10 +15,20 @@ echo "NELU training instance starting — Node ${NODE_ID}"
 echo "$(date -u)"
 
 # ── 1. Mount data volume (from EBS snapshot) ──
+# The EBS data volume was attached as /dev/sdf but may appear as
+# /dev/nvmeXn1 on NVMe instances.  Prefer EBS over instance-store.
 DATA_DEV=""
-for dev in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+for dev in /dev/sdf /dev/xvdf; do
     [ -b "$dev" ] && DATA_DEV="$dev" && break
 done
+if [ -z "$DATA_DEV" ]; then
+    for dev in /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
+        if [ -b "$dev" ] && nvme id-ctrl "$dev" 2>/dev/null | grep -qi "Amazon Elastic"; then
+            DATA_DEV="$dev"
+            break
+        fi
+    done
+fi
 if [ -n "$DATA_DEV" ]; then
     mkdir -p /data
     mount "$DATA_DEV" /data 2>/dev/null || true

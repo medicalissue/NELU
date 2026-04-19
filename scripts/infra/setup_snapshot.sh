@@ -71,13 +71,27 @@ echo ""
 echo "── 1. Setting up /data volume ──"
 
 # Find the additional EBS volume (not the root)
+# Find the EBS data volume.  We attached it as /dev/sdf in the launch
+# template, but NVMe-backed instances may rename it.  Prefer the EBS
+# volume over any instance-store NVMe by checking the serial / model.
 DATA_DEV=""
-for dev in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+# First try the explicit device names
+for dev in /dev/sdf /dev/xvdf; do
     if [ -b "$dev" ]; then
         DATA_DEV="$dev"
         break
     fi
 done
+# On NVMe instances, /dev/sdf maps to /dev/nvmeXn1.  Find it by
+# looking for an NVMe device whose model contains "Amazon Elastic".
+if [ -z "$DATA_DEV" ]; then
+    for dev in /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
+        if [ -b "$dev" ] && nvme id-ctrl "$dev" 2>/dev/null | grep -qi "Amazon Elastic"; then
+            DATA_DEV="$dev"
+            break
+        fi
+    done
+fi
 
 if [ -z "$DATA_DEV" ]; then
     echo "WARNING: No additional volume found. Using root volume /data/"
