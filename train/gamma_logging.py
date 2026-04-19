@@ -62,7 +62,7 @@ def measure_gate_entropy(model: nn.Module, probe_batch: torch.Tensor,
         def hook_fn(module, input, output):
             with torch.no_grad():
                 z = input[0]
-                rho = z.pow(2).mean(dim=-1, keepdim=True).add(module.eps).sqrt()
+                rho = module.compute_rms(z)
                 t = module.gamma * z / rho
 
                 if isinstance(module, NELU):

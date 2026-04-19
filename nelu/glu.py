@@ -6,10 +6,10 @@ Standard SwiGLU (used in LLaMA, Mistral, etc.):
 We define two RMS-gate-normalized variants — one for each pointwise base:
 
     NiLUGLU(x) = down( nilu(gate_proj(x)) * up_proj(x) )
-              = down( g * sigmoid(g / rms(g)) * up )      # SwiGLU + RMS
+              = down( g * sigmoid(gamma * g / rms(g)) * up )      # SwiGLU + RMS
 
     NELUGLU(x) = down( nelu(gate_proj(x)) * up_proj(x) )
-              = down( g * Phi(g / rms(g))    * up )       # GELU-GLU + RMS
+              = down( g * Phi(gamma * g / rms(g))    * up )       # GELU-GLU + RMS
 
 The `up_proj` output is left untouched — only the gate side is normalized.
 Both keep parameter count identical to SwiGLU.
@@ -20,6 +20,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .activations import _DEFAULT_GAMMA_INIT, _rms
 
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
@@ -58,14 +60,14 @@ class NiLUGLU(nn.Module):
     """SwiGLU with NiLU on the gate projection (= SwiGLU + RMS gate norm).
 
         g = x W_gate
-        h = g * sigmoid( g / rms(g) ) * (x W_up)      # NiLU(g) * up
+        h = g * sigmoid( gamma * g / rms(g) ) * (x W_up)      # NiLU(g) * up
         y = h W_down
 
     Parameter count identical to SwiGLU.
     """
 
     def __init__(self, dim: int, hidden_dim: int = None, bias: bool = False,
-                 eps: float = 1e-6):
+                 eps: float = 1e-6, gamma_init: float = _DEFAULT_GAMMA_INIT):
         super().__init__()
         hidden_dim = hidden_dim or _default_hidden(dim)
         self.hidden_dim = hidden_dim
@@ -73,23 +75,28 @@ class NiLUGLU(nn.Module):
         self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
+        self.gamma = nn.Parameter(torch.tensor(float(gamma_init), dtype=torch.float32))
+        self._is_nelu_gamma_module = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         g = self.w_gate(x)
         u = self.w_up(x)
-        rms = g.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
-        h = g * torch.sigmoid(g / rms)        # NiLU(g)
+        rms = _rms(g, self.eps, rms_mode="last_dim")
+        h = g * torch.sigmoid(self.gamma * g / rms)        # NiLU(g)
         return self.w_down(h * u)
 
     def extra_repr(self) -> str:
-        return f"hidden_dim={self.hidden_dim}, eps={self.eps}"
+        return (
+            f"hidden_dim={self.hidden_dim}, eps={self.eps}, "
+            f"gamma={self.gamma.item():.6f}"
+        )
 
 
 class NELUGLU(nn.Module):
     """GLU FFN block using NELU (Phi-based) on the gate projection.
 
         g = x W_gate
-        h = g * Phi( g / rms(g) ) * (x W_up)          # NELU(g) * up
+        h = g * Phi( gamma * g / rms(g) ) * (x W_up)          # NELU(g) * up
         y = h W_down
 
     Same parameter count as SwiGLU. Differs from NiLUGLU only in the
@@ -97,7 +104,7 @@ class NELUGLU(nn.Module):
     """
 
     def __init__(self, dim: int, hidden_dim: int = None, bias: bool = False,
-                 eps: float = 1e-6):
+                 eps: float = 1e-6, gamma_init: float = _DEFAULT_GAMMA_INIT):
         super().__init__()
         hidden_dim = hidden_dim or _default_hidden(dim)
         self.hidden_dim = hidden_dim
@@ -105,13 +112,18 @@ class NELUGLU(nn.Module):
         self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
+        self.gamma = nn.Parameter(torch.tensor(float(gamma_init), dtype=torch.float32))
+        self._is_nelu_gamma_module = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         g = self.w_gate(x)
         u = self.w_up(x)
-        rms = g.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
-        h = g * 0.5 * (1.0 + torch.erf((g / rms) * _INV_SQRT2))   # NELU(g)
+        rms = _rms(g, self.eps, rms_mode="last_dim")
+        h = g * 0.5 * (1.0 + torch.erf((self.gamma * g / rms) * _INV_SQRT2))   # NELU(g)
         return self.w_down(h * u)
 
     def extra_repr(self) -> str:
-        return f"hidden_dim={self.hidden_dim}, eps={self.eps}"
+        return (
+            f"hidden_dim={self.hidden_dim}, eps={self.eps}, "
+            f"gamma={self.gamma.item():.6f}"
+        )

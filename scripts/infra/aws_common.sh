@@ -118,12 +118,14 @@ render_user_data_file() {
     local s3_bucket="$2"
     local node_id="$3"
     local wandb_api_key="${4:-}"
+    local orch_run_id="${5:-}"
     local out_file
 
     out_file=$(mktemp)
     S3_BUCKET_RENDER="$s3_bucket" \
     NODE_ID_RENDER="$node_id" \
     WANDB_API_KEY_RENDER="$wandb_api_key" \
+    ORCH_RUN_ID_RENDER="$orch_run_id" \
     python - "$template" "$out_file" <<'PY'
 import os
 import sys
@@ -137,6 +139,7 @@ replacements = {
     "__S3_BUCKET__": os.environ["S3_BUCKET_RENDER"],
     "__NODE_ID__": os.environ["NODE_ID_RENDER"],
     "__WANDB_API_KEY__": os.environ.get("WANDB_API_KEY_RENDER", ""),
+    "__ORCH_RUN_ID__": os.environ.get("ORCH_RUN_ID_RENDER", ""),
 }
 for old, new in replacements.items():
     text = text.replace(old, new)

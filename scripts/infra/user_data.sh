@@ -9,6 +9,7 @@ exec > >(tee /var/log/nelu-userdata.log) 2>&1
 S3_BUCKET="__S3_BUCKET__"
 NODE_ID="__NODE_ID__"
 export WANDB_API_KEY="__WANDB_API_KEY__"
+ORCH_RUN_ID="__ORCH_RUN_ID__"
 
 echo "NELU training instance starting — Node ${NODE_ID}"
 echo "$(date -u)"
@@ -60,6 +61,7 @@ aws s3 cp "${S3_BUCKET}/jobs/jobs_node${NODE_ID}.txt" \
 
 # ── 5. Set environment ──
 export S3_BUCKET
+export ORCH_RUN_ID
 # No upstream repos needed — all training via train_imagenet_timm.py
 export RESULTS_DIR="/data/results"
 export TORCH_EXTENSIONS_DIR="/data/cache/torch_extensions"
@@ -97,6 +99,19 @@ aws s3 cp "/data/logs/train_node${NODE_ID}.log" \
 
 if [ $RUN_ALL_EXIT -ne 0 ]; then
     echo "run_all.sh exited with code $RUN_ALL_EXIT"
+    if [ -n "${ORCH_RUN_ID:-}" ]; then
+        FAIL_FILE="/data/logs/node${NODE_ID}.failed.txt"
+        {
+            echo "node_id=${NODE_ID}"
+            echo "run_id=${ORCH_RUN_ID}"
+            echo "exit_code=${RUN_ALL_EXIT}"
+            echo "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "instance_id=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)"
+        } > "$FAIL_FILE"
+        aws s3 cp "$FAIL_FILE" \
+            "${S3_BUCKET}/orchestrator/${ORCH_RUN_ID}/node${NODE_ID}.FAILED" \
+            --quiet 2>/dev/null || true
+    fi
     exit $RUN_ALL_EXIT
 fi
 

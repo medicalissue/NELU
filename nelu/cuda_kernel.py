@@ -4,9 +4,10 @@ Forward:  t[m,n] = gamma[n] * z[m,n] / rho[m],   y[m,n] = z[m,n] * Phi(t[m,n])
 Backward: (dz, dgamma)   — dgamma is length-N, summed across all rows.
 
 Wired through `torch.library.custom_op` so `torch.compile` can
-FakeTensor-trace it without graph-breaking. The CUDA kernel only
-handles the last-dim-as-channel layout (2D / 3D). 4D (NCHW) inputs
-are handled in the Python reference in `activations.py`.
+FakeTensor-trace it without graph-breaking. The underlying CUDA kernel
+normalizes over the last dimension only; the public wrapper exposes a
+more general `dims=...` interface by reordering / flattening the chosen
+reduction dims into a trailing axis before dispatch.
 """
 
 import os
@@ -15,6 +16,8 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from torch.utils.cpp_extension import load
+
+from .reduction_layout import DimsLike, canonicalize_reduce_dims, flatten_reduction_dims, restore_reduction_dims
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 _nelu_cuda = load(
@@ -90,17 +93,32 @@ torch.library.register_autograd(
 
 # ── Public API ──────────────────────────────────────────────────
 
-def nelu_cuda(z: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-6
-              ) -> torch.Tensor:
-    """Forward NELU with a length-C gamma vector (C = z.size(-1)).
+def _prepare_gamma_vector(gamma: torch.Tensor, reduced_size: int, device: torch.device) -> torch.Tensor:
+    if gamma.device != device:
+        gamma = gamma.to(device)
+    if gamma.numel() == 1:
+        return gamma.reshape(1).expand(reduced_size)
+    if gamma.numel() == reduced_size:
+        return gamma.reshape(reduced_size)
+    raise ValueError(
+        f"gamma must be scalar or have {reduced_size} elements for the flattened reduction axis, "
+        f"got shape {tuple(gamma.shape)}"
+    )
 
-    `gamma` must be a 1-D tensor of length z.size(-1). It can live in
-    any float dtype — it's cast to fp32 inside the kernel.
+
+def nelu_cuda(z: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-6,
+              dims: DimsLike = -1) -> torch.Tensor:
+    """Forward NELU with a scalar gamma or length-K gamma vector.
+
+    The fused CUDA kernel itself reduces over the last dimension. This wrapper
+    accepts arbitrary `dims`, flattens them into one trailing axis, and restores
+    the original layout afterwards.
     """
-    if gamma.device != z.device:
-        gamma = gamma.to(z.device)
-    y, _rho = _nelu_fwd_op(z, gamma, float(eps))
-    return y
+    dims = canonicalize_reduce_dims(z.ndim, dims)
+    z_flat, layout = flatten_reduction_dims(z, dims)
+    gamma_vec = _prepare_gamma_vector(gamma, z_flat.size(-1), z.device)
+    y_flat, _rho = _nelu_fwd_op(z_flat, gamma_vec, float(eps))
+    return restore_reduction_dims(y_flat, layout)
 
 
 class NELUCUDA(nn.Module):

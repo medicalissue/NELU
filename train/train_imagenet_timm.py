@@ -53,6 +53,12 @@ _SWAP_TABLE = {
 }
 
 
+def infer_rms_mode(model_name):
+    if model_name.startswith(("efficientnet_", "convnext")):
+        return "last_3dims"
+    return "last_dim"
+
+
 def apply_activation_swap(model, activation, **kwargs):
     """Apply activation swap and return the count of replaced modules."""
     entry = _SWAP_TABLE.get(activation)
@@ -161,6 +167,44 @@ def setup_distributed():
 
 def is_primary(rank):
     return rank == 0
+
+
+def init_wandb_run(args, rank, saved_wandb_id=None):
+    if not args.wandb or not is_primary(rank):
+        return None, saved_wandb_id
+
+    if args.resume and os.path.isfile(args.resume) and not saved_wandb_id:
+        raise RuntimeError(
+            f"Resume checkpoint {args.resume} is missing wandb_id; refusing to create a new wandb run."
+        )
+
+    try:
+        import wandb
+    except ImportError:
+        print("WARNING: wandb not installed")
+        return None, saved_wandb_id
+
+    init_kwargs = {
+        "project": args.wandb_project,
+        "name": f"{args.model}_{args.activation}",
+        "config": vars(args),
+    }
+    if saved_wandb_id:
+        init_kwargs["id"] = saved_wandb_id
+        init_kwargs["resume"] = "must"
+    else:
+        init_kwargs["id"] = wandb.util.generate_id()
+        init_kwargs["resume"] = "never"
+
+    wandb_run = wandb.init(**init_kwargs)
+    if saved_wandb_id and wandb_run.id != saved_wandb_id:
+        raise RuntimeError(
+            f"wandb resumed unexpected run id: expected {saved_wandb_id}, got {wandb_run.id}"
+        )
+
+    wandb.define_metric("epoch")
+    wandb.define_metric("*", step_metric="epoch")
+    return wandb_run, wandb_run.id
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +355,12 @@ def main():
     )
 
     # Apply activation swap
-    n_swapped = apply_activation_swap(model, args.activation, gamma_init=args.gamma_init)
+    n_swapped = apply_activation_swap(
+        model,
+        args.activation,
+        gamma_init=args.gamma_init,
+        rms_mode=infer_rms_mode(args.model),
+    )
     if is_primary(rank):
         param_count = sum(p.numel() for p in model.parameters())
         print(f"Parameters: {param_count:,}, swapped activations: {n_swapped}")
@@ -429,23 +478,9 @@ def main():
         saved_wandb_id = ckpt.get("wandb_id", None)
 
     # -- wandb --
-    # If resuming, reuse the saved run ID so logs append to the same run.
-    # If starting fresh, generate a new ID and save it in every checkpoint.
-    wandb_run = None
-    wandb_id = saved_wandb_id or f"{args.model}_{args.activation}_{os.getpid()}"
-    if args.wandb and is_primary(rank):
-        try:
-            import wandb
-            wandb_run = wandb.init(
-                project=args.wandb_project,
-                name=f"{args.model}_{args.activation}",
-                id=wandb_id,
-                resume="allow",
-                config=vars(args),
-            )
-            wandb_id = wandb_run.id  # use the actual ID assigned by wandb
-        except ImportError:
-            print("WARNING: wandb not installed")
+    # Fresh runs create a new wandb ID once and persist it in every checkpoint.
+    # Resumed runs must attach to the exact saved run ID to avoid history splits.
+    wandb_run, wandb_id = init_wandb_run(args, rank, saved_wandb_id)
 
     # -- Training loop --
     if is_primary(rank):
@@ -482,7 +517,7 @@ def main():
                     json.dump(result, f, indent=2)
                 if wandb_run:
                     import wandb
-                    wandb.log({"diverged": True, "diverged_epoch": epoch})
+                    wandb.log({"epoch": epoch, "diverged": True, "diverged_epoch": epoch})
                     wandb.finish()
             diverged = True
             break
@@ -518,6 +553,7 @@ def main():
             if wandb_run:
                 import wandb
                 log_data = {
+                    "epoch": epoch,
                     "train/loss": train_metrics["loss"],
                     "train/top1": train_metrics["top1"],
                     "val/loss": val_metrics["loss"],
@@ -526,7 +562,7 @@ def main():
                     "lr": optimizer.param_groups[0]["lr"],
                 }
                 log_data.update(gamma_stats)
-                wandb.log(log_data, step=epoch)
+                wandb.log(log_data)
 
             # Save checkpoint (includes wandb_id for run continuity across spot interruptions)
             raw_model = model.module if hasattr(model, "module") else model

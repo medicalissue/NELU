@@ -25,18 +25,23 @@ mathematically absorbable by a per-layer Linear sign flip. Per-layer
 sign ambiguity is harmless; per-channel was the problematic case
 (which we no longer use).
 
-Channel axis is always the LAST dim. Works for (B, D), (B, L, D),
-(B, H, W, D). ConvNeXt Block permutes to NHWC before calling.
+RMS axis depends on `rms_mode`:
+- `last_dim`: works for (B, D), (B, L, D), (B, H, W, D)
+- `last_3dims`: works for NCHW CNN tensors by reducing over (C, H, W)
 """
 
 import math
+from typing import Literal
 
 import torch
 import torch.nn as nn
 
+from .reduction_layout import DimsLike, canonicalize_reduce_dims
+
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 _DEFAULT_GAMMA_INIT = 1e-6
+RMSMode = Literal["last_dim", "last_3dims"]
 
 
 # ── CUDA backend detection (lazy) ───────────────────────────────
@@ -58,21 +63,48 @@ def _try_load_cuda_backends():
         _NILU_CUDA_FN = False
 
 
-def _rms(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Per-token RMS over the last (channel) dim."""
-    return z.pow(2).mean(dim=-1, keepdim=True).add(eps).sqrt()
+def _dims_from_rms_mode(z: torch.Tensor, rms_mode: RMSMode) -> tuple[int, ...]:
+    if rms_mode == "last_dim":
+        return canonicalize_reduce_dims(z.ndim, (-1,))
+    if rms_mode == "last_3dims":
+        if z.ndim < 4:
+            raise ValueError(
+                f"rms_mode='last_3dims' expects a 4D+ tensor, got shape {tuple(z.shape)}"
+            )
+        return canonicalize_reduce_dims(z.ndim, (-3, -2, -1))
+    raise ValueError(f"Unknown rms_mode: {rms_mode}")
+
+
+def _rms_dims(z: torch.Tensor, eps: float = 1e-6,
+              dims: DimsLike = -1) -> torch.Tensor:
+    dims = canonicalize_reduce_dims(z.ndim, dims)
+    return z.pow(2).mean(dim=dims, keepdim=True).add(eps).sqrt()
+
+
+def _rms(z: torch.Tensor, eps: float = 1e-6,
+         rms_mode: RMSMode = "last_dim") -> torch.Tensor:
+    """Compute RMS using the activation's intended normalization axes.
+
+    `last_dim`:
+        Token / channel-last RMS. Works for (B, D), (B, L, D), (B, H, W, D).
+    `last_3dims`:
+        CNN NCHW RMS over (C, H, W), yielding one scalar per sample.
+    """
+    return _rms_dims(z, eps, dims=_dims_from_rms_mode(z, rms_mode))
 
 
 # ── Python reference ────────────────────────────────────────────
 
-def _nelu_py(z: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
-    rho = _rms(z, eps)
+def _nelu_py(z: torch.Tensor, gamma: torch.Tensor, eps: float,
+             rms_mode: RMSMode) -> torch.Tensor:
+    rho = _rms(z, eps, rms_mode=rms_mode)
     t = gamma * z / rho
     return z * 0.5 * (1.0 + torch.erf(t * _INV_SQRT2))
 
 
-def _nilu_py(z: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
-    rho = _rms(z, eps)
+def _nilu_py(z: torch.Tensor, gamma: torch.Tensor, eps: float,
+             rms_mode: RMSMode) -> torch.Tensor:
+    rho = _rms(z, eps, rms_mode=rms_mode)
     t = gamma * z / rho
     return z * torch.sigmoid(t)
 
@@ -88,21 +120,26 @@ class _GatedBase(nn.Module):
 
     def __init__(self, num_channels: int = None,
                  eps: float = 1e-6,
-                 gamma_init: float = _DEFAULT_GAMMA_INIT):
+                 gamma_init: float = _DEFAULT_GAMMA_INIT,
+                 rms_mode: RMSMode = "last_dim"):
         super().__init__()
         del num_channels  # unused
         self.eps = eps
+        self.rms_mode = rms_mode
+        self._is_nelu_gamma_module = True
         self.gamma = nn.Parameter(torch.tensor(float(gamma_init),
                                                dtype=torch.float32))
 
-    def _expand_for_kernel(self, z: torch.Tensor) -> torch.Tensor:
-        """The CUDA kernel expects a length-C gamma vector.
-        Broadcast the scalar to (C,) via a stride-0 view; autograd
-        sums the (C,) dgamma back to a scalar grad on self.gamma."""
-        return self.gamma.expand(z.size(-1))
-
     def extra_repr(self) -> str:
-        return f"eps={self.eps}, gamma={self.gamma.item():.6f}"
+        return (
+            f"eps={self.eps}, gamma={self.gamma.item():.6f}, rms_mode={self.rms_mode}"
+        )
+
+    def compute_rms(self, z: torch.Tensor) -> torch.Tensor:
+        return _rms_dims(z, self.eps, dims=self.reduction_dims(z))
+
+    def reduction_dims(self, z: torch.Tensor) -> tuple[int, ...]:
+        return _dims_from_rms_mode(z, self.rms_mode)
 
 
 class NELU(_GatedBase):
@@ -112,8 +149,8 @@ class NELU(_GatedBase):
         if z.is_cuda:
             _try_load_cuda_backends()
             if _NELU_CUDA_FN:
-                return _NELU_CUDA_FN(z, self._expand_for_kernel(z), self.eps)
-        return _nelu_py(z, self.gamma, self.eps)
+                return _NELU_CUDA_FN(z, self.gamma, self.eps, dims=self.reduction_dims(z))
+        return _nelu_py(z, self.gamma, self.eps, self.rms_mode)
 
 
 class NiLU(_GatedBase):
@@ -123,8 +160,8 @@ class NiLU(_GatedBase):
         if z.is_cuda:
             _try_load_cuda_backends()
             if _NILU_CUDA_FN:
-                return _NILU_CUDA_FN(z, self._expand_for_kernel(z), self.eps)
-        return _nilu_py(z, self.gamma, self.eps)
+                return _NILU_CUDA_FN(z, self.gamma, self.eps, dims=self.reduction_dims(z))
+        return _nilu_py(z, self.gamma, self.eps, self.rms_mode)
 
 
 # ── wandb logging helper ───────────────────────────────────────
@@ -143,7 +180,7 @@ def collect_gamma_stats(model: nn.Module):
     out = {}
     layer_idx = 0
     for m in model.modules():
-        if isinstance(m, _GatedBase):
+        if getattr(m, "_is_nelu_gamma_module", False) and hasattr(m, "gamma"):
             g = m.gamma.detach().float().item()
             gammas.append(g)
             out[f"nelu/gamma/layer_{layer_idx}"] = g
@@ -165,11 +202,11 @@ def collect_gamma_stats(model: nn.Module):
 
 # ── Functional interfaces (fixed gamma=1, for offline test only) ──
 
-def nelu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    rho = _rms(z, eps)
+def nelu(z: torch.Tensor, eps: float = 1e-6, dims: DimsLike = -1) -> torch.Tensor:
+    rho = _rms_dims(z, eps, dims=dims)
     return z * 0.5 * (1.0 + torch.erf((z / rho) * _INV_SQRT2))
 
 
-def nilu(z: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    rho = _rms(z, eps)
+def nilu(z: torch.Tensor, eps: float = 1e-6, dims: DimsLike = -1) -> torch.Tensor:
+    rho = _rms_dims(z, eps, dims=dims)
     return z * torch.sigmoid(z / rho)

@@ -89,13 +89,17 @@ bash scripts/run_all.sh scripts/jobs_node3.txt
 # DATA_SNAPSHOT in .env, and terminates the setup instance.
 bash scripts/infra/launch_snapshot_setup.sh
 
-# Launch 3 spot instances with the job queue
+# Start the spot orchestrator. It keeps retrying until nodes launch,
+# keeps watching running nodes, and re-launches replacements after
+# interruptions until all jobs are done.
 bash scripts/infra/launch_spot.sh 3 scripts/
 ```
 
 Notes:
 - Copy [.env.example](/Users/medicalissue/Desktop/NELU/.env.example) to `.env` and fill it in. The launcher, monitor, snapshot setup, and dataset prep scripts read `.env` automatically.
 - Set `SUBNETS=` to a comma-separated list of candidate subnets. The spot launcher and monitor try them in order until one accepts the request.
+- `launch_spot.sh` now acts as the main spot orchestrator. You do not need to start `monitor_spot.sh` separately for the normal workflow.
+- The orchestrator keeps its node tracker in `.nelu_instance_ids.txt` by default, so rerunning `launch_spot.sh` can reattach to the same in-flight experiment.
 - Keep `.env` local only. `launch_spot.sh` excludes it from the uploaded code tarball.
 - `launch_spot.sh` uploads the current local repo snapshot to `s3://.../code/nelu-code.tar.gz`, and instance user-data boots from that tarball.
 - `launch_snapshot_setup.sh` uploads the current local repo snapshot to S3 too, so the remote setup uses your current local infra scripts instead of whatever is on GitHub `main`.

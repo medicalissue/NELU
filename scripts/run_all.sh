@@ -246,4 +246,5 @@ if [ "$SHUTDOWN_WHEN_DONE" = "true" ] && [ $FAILED -eq 0 ]; then
 elif [ $FAILED -gt 0 ]; then
     echo ""
     echo "Some jobs failed. NOT shutting down — investigate manually."
+    exit 1
 fi

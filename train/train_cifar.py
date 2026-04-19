@@ -301,7 +301,7 @@ def build_model(name, activation="relu", num_classes=100):
     # Apply activation swap (all models are built with ReLU by default)
     if activation != "relu" and activation in _SWAP_MAP:
         src_cls, tgt_cls = _SWAP_MAP[activation]
-        n = replace_activation(model, src_cls, tgt_cls)
+        n = replace_activation(model, src_cls, tgt_cls, rms_mode="last_3dims")
         print(f"Swapped {n} {src_cls.__name__} -> {tgt_cls.__name__}")
 
     return model
@@ -385,6 +385,44 @@ def evaluate(model, loader, device, use_amp=False):
         correct += predicted.eq(targets).sum().item()
         total += inputs.size(0)
     return total_loss / total, 100.0 * correct / total
+
+
+def init_wandb_run(args, saved_wandb_id=None):
+    if not args.wandb:
+        return None, saved_wandb_id
+
+    if args.resume and os.path.isfile(args.resume) and not saved_wandb_id:
+        raise RuntimeError(
+            f"Resume checkpoint {args.resume} is missing wandb_id; refusing to create a new wandb run."
+        )
+
+    try:
+        import wandb
+    except ImportError:
+        print("WARNING: wandb not installed, disabling wandb logging")
+        return None, saved_wandb_id
+
+    init_kwargs = {
+        "project": args.wandb_project,
+        "name": f"{args.model}_{args.activation}_s{args.seed}",
+        "config": vars(args),
+    }
+    if saved_wandb_id:
+        init_kwargs["id"] = saved_wandb_id
+        init_kwargs["resume"] = "must"
+    else:
+        init_kwargs["id"] = wandb.util.generate_id()
+        init_kwargs["resume"] = "never"
+
+    wandb_run = wandb.init(**init_kwargs)
+    if saved_wandb_id and wandb_run.id != saved_wandb_id:
+        raise RuntimeError(
+            f"wandb resumed unexpected run id: expected {saved_wandb_id}, got {wandb_run.id}"
+        )
+
+    wandb.define_metric("epoch")
+    wandb.define_metric("*", step_metric="epoch")
+    return wandb_run, wandb_run.id
 
 
 # ---------------------------------------------------------------------------
@@ -489,20 +527,7 @@ def main():
         print(f"  Resumed at epoch {start_epoch}, best_acc={best_acc:.2f}%")
 
     # wandb init — after resume so we can reuse the saved run ID
-    wandb_id = saved_wandb_id or f"{args.model}_{args.activation}_s{args.seed}_{os.getpid()}"
-    if args.wandb:
-        try:
-            import wandb
-            wandb_run = wandb.init(
-                project=args.wandb_project,
-                name=f"{args.model}_{args.activation}_s{args.seed}",
-                id=wandb_id,
-                resume="allow",
-                config=vars(args),
-            )
-            wandb_id = wandb_run.id
-        except ImportError:
-            print("WARNING: wandb not installed, disabling wandb logging")
+    wandb_run, wandb_id = init_wandb_run(args, saved_wandb_id)
 
     # Probe batch for gate entropy (fixed across training)
     probe_batch = next(iter(test_loader))[0][:32].to(device)
@@ -551,7 +576,7 @@ def main():
 
         if wandb_run:
             import wandb
-            wandb.log(log_entry, step=epoch)
+            wandb.log(log_entry)
 
         # Save checkpoints (includes wandb_id for run continuity across spot interruptions)
         state = {
