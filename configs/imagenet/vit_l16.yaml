@@ -1,0 +1,21 @@
+# ViT-Large/16 on ImageNet-1k
+# DeiT III recipe with lower lr and higher drop_path for larger model
+# Expected: ~85.8% top-1 (GELU baseline)
+model: vit_large_patch16_224
+dataset: imagenet
+data_path: /data/imagenet
+epochs: 300
+batch_size: 256
+lr: 2.0e-3
+warmup_epochs: 5
+weight_decay: 0.05
+drop_path: 0.4
+opt: fusedlamb
+smoothing: 0.0
+mixup: 0.8
+cutmix: 1.0
+reprob: 0.0
+bce_loss: true
+three_augment: true
+color_jitter: 0.3
+use_amp: true

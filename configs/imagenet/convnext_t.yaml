@@ -1,0 +1,22 @@
+# ConvNeXt-Tiny on ImageNet-1k
+# FB recipe: https://github.com/facebookresearch/ConvNeXt
+# Expected: ~82.1% top-1 (GELU baseline)
+model: convnext_tiny
+dataset: imagenet
+data_path: /data/imagenet
+epochs: 300
+batch_size: 128         # per GPU
+update_freq: 4          # effective batch = 128 * 8 * 4 = 4096 (FB recipe)
+lr: 4.0e-3
+warmup_epochs: 20
+weight_decay: 0.05
+drop_path: 0.1
+opt: adamw
+use_amp: true
+model_ema: true
+model_ema_decay: 0.9999
+mixup: 0.8
+cutmix: 1.0
+smoothing: 0.1
+reprob: 0.25
+color_jitter: 0.4
