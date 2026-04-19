@@ -117,7 +117,10 @@ fi
 source "$CONDA_SH"
 
 # Create env on the data volume so it's in the snapshot
-conda create -y -p /data/env/nelu python=3.11 2>/dev/null || true
+if [ ! -d /data/env/nelu/bin ]; then
+    echo "  Creating conda env at /data/env/nelu..."
+    conda create -y -p /data/env/nelu python=3.11
+fi
 conda activate /data/env/nelu
 
 echo "  Installing PyTorch + dependencies..."
