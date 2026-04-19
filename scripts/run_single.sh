@@ -26,6 +26,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/results}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-${HOME}}"
+ENABLE_WANDB="${ENABLE_WANDB:-1}"  # set to 0 to disable wandb
 
 # -- Parse arguments -------------------------------------------------
 
@@ -112,6 +113,11 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 RESUME_FLAG=""
+WANDB_FLAG=""
+
+if [ "$ENABLE_WANDB" = "1" ]; then
+    WANDB_FLAG="--wandb"
+fi
 
 if aws s3 ls "${S3_OUTPUT}/checkpoint.pt" >/dev/null 2>&1; then
     echo "Found checkpoint on S3 -- downloading for resume..."
@@ -150,6 +156,7 @@ case "$PHASE" in
                     --data_path /data/imagenet
                     --output_dir "$OUTPUT_DIR"
                     --config "${REPO_ROOT}/${CONFIG_FILE}"
+                    $WANDB_FLAG
                     $RESUME_FLAG
                     "${EXTRA_ARGS[@]}"
                 )
@@ -165,6 +172,7 @@ case "$PHASE" in
                     --data-dir /data/imagenet
                     --output "$OUTPUT_DIR"
                     --config "${REPO_ROOT}/${CONFIG_FILE}"
+                    $WANDB_FLAG
                     $RESUME_FLAG
                     "${EXTRA_ARGS[@]}"
                 )
@@ -180,6 +188,7 @@ case "$PHASE" in
                     --data-path /data/imagenet
                     --output_dir "$OUTPUT_DIR"
                     --config "${REPO_ROOT}/${CONFIG_FILE}"
+                    $WANDB_FLAG
                     $RESUME_FLAG
                     "${EXTRA_ARGS[@]}"
                 )
@@ -197,7 +206,8 @@ case "$PHASE" in
             --activation "$ACT"
             --config "${REPO_ROOT}/${CONFIG_FILE}"
             --output_dir "$OUTPUT_DIR"
-            $RESUME_FLAG
+            $WANDB_FLAG
+                    $RESUME_FLAG
             "${EXTRA_ARGS[@]}"
         )
         ;;
@@ -211,7 +221,8 @@ case "$PHASE" in
             --data_path /data/imagenet
             --output_dir "$OUTPUT_DIR"
             --config "${REPO_ROOT}/${CONFIG_FILE}"
-            $RESUME_FLAG
+            $WANDB_FLAG
+                    $RESUME_FLAG
             "${EXTRA_ARGS[@]}"
         )
         ;;
@@ -243,4 +254,6 @@ touch "$DONE_MARKER"
 echo ""
 echo "Training complete. Syncing to S3..."
 aws s3 sync "$OUTPUT_DIR" "$S3_OUTPUT" --quiet 2>/dev/null || true
+# Upload DONE marker so other instances know this job is finished
+aws s3 cp "$DONE_MARKER" "${S3_OUTPUT}/DONE" --quiet 2>/dev/null || true
 echo "Done: $RUN_NAME"

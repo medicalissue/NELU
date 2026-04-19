@@ -429,18 +429,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # wandb init
+    # wandb init (deferred until after resume, so we can reuse the saved run ID)
     wandb_run = None
-    if args.wandb:
-        try:
-            import wandb
-            wandb_run = wandb.init(
-                project=args.wandb_project,
-                name=f"{args.model}_{args.activation}_s{args.seed}",
-                config=vars(args),
-            )
-        except ImportError:
-            print("WARNING: wandb not installed, disabling wandb logging")
+    saved_wandb_id = None
 
     # Data
     train_loader, test_loader = get_dataloaders(args.data_dir, args.batch_size,
@@ -471,7 +462,24 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         best_acc = ckpt.get("best_acc", 0.0)
         training_log = ckpt.get("training_log", [])
+        saved_wandb_id = ckpt.get("wandb_id", None)
         print(f"  Resumed at epoch {start_epoch}, best_acc={best_acc:.2f}%")
+
+    # wandb init — after resume so we can reuse the saved run ID
+    wandb_id = saved_wandb_id or f"{args.model}_{args.activation}_s{args.seed}_{os.getpid()}"
+    if args.wandb:
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name=f"{args.model}_{args.activation}_s{args.seed}",
+                id=wandb_id,
+                resume="allow",
+                config=vars(args),
+            )
+            wandb_id = wandb_run.id
+        except ImportError:
+            print("WARNING: wandb not installed, disabling wandb logging")
 
     # Probe batch for gate entropy (fixed across training)
     probe_batch = next(iter(test_loader))[0][:32].to(device)
@@ -521,7 +529,7 @@ def main():
             import wandb
             wandb.log(log_entry, step=epoch)
 
-        # Save checkpoints
+        # Save checkpoints (includes wandb_id for run continuity across spot interruptions)
         state = {
             "epoch": epoch,
             "model": model.state_dict(),
@@ -530,6 +538,7 @@ def main():
             "best_acc": best_acc,
             "args": vars(args),
             "training_log": training_log,
+            "wandb_id": wandb_id,
         }
         torch.save(state, os.path.join(args.output_dir, "checkpoint.pt"))
         if is_best:

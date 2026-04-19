@@ -349,6 +349,7 @@ def main():
     # -- Resume --
     start_epoch = 0
     best_acc = 0.0
+    saved_wandb_id = None
 
     if args.resume and os.path.isfile(args.resume):
         if is_primary(rank):
@@ -365,17 +366,24 @@ def main():
             model_ema.load_state_dict(ckpt["model_ema"])
         if scaler is not None and "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
+        saved_wandb_id = ckpt.get("wandb_id", None)
 
     # -- wandb --
+    # If resuming, reuse the saved run ID so logs append to the same run.
+    # If starting fresh, generate a new ID and save it in every checkpoint.
     wandb_run = None
+    wandb_id = saved_wandb_id or f"{args.model}_{args.activation}_{os.getpid()}"
     if args.wandb and is_primary(rank):
         try:
             import wandb
             wandb_run = wandb.init(
                 project=args.wandb_project,
                 name=f"{args.model}_{args.activation}",
+                id=wandb_id,
+                resume="allow",
                 config=vars(args),
             )
+            wandb_id = wandb_run.id  # use the actual ID assigned by wandb
         except ImportError:
             print("WARNING: wandb not installed")
 
@@ -434,7 +442,7 @@ def main():
                 log_data.update(gamma_stats)
                 wandb.log(log_data, step=epoch)
 
-            # Save checkpoint
+            # Save checkpoint (includes wandb_id for run continuity across spot interruptions)
             raw_model = model.module if hasattr(model, "module") else model
             state = {
                 "epoch": epoch,
@@ -443,6 +451,7 @@ def main():
                 "scheduler": scheduler.state_dict(),
                 "best_acc": best_acc,
                 "args": vars(args),
+                "wandb_id": wandb_id,
             }
             if model_ema is not None:
                 state["model_ema"] = model_ema.state_dict()
