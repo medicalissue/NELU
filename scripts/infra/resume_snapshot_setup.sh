@@ -214,7 +214,7 @@ repo_dir = f"{workdir}/repo"
 resume_script = """set -euo pipefail
 mkdir -p /data/imagenet
 if command -v s5cmd >/dev/null 2>&1; then
-  s5cmd sync --show-progress "${DATA_SOURCE_S3%/}/imagenet/*" /data/imagenet/
+  s5cmd sync "${DATA_SOURCE_S3%/}/imagenet/*" /data/imagenet/
 else
   aws s3 sync "${DATA_SOURCE_S3%/}/imagenet/" /data/imagenet/ --no-progress
 fi

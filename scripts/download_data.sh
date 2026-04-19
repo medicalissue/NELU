@@ -109,7 +109,7 @@ s3_sync() {
     local src="$1"
     local dest="$2"
     if $S5CMD_OK; then
-        s5cmd sync --show-progress "${src%/}/*" "${dest%/}/"
+        s5cmd sync "${src%/}/*" "${dest%/}/"
     else
         aws s3 sync "$src" "$dest" --no-progress
     fi
