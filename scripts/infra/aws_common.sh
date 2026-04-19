@@ -104,10 +104,9 @@ upload_repo_bundle() {
 
     (
         cd "$repo_root"
-        # --no-mac-metadata suppresses Apple xattr headers that cause
-        # harmless but noisy warnings when extracted on Linux.
-        tar czf "$tarball" \
-            --no-mac-metadata \
+        # COPYFILE_DISABLE=1 tells macOS tar to skip Apple-specific
+        # extended attributes (._* resource forks, xattr headers).
+        COPYFILE_DISABLE=1 tar czf "$tarball" \
             --exclude='data' --exclude='results' --exclude='wandb' \
             --exclude='.env' --exclude='.env.*' \
             --exclude='__pycache__' --exclude='.git' --exclude='*.pyc' \
