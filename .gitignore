@@ -12,6 +12,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 
 # CUDA build cache
 *.so
@@ -27,6 +28,9 @@ build.ninja
 # OS
 .DS_Store
 Thumbs.db
+.env
+.env.*
+!.env.example
 
 # Playground (experiments unrelated to NELU paper)
 playground/

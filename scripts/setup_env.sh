@@ -12,14 +12,21 @@ ENV_NAME="nelu"
 
 echo "Creating conda env: $ENV_NAME"
 
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ERROR: conda not found in PATH"
+    exit 1
+fi
+
+eval "$(conda shell.bash hook)"
+
 conda create -n $ENV_NAME python=3.11 -y
-conda activate $ENV_NAME || source activate $ENV_NAME
+conda activate $ENV_NAME
 
 # Core
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 # Training
-pip install timm wandb tqdm scikit-learn
+pip install timm wandb tqdm scikit-learn scipy matplotlib pyyaml fvcore autoattack
 
 # Data
 pip install datasets transformers

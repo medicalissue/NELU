@@ -10,7 +10,7 @@ Gate normalization is a one-line modification to standard activations (GELU, SiL
 ```bash
 git clone https://github.com/YOUR_USERNAME/NELU.git
 cd NELU
-pip install torch  # requires PyTorch >= 2.0
+pip install torch timm pyyaml  # requires PyTorch >= 2.0
 
 # Optional: build the fused CUDA kernel for ~2x throughput
 python -c "from nelu.cuda_kernel import nelu_cuda"
@@ -49,7 +49,10 @@ ffn = NELUGLU(dim=512, hidden_dim=1024)
 # Create environment
 bash scripts/setup_env.sh
 
-# Download datasets
+# Copy .env.example to .env and fill in your values first.
+# Then prepare the datasets used by this repo:
+#   imagenet, cifar-100-python, CIFAR-100-C,
+#   ImageNet-C, imagenet-a, imagenet-r, imagenet-o
 bash scripts/download_data.sh /data
 ```
 
@@ -84,6 +87,12 @@ bash scripts/run_all.sh scripts/jobs_node3.txt
 # Launch 3 spot instances with the job queue
 bash scripts/infra/launch_spot.sh 3 scripts/
 ```
+
+Notes:
+- Copy [.env.example](/Users/medicalissue/Desktop/NELU/.env.example) to `.env` and fill it in. The launcher, monitor, snapshot setup, and dataset prep scripts read `.env` automatically.
+- Keep `.env` local only. `launch_spot.sh` excludes it from the uploaded code tarball.
+- `launch_spot.sh` uploads the current local repo snapshot to `s3://.../code/nelu-code.tar.gz`, and instance user-data boots from that tarball.
+- If `AMI` is unset, the launcher resolves the latest AWS Deep Learning Base GPU Ubuntu 22.04 AMI from the public SSM parameter store. Override with `AMI` or `AMI_SSM_PARAM` if needed.
 
 ## Repository structure
 

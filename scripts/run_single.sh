@@ -23,7 +23,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/results}"
 # UPSTREAM_DIR no longer needed — all models train via train_imagenet_timm.py
 ENABLE_WANDB="${ENABLE_WANDB:-1}"  # set to 0 to disable wandb
@@ -263,8 +263,10 @@ echo ""
 echo "Command: ${TRAIN_CMD[*]}"
 echo ""
 
+set +e
 "${TRAIN_CMD[@]}" 2>&1 | tee "${OUTPUT_DIR}/train.log"
 TRAIN_EXIT=${PIPESTATUS[0]}
+set -e
 
 if [ $TRAIN_EXIT -ne 0 ]; then
     echo "Training exited with code $TRAIN_EXIT"

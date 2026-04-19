@@ -19,7 +19,9 @@ POLL_INTERVAL="${SPOT_POLL_INTERVAL:-5}"
 METADATA_URL="http://169.254.169.254/latest/meta-data/spot/instance-action"
 TOKEN_URL="http://169.254.169.254/latest/api/token"
 LOG_FILE="/var/log/spot-handler.log"
-S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
+RESULTS_DIR="${RESULTS_DIR:-/data/results}"
+LOG_DIR="${LOG_DIR:-/data/logs}"
 
 log() {
     echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -54,9 +56,8 @@ while true; do
         log "SPOT INTERRUPTION DETECTED: $ACTION"
 
         # Find and signal the training process.
-        # The main training runs under python with torch.distributed,
-        # so we send SIGTERM to the process group.
-        TRAIN_PIDS=$(pgrep -f "run_all.sh\|run_single.sh\|torch.distributed" 2>/dev/null || echo "")
+        # We rely on epoch checkpoints plus an emergency sync here.
+        TRAIN_PIDS=$(pgrep -f "torchrun\|train/train_imagenet_timm.py\|train/train_cifar.py\|scripts/run_all.sh\|scripts/run_single.sh" 2>/dev/null || echo "")
 
         if [ -n "$TRAIN_PIDS" ]; then
             log "Sending SIGTERM to training processes: $TRAIN_PIDS"
@@ -67,13 +68,12 @@ while true; do
             log "No training processes found."
         fi
 
-        # Wait a moment for the training to save checkpoint
-        log "Waiting 90 seconds for checkpoint save..."
-        sleep 90
+        log "Waiting 30 seconds before emergency sync..."
+        sleep 30
 
-        # Emergency sync — upload everything we have
         log "Emergency S3 sync..."
-        aws s3 sync /workspace/results/ "${S3_BUCKET}/results/" --quiet 2>/dev/null || true
+        [ -d "$RESULTS_DIR" ] && aws s3 sync "$RESULTS_DIR/" "${S3_BUCKET}/results/" --quiet 2>/dev/null || true
+        [ -d "$LOG_DIR" ] && aws s3 sync "$LOG_DIR/" "${S3_BUCKET}/logs/" --quiet 2>/dev/null || true
         log "S3 sync complete. Spot handler exiting."
         exit 0
     fi

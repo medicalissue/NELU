@@ -17,9 +17,37 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/aws_common.sh"
+
+ENV_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --env-file)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --env-file requires a path" >&2
+                exit 1
+            fi
+            ENV_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--env-file FILE] <instance_ids_file>"
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+load_env_file "$ENV_FILE" "$REPO_ROOT"
 
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
-S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 REGION="${AWS_REGION:-us-east-1}"
 
 if [ $# -lt 1 ]; then
@@ -27,6 +55,7 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "  Monitors spot instances and re-launches terminated ones."
     echo "  The instance_ids_file is created by launch_spot.sh."
+    echo "  Reads settings from ${REPO_ROOT}/.env when present."
     exit 1
 fi
 
@@ -46,40 +75,42 @@ echo "  S3 bucket:     $S3_BUCKET"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
+log_err() {
+    echo "$*" >&2
+}
+
 relaunch_instance() {
     local NODE_ID="$1"
     local JOB_FILE="$2"
 
-    echo "[$(date -u '+%H:%M:%S')] Re-launching node $NODE_ID..."
+    log_err "[$(date -u '+%H:%M:%S')] Re-launching node $NODE_ID..."
 
-    # Generate user data
     local WANDB_KEY="${WANDB_API_KEY:-}"
-    USER_DATA=$(cat "$SCRIPT_DIR/user_data.sh" | \
-        sed "s|__S3_BUCKET__|${S3_BUCKET}|g" | \
-        sed "s|__NODE_ID__|${NODE_ID}|g" | \
-        sed "s|__WANDB_API_KEY__|${WANDB_KEY}|g" | \
-        base64 | tr -d '\n')
-
     local KEY_NAME="${KEY_NAME:-nelu-training}"
     local SECURITY_GROUP="${SECURITY_GROUP:-sg-CHANGEME}"
     local SUBNET="${SUBNET:-subnet-CHANGEME}"
     local IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
-    local AMI="${AMI:-ami-0c02fb55956c7d316}"
     local INSTANCE_TYPE="${INSTANCE_TYPE:-p5.48xlarge}"
     local MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-30.00}"
     local DATA_SNAPSHOT="${DATA_SNAPSHOT:-}"
+    local USER_DATA_FILE
+    local AMI_ID
+    local NEW_ID
 
     if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ "$SUBNET" = "subnet-CHANGEME" ] || [ -z "$IAM_ROLE" ]; then
-        echo "ERROR: SECURITY_GROUP, SUBNET, and IAM_INSTANCE_PROFILE must be set for re-launch"
+        log_err "ERROR: SECURITY_GROUP, SUBNET, and IAM_INSTANCE_PROFILE must be set for re-launch"
         return 1
     fi
     if [ -z "$DATA_SNAPSHOT" ]; then
-        echo "ERROR: DATA_SNAPSHOT must be set for re-launch (EBS snapshot with training env)"
+        log_err "ERROR: DATA_SNAPSHOT must be set for re-launch (EBS snapshot with training env)"
         return 1
     fi
 
-    NEW_ID=$(aws ec2 run-instances \
-        --image-id "$AMI" \
+    AMI_ID="$(resolve_ami "$REGION")" || return 1
+    USER_DATA_FILE="$(render_user_data_file "$SCRIPT_DIR/user_data.sh" "$S3_BUCKET" "$NODE_ID" "$WANDB_KEY")"
+
+    if ! NEW_ID=$(aws ec2 run-instances \
+        --image-id "$AMI_ID" \
         --instance-type "$INSTANCE_TYPE" \
         --key-name "$KEY_NAME" \
         --security-group-ids "$SECURITY_GROUP" \
@@ -87,14 +118,19 @@ relaunch_instance() {
         --iam-instance-profile "Arn=$IAM_ROLE" \
         --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
         --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
-        --user-data "$USER_DATA" \
+        --user-data "file://${USER_DATA_FILE}" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${NODE_ID}},{Key=Project,Value=nelu}]" \
         --region "$REGION" \
         --query 'Instances[0].InstanceId' \
-        --output text 2>&1) || true
+        --output text); then
+        rm -f "$USER_DATA_FILE"
+        log_err "[$(date -u '+%H:%M:%S')] Re-launch failed for node $NODE_ID"
+        return 1
+    fi
+    rm -f "$USER_DATA_FILE"
 
-    echo "[$(date -u '+%H:%M:%S')] New instance for node $NODE_ID: $NEW_ID"
-    echo "$NEW_ID"
+    log_err "[$(date -u '+%H:%M:%S')] New instance for node $NODE_ID: $NEW_ID"
+    printf '%s\n' "$NEW_ID"
 }
 
 # Main monitoring loop
@@ -135,6 +171,9 @@ while true; do
                     break
                 fi
             done < "$JOB_FILE"
+        else
+            echo "[$(date -u '+%H:%M:%S')] Node $NODE_ID: local job file missing: $JOB_FILE"
+            NODE_DONE=false
         fi
 
         if [ "$NODE_DONE" = true ]; then
@@ -159,8 +198,12 @@ while true; do
                 ;;
             terminated|stopped|shutting-down)
                 echo "[$(date -u '+%H:%M:%S')] Node $NODE_ID ($INST_ID): $STATE — re-launching..."
-                NEW_ID=$(relaunch_instance "$NODE_ID" "$JOB_FILE")
-                echo "$NEW_ID $NODE_ID $JOB_FILE" >> "$TEMP_FILE"
+                if NEW_ID=$(relaunch_instance "$NODE_ID" "$JOB_FILE"); then
+                    echo "$NEW_ID $NODE_ID $JOB_FILE" >> "$TEMP_FILE"
+                else
+                    echo "[$(date -u '+%H:%M:%S')] Node $NODE_ID: re-launch failed, keeping old instance record"
+                    echo "$line" >> "$TEMP_FILE"
+                fi
                 ;;
             *)
                 echo "[$(date -u '+%H:%M:%S')] Node $NODE_ID ($INST_ID): unknown state '$STATE'"

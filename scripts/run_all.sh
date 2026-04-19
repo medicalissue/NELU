@@ -30,7 +30,7 @@ export WANDB_DISABLE_CODE=true
 export WANDB_HTTP_TIMEOUT=120
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 SHUTDOWN_WHEN_DONE="${SHUTDOWN_WHEN_DONE:-true}"
 
 # ── GPU slot pool for single-GPU jobs ──────────────────────────
@@ -40,15 +40,20 @@ SHUTDOWN_WHEN_DONE="${SHUTDOWN_WHEN_DONE:-true}"
 NUM_GPUS=${NUM_GPUS:-8}
 SLOT_FIFO="/tmp/nelu_gpu_slots.$$"
 SLOT_PIDS=()
+SLOT_TAGS=()
+SLOT_STATUS_DIR="/tmp/nelu_slot_status.$$"
 
 slot_init() {
     rm -f "$SLOT_FIFO"
+    rm -rf "$SLOT_STATUS_DIR"
     mkfifo "$SLOT_FIFO"
+    mkdir -p "$SLOT_STATUS_DIR"
     exec 9<>"$SLOT_FIFO"
     for g in $(seq 0 $((NUM_GPUS - 1))); do
         echo $g >&9
     done
     SLOT_PIDS=()
+    SLOT_TAGS=()
 }
 
 slot_run() {
@@ -58,13 +63,16 @@ slot_run() {
     local logf="logs/${tag}.log"
     local ind_cache="/tmp/inductor_cache_gpu${g}"
     local triton_cache="/tmp/triton_cache_gpu${g}"
+    local status_file="${SLOT_STATUS_DIR}/${tag}.status"
     mkdir -p "$ind_cache" "$triton_cache"
     (
+        local rc=0
         echo "[$(date +%H:%M:%S)] [gpu $g] start $tag"
         TORCHINDUCTOR_CACHE_DIR="$ind_cache" \
         TRITON_CACHE_DIR="$triton_cache" \
-        CUDA_VISIBLE_DEVICES=$g eval "$@" > "$logf" 2>&1
-        local rc=$?
+        CUDA_VISIBLE_DEVICES=$g \
+            bash "${REPO_ROOT}/scripts/run_single.sh" "$@" > "$logf" 2>&1 || rc=$?
+        printf '%s\n' "$rc" > "$status_file"
         if [ $rc -eq 0 ]; then
             echo "[$(date +%H:%M:%S)] [gpu $g] done  $tag"
         else
@@ -73,18 +81,38 @@ slot_run() {
         echo $g >&9
     ) &
     SLOT_PIDS+=($!)
+    SLOT_TAGS+=("$tag")
 }
 
 slot_drain() {
-    if [ ${#SLOT_PIDS[@]} -gt 0 ]; then
-        wait "${SLOT_PIDS[@]}" 2>/dev/null || true
-    fi
+    local i pid tag wait_rc status_rc
+    for i in "${!SLOT_PIDS[@]}"; do
+        pid="${SLOT_PIDS[$i]}"
+        tag="${SLOT_TAGS[$i]}"
+
+        if wait "$pid"; then
+            wait_rc=0
+        else
+            wait_rc=$?
+        fi
+
+        status_rc="$wait_rc"
+        if [ -f "${SLOT_STATUS_DIR}/${tag}.status" ]; then
+            status_rc="$(cat "${SLOT_STATUS_DIR}/${tag}.status")"
+        fi
+
+        if [ "$status_rc" -ne 0 ]; then
+            FAILED=$((FAILED + 1))
+        fi
+    done
     SLOT_PIDS=()
+    SLOT_TAGS=()
 }
 
 slot_cleanup() {
     exec 9>&- 2>/dev/null || true
     rm -f "$SLOT_FIFO"
+    rm -rf "$SLOT_STATUS_DIR"
 }
 
 # ── Parse arguments ─────────────────────────────────────────────
@@ -183,7 +211,7 @@ while IFS= read -r line; do
     # Decide single-GPU vs multi-GPU based on phase
     if [ "$PHASE" = "cifar100" ] || [ "$PHASE" = "eval" ]; then
         # Single-GPU job — dispatch via slot pool
-        slot_run "$RUN_NAME" "bash '${REPO_ROOT}/scripts/run_single.sh' '$PHASE' '$MODEL' '$ACT' ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
+        slot_run "$RUN_NAME" "$PHASE" "$MODEL" "$ACT" "${EXTRA_ARGS[@]}"
     else
         # Multi-GPU job (imagenet, ablation) — drain single-GPU jobs first
         slot_drain

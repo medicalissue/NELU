@@ -12,14 +12,21 @@ Checks:
 """
 
 import math
+import os
 import sys
+from pathlib import Path
+
 import torch
 
-sys.path.insert(0, "/home/ubuntu/ResAct")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nelu.activations import _nelu_py, _nilu_py  # python reference
-from nelu.cuda_kernel import nelu_cuda
-from nelu.nilu_cuda_kernel import nilu_cuda
+
+def _load_cuda_ops():
+    from nelu.activations import _nelu_py, _nilu_py  # python reference
+    from nelu.cuda_kernel import nelu_cuda
+    from nelu.nilu_cuda_kernel import nilu_cuda
+
+    return _nelu_py, _nilu_py, nelu_cuda, nilu_cuda
 
 
 def _allclose(a, b, rtol, atol, name):
@@ -29,7 +36,7 @@ def _allclose(a, b, rtol, atol, name):
     return ok
 
 
-def test_fwd_bwd(op_name, cuda_fn, py_fn, shape, dtype):
+def run_fwd_bwd_check(op_name, cuda_fn, py_fn, shape, dtype):
     torch.manual_seed(0)
     C = shape[-1]
     z = torch.randn(*shape, device="cuda", dtype=dtype, requires_grad=True)
@@ -63,7 +70,7 @@ def test_fwd_bwd(op_name, cuda_fn, py_fn, shape, dtype):
     return ok
 
 
-def run_shape_sweep():
+def run_shape_sweep(nelu_cuda, nilu_cuda, _nelu_py, _nilu_py):
     shapes = [
         (8, 32),       # warp path
         (8, 64),       # small
@@ -80,12 +87,12 @@ def run_shape_sweep():
     all_ok = True
     for shape in shapes:
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
-            all_ok &= test_fwd_bwd("NELU", nelu_cuda, _nelu_py, shape, dtype)
-            all_ok &= test_fwd_bwd("NiLU", nilu_cuda, _nilu_py, shape, dtype)
+            all_ok &= run_fwd_bwd_check("NELU", nelu_cuda, _nelu_py, shape, dtype)
+            all_ok &= run_fwd_bwd_check("NiLU", nilu_cuda, _nilu_py, shape, dtype)
     return all_ok
 
 
-def run_gradcheck():
+def run_gradcheck(nelu_cuda, nilu_cuda):
     print("\n[gradcheck fp64 — small tensor]")
     # gradcheck uses double; our kernel dispatches to scalar fallback.
     torch.manual_seed(1)
@@ -108,14 +115,27 @@ def run_gradcheck():
     return ok1 and ok2
 
 
+def test_cuda_kernels_end_to_end():
+    import pytest
+
+    if not torch.cuda.is_available() or not os.environ.get("CUDA_HOME"):
+        pytest.skip("CUDA test requires a CUDA runtime with CUDA_HOME set")
+
+    _nelu_py, _nilu_py, nelu_cuda, nilu_cuda = _load_cuda_ops()
+    assert run_shape_sweep(nelu_cuda, nilu_cuda, _nelu_py, _nilu_py)
+    assert run_gradcheck(nelu_cuda, nilu_cuda)
+
+
 if __name__ == "__main__":
     assert torch.cuda.is_available(), "needs CUDA"
+    assert os.environ.get("CUDA_HOME"), "CUDA_HOME must be set"
+    _nelu_py, _nilu_py, nelu_cuda, nilu_cuda = _load_cuda_ops()
     print(f"device: {torch.cuda.get_device_name(0)}")
     print(f"torch:  {torch.__version__}")
 
-    ok_sweep = run_shape_sweep()
+    ok_sweep = run_shape_sweep(nelu_cuda, nilu_cuda, _nelu_py, _nilu_py)
     try:
-        ok_grad = run_gradcheck()
+        ok_grad = run_gradcheck(nelu_cuda, nilu_cuda)
     except Exception as e:
         print(f"gradcheck error: {e}")
         ok_grad = False

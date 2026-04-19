@@ -31,6 +31,34 @@
 set -euo pipefail
 exec > >(tee /var/log/nelu-snapshot-setup.log) 2>&1
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/aws_common.sh"
+
+ENV_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --env-file)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --env-file requires a path" >&2
+                exit 1
+            fi
+            ENV_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--env-file FILE]"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+load_env_file "$ENV_FILE" "$REPO_ROOT"
+
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 
 echo "═══════════════════════════════════════════════════════════"
@@ -124,50 +152,12 @@ TORCH_EXTENSIONS_DIR=/data/cache/torch_extensions \
 # ── 5. Download datasets ─────────────────────────────────────
 echo ""
 echo "── 5. Downloading datasets ──"
-
-if [ ! -d /data/imagenet/train ]; then
-    echo "  Syncing ImageNet from S3..."
-    aws s3 sync "${S3_BUCKET}/imagenet/" /data/imagenet/ --quiet
-    echo "  ImageNet: $(find /data/imagenet/train -mindepth 1 -maxdepth 1 | wc -l) classes"
+DOWNLOAD_CMD=(bash "$REPO_ROOT/scripts/download_data.sh")
+if [ -n "$ENV_FILE" ]; then
+    DOWNLOAD_CMD+=(--env-file "$ENV_FILE")
 fi
-
-if [ ! -d /data/cifar-100-python ]; then
-    echo "  Syncing CIFAR-100..."
-    aws s3 sync "${S3_BUCKET}/cifar-100-python/" /data/cifar-100-python/ --quiet
-fi
-
-if [ ! -d /data/CIFAR-100-C ]; then
-    echo "  Syncing CIFAR-100-C..."
-    aws s3 sync "${S3_BUCKET}/CIFAR-100-C/" /data/CIFAR-100-C/ --quiet
-fi
-
-# Robustness benchmarks (ImageNet-C, -A, -R, -O)
-if [ ! -d /data/ImageNet-C ]; then
-    echo "  Syncing ImageNet-C (~30GB)..."
-    aws s3 sync "${S3_BUCKET}/ImageNet-C/" /data/ImageNet-C/ --quiet || \
-        echo "  WARNING: ImageNet-C not on S3, download manually from hendrycks/robustness"
-fi
-
-if [ ! -d /data/imagenet-a ]; then
-    echo "  Downloading ImageNet-A (~800MB)..."
-    wget -q https://people.eecs.berkeley.edu/~hendrycks/imagenet-a.tar -O /tmp/imagenet-a.tar && \
-        tar xf /tmp/imagenet-a.tar -C /data/ && rm /tmp/imagenet-a.tar || \
-        echo "  WARNING: ImageNet-A download failed"
-fi
-
-if [ ! -d /data/imagenet-r ]; then
-    echo "  Downloading ImageNet-R (~2GB)..."
-    wget -q https://people.eecs.berkeley.edu/~hendrycks/imagenet-r.tar -O /tmp/imagenet-r.tar && \
-        tar xf /tmp/imagenet-r.tar -C /data/ && rm /tmp/imagenet-r.tar || \
-        echo "  WARNING: ImageNet-R download failed"
-fi
-
-if [ ! -d /data/imagenet-o ]; then
-    echo "  Downloading ImageNet-O (~20MB)..."
-    wget -q https://people.eecs.berkeley.edu/~hendrycks/imagenet-o.tar -O /tmp/imagenet-o.tar && \
-        tar xf /tmp/imagenet-o.tar -C /data/ && rm /tmp/imagenet-o.tar || \
-        echo "  WARNING: ImageNet-O download failed"
-fi
+DOWNLOAD_CMD+=(/data)
+"${DOWNLOAD_CMD[@]}"
 
 # ── 6. Verify ────────────────────────────────────────────────
 echo ""
@@ -179,6 +169,10 @@ echo "  timm:         $(python -c 'import timm; print(timm.__version__)')"
 echo "  GPUs:         $(nvidia-smi -L | wc -l)"
 echo "  ImageNet:     $(ls /data/imagenet/train/ 2>/dev/null | wc -l) classes"
 echo "  CIFAR-100:    $(ls /data/cifar-100-python/ 2>/dev/null | wc -l) files"
+echo "  ImageNet-C:   $(ls /data/ImageNet-C/ 2>/dev/null | wc -l) corruptions"
+echo "  ImageNet-A:   $(ls /data/imagenet-a/ 2>/dev/null | wc -l) classes"
+echo "  ImageNet-R:   $(ls /data/imagenet-r/ 2>/dev/null | wc -l) classes"
+echo "  ImageNet-O:   $(ls /data/imagenet-o/ 2>/dev/null | wc -l) classes"
 echo "  NELU kernel:  compiled"
 
 echo ""
@@ -197,7 +191,7 @@ echo "       aws ec2 create-snapshot --volume-id <vol-xxx> \\"
 echo "         --description 'nelu-training-env-$(date +%Y%m%d)'"
 echo ""
 echo "    3. Set in launch_spot.sh:"
-echo "       export DATA_SNAPSHOT=snap-xxxxxxxx"
+echo "       DATA_SNAPSHOT=snap-xxxxxxxx  # put this into .env"
 echo ""
 echo "    4. Terminate this instance"
 echo "═══════════════════════════════════════════════════════════"

@@ -20,10 +20,38 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/aws_common.sh"
+
+ENV_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --env-file)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --env-file requires a path" >&2
+                exit 1
+            fi
+            ENV_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--env-file FILE] <n_nodes> <job_queue_dir>"
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+load_env_file "$ENV_FILE" "$REPO_ROOT"
 
 # ── Config (override via environment) ───────────────────────────
 
-S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 REGION="${AWS_REGION:-us-east-1}"
 KEY_NAME="${KEY_NAME:-nelu-training}"
 SECURITY_GROUP="${SECURITY_GROUP:-sg-CHANGEME}"
@@ -51,11 +79,8 @@ fi
 WANDB_API_KEY="${WANDB_API_KEY:-}"
 if [ -z "$WANDB_API_KEY" ]; then
     echo "WARNING: WANDB_API_KEY not set. wandb logging will be disabled on instances."
-    echo "  To enable: export WANDB_API_KEY=<your_key>"
+    echo "  To enable: set WANDB_API_KEY in .env"
 fi
-
-# Deep Learning AMI (Ubuntu 22.04) with CUDA pre-installed
-AMI="${AMI:-ami-0c02fb55956c7d316}"
 
 # Instance type preference (H100 > A100 > A10G)
 INSTANCE_TYPE="${INSTANCE_TYPE:-p5.48xlarge}"
@@ -70,18 +95,23 @@ if [ $# -lt 2 ]; then
     echo "  job_queue_dir: Directory containing jobs_node1.txt, jobs_node2.txt, ..."
     echo ""
     echo "  Environment variables:"
-    echo "    S3_BUCKET              S3 bucket for code/data/results (default: s3://nelu-datasets/v2)"
+    echo "    S3_BUCKET              S3 bucket for code/data/results (default: s3://nelu-datasets)"
     echo "    AWS_REGION             AWS region (default: us-east-1)"
     echo "    KEY_NAME               EC2 key pair name"
     echo "    SECURITY_GROUP         Security group ID (REQUIRED)"
     echo "    SUBNET                 Subnet ID (REQUIRED)"
     echo "    IAM_INSTANCE_PROFILE   ARN of instance profile with S3 access (REQUIRED)"
     echo "    INSTANCE_TYPE          EC2 instance type (default: p5.48xlarge)"
+    echo ""
+    echo "  These can be set in ${REPO_ROOT}/.env instead of exporting them."
     exit 1
 fi
 
 N_NODES="$1"
 JOB_DIR="$2"
+AMI_ID="$(resolve_ami "$REGION")"
+
+echo "Using AMI: $AMI_ID"
 
 # ── Upload code to S3 ──────────────────────────────────────────
 
@@ -89,6 +119,7 @@ echo "Uploading code to S3..."
 cd "$REPO_ROOT"
 tar czf /tmp/nelu-code.tar.gz \
     --exclude='data' --exclude='results' --exclude='wandb' \
+    --exclude='.env' --exclude='.env.*' \
     --exclude='__pycache__' --exclude='.git' --exclude='*.pyc' .
 aws s3 cp /tmp/nelu-code.tar.gz "${S3_BUCKET}/code/nelu-code.tar.gz" --quiet
 rm /tmp/nelu-code.tar.gz
@@ -119,16 +150,11 @@ for i in $(seq 1 "$N_NODES"); do
     echo ""
     echo "── Node $i ──"
 
-    # Generate user data with the node number baked in
-    USER_DATA=$(cat "$SCRIPT_DIR/user_data.sh" | \
-        sed "s|__S3_BUCKET__|${S3_BUCKET}|g" | \
-        sed "s|__NODE_ID__|${i}|g" | \
-        sed "s|__WANDB_API_KEY__|${WANDB_API_KEY}|g" | \
-        base64 | tr -d '\n')
+    USER_DATA_FILE="$(render_user_data_file "$SCRIPT_DIR/user_data.sh" "$S3_BUCKET" "$i" "$WANDB_API_KEY")"
 
     # Request a spot instance (one-time / terminate on interruption)
-    INSTANCE_ID=$(aws ec2 run-instances \
-        --image-id "$AMI" \
+    if ! INSTANCE_ID=$(aws ec2 run-instances \
+        --image-id "$AMI_ID" \
         --instance-type "$INSTANCE_TYPE" \
         --key-name "$KEY_NAME" \
         --security-group-ids "$SECURITY_GROUP" \
@@ -136,11 +162,16 @@ for i in $(seq 1 "$N_NODES"); do
         --iam-instance-profile "Arn=$IAM_ROLE" \
         --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
         --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500,"DeleteOnTermination":true}}]' \
-        --user-data "$USER_DATA" \
+        --user-data "file://${USER_DATA_FILE}" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${i}},{Key=Project,Value=nelu}]" \
         --region "$REGION" \
         --query 'Instances[0].InstanceId' \
-        --output text 2>&1) || true
+        --output text); then
+        rm -f "$USER_DATA_FILE"
+        echo "ERROR: failed to launch node $i" >&2
+        exit 1
+    fi
+    rm -f "$USER_DATA_FILE"
 
     echo "  Instance: $INSTANCE_ID"
     echo "  Job file: jobs_node${i}.txt"

@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 import timm
-from timm.data import create_dataset, create_loader, resolve_data_config
+from timm.data import Mixup, create_dataset, create_loader, resolve_data_config
 from timm.models import model_parameters
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
@@ -109,6 +109,8 @@ def parse_args():
     p.add_argument("--reprob", type=float, default=0.0, help="Random erasing prob")
     p.add_argument("--color-jitter", type=float, default=0.0)
     p.add_argument("--smoothing", type=float, default=0.1, help="Label smoothing")
+    p.add_argument("--mixup", type=float, default=0.0)
+    p.add_argument("--cutmix", type=float, default=0.0)
 
     # Optimizer
     p.add_argument("--opt", type=str, default="rmsproptf")
@@ -131,6 +133,8 @@ def parse_args():
     p.add_argument("--model-ema", action="store_true")
     p.add_argument("--model-ema-decay", type=float, default=0.9999)
     p.add_argument("--clip-grad", type=float, default=None)
+    p.add_argument("--update-freq", type=int, default=1,
+                   help="Gradient accumulation steps")
 
     # Checkpointing
     p.add_argument("--output", type=str, default="results/imagenet")
@@ -169,24 +173,31 @@ class TrainingDiverged(Exception):
 
 
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autocast,
-                    scaler, model_ema, clip_grad, rank, world_size):
+                    scaler, model_ema, clip_grad, rank, world_size,
+                    mixup_fn=None, update_freq=1):
     model.train()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
-    num_updates = epoch * len(loader)
     nan_count = 0
+    optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, (inputs, targets) in enumerate(loader):
         inputs, targets = inputs.to(device), targets.to(device)
+        metric_targets = targets
+
+        if mixup_fn is not None:
+            inputs, targets = mixup_fn(inputs, targets)
 
         with amp_autocast:
             outputs = model(inputs)
             loss = loss_fn(outputs, targets)
+        loss_value = loss.detach()
 
         # NaN detection — if loss is NaN/Inf for 5 consecutive steps, abort
-        if not math.isfinite(loss.item()):
+        if not math.isfinite(loss_value.item()):
             nan_count += 1
+            optimizer.zero_grad(set_to_none=True)
             if nan_count >= 5:
                 raise TrainingDiverged(
                     f"Loss diverged at epoch {epoch}, step {batch_idx} "
@@ -195,33 +206,38 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
         else:
             nan_count = 0
 
-        optimizer.zero_grad()
+        loss = loss / update_freq
+        should_step = ((batch_idx + 1) % update_freq == 0) or ((batch_idx + 1) == len(loader))
+
         if scaler is not None:
             scaler.scale(loss).backward()
-            if clip_grad is not None:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-            scaler.step(optimizer)
-            scaler.update()
+            if should_step:
+                if clip_grad is not None:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
         else:
             loss.backward()
-            if clip_grad is not None:
-                nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-            optimizer.step()
+            if should_step:
+                if clip_grad is not None:
+                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
-        if model_ema is not None:
+        if should_step and model_ema is not None:
             model_ema.update(model)
 
-        acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
+        acc1, acc5 = accuracy(outputs, metric_targets, topk=(1, 5))
         if world_size > 1:
-            loss = reduce_tensor(loss, world_size)
+            loss_value = reduce_tensor(loss_value, world_size)
             acc1 = reduce_tensor(acc1, world_size)
             acc5 = reduce_tensor(acc5, world_size)
 
-        losses.update(loss.item(), inputs.size(0))
+        losses.update(loss_value.item(), inputs.size(0))
         top1.update(acc1.item(), inputs.size(0))
         top5.update(acc5.item(), inputs.size(0))
-        num_updates += 1
 
     return OrderedDict(loss=losses.avg, top1=top1.avg, top5=top5.avg)
 
@@ -264,10 +280,17 @@ def main():
         import yaml
         with open(args.config) as f:
             cfg = yaml.safe_load(f)
+        alias_map = {
+            "data_path": "data_dir",
+            "use_amp": "amp",
+        }
         for k, v in cfg.items():
             attr = k.replace("-", "_")
+            attr = alias_map.get(attr, attr)
             if hasattr(args, attr) and attr != "config":
                 setattr(args, attr, v)
+
+    args.update_freq = max(1, args.update_freq)
 
     rank, world_size, local_rank = setup_distributed()
     device = torch.device(f"cuda:{local_rank}")
@@ -339,6 +362,16 @@ def main():
         pin_memory=True,
     )
 
+    mixup_fn = None
+    mixup_active = args.mixup > 0.0 or args.cutmix > 0.0
+    if mixup_active:
+        mixup_fn = Mixup(
+            mixup_alpha=args.mixup,
+            cutmix_alpha=args.cutmix,
+            label_smoothing=args.smoothing,
+            num_classes=args.num_classes,
+        )
+
     # -- Optimizer & scheduler --
     optimizer = create_optimizer_v2(model, opt=args.opt, lr=args.lr,
                                     weight_decay=args.weight_decay,
@@ -357,7 +390,10 @@ def main():
     )
 
     # -- Loss --
-    if args.smoothing > 0:
+    if mixup_active:
+        from timm.loss import SoftTargetCrossEntropy
+        loss_fn = SoftTargetCrossEntropy().to(device)
+    elif args.smoothing > 0:
         from timm.loss import LabelSmoothingCrossEntropy
         loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing).to(device)
     else:
@@ -425,6 +461,7 @@ def main():
             train_metrics = train_one_epoch(
                 epoch, model, loader_train, optimizer, loss_fn, device,
                 amp_autocast, scaler, model_ema, args.clip_grad, rank, world_size,
+                mixup_fn=mixup_fn, update_freq=args.update_freq,
             )
         except TrainingDiverged as e:
             if is_primary(rank):
