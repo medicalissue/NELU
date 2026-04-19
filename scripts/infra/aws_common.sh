@@ -104,10 +104,14 @@ upload_repo_bundle() {
 
     (
         cd "$repo_root"
+        # --no-mac-metadata suppresses Apple xattr headers that cause
+        # harmless but noisy warnings when extracted on Linux.
         tar czf "$tarball" \
+            --no-mac-metadata \
             --exclude='data' --exclude='results' --exclude='wandb' \
             --exclude='.env' --exclude='.env.*' \
-            --exclude='__pycache__' --exclude='.git' --exclude='*.pyc' .
+            --exclude='__pycache__' --exclude='.git' --exclude='*.pyc' \
+            --exclude='.DS_Store' .
     )
     aws s3 cp "$tarball" "$dest_uri" --quiet
     rm -f "$tarball"
