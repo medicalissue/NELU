@@ -17,11 +17,11 @@ imagenet efficientnet_b2 nilu
 imagenet deit_base_patch16_224 nelu
 
 # Gamma initialization ablation (~6h each, 90 epoch runs)
-ablation convnext_tiny nelu --gamma_init 0.001
-ablation convnext_tiny nelu --gamma_init 0.01
-ablation convnext_tiny nelu --gamma_init 0.1
-ablation convnext_tiny nelu --gamma_init 0.5
+# Three regimes: near-zero (default), no curriculum, ReLU-like
+# gamma=1.0 and 10.0 expected to crash — script handles gracefully
+ablation convnext_tiny nelu --gamma_init 1e-6
 ablation convnext_tiny nelu --gamma_init 1.0
+ablation convnext_tiny nelu --gamma_init 10.0
 
 # CIFAR-100 — 7 architectures x 2 activations (nelu/nilu) x 3 seeds = 42 jobs
 # Baselines (relu/gelu/silu) are reused from S3 — they were trained with the

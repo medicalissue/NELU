@@ -1,14 +1,19 @@
-# Gamma initialization sweep
-# Tests how sensitive NELU/NiLU are to the initial value of gamma.
-# Each value is run with ConvNeXt-Tiny on ImageNet for 90 epochs.
+# Gamma initialization ablation
+# Three regimes that tell the full story:
+#   1e-6  — near-zero (default): gate ≈ 0.5, near-linear start
+#   1.0   — no curriculum: gate at "standard GELU-like" sharpness from step 0
+#   10.0  — ReLU-like: gate nearly binary from step 0
 #
-# The default (1e-6) matches the LayerScale convention (CaiT, ConvNeXt)
-# and starts near-linear. Larger inits start with stronger gating;
-# gamma=1.0 is equivalent to no curriculum.
+# We expect 1.0 and 10.0 to crash or diverge on architectures without
+# post-activation BatchNorm (e.g. ConvNeXt). This is the point —
+# it demonstrates that the near-zero curriculum is essential.
+#
+# The training script should catch divergence (NaN loss) and exit
+# gracefully with a partial result, not hang or corrupt other jobs.
 model: convnext_tiny
 dataset: imagenet
 data_path: /data/imagenet
-epochs: 90              # shortened sweep — 90 epochs is enough to see the trend
+epochs: 90
 batch_size: 128
 lr: 4.0e-3
 warmup_epochs: 20
@@ -16,17 +21,15 @@ weight_decay: 0.05
 drop_path: 0.1
 opt: adamw
 amp: true
-model_ema: false        # skip EMA for speed in ablation
+compile: true
+model_ema: false
 mixup: 0.8
 cutmix: 1.0
 smoothing: 0.1
 reprob: 0.25
 color_jitter: 0.4
 
-# Values to sweep (run one job per value)
 gamma_init_values:
-  - 1.0e-6              # default (LayerScale-like)
-  - 1.0e-4
-  - 0.01
-  - 0.1
-  - 1.0                 # no curriculum
+  - 1.0e-6    # near-zero (default) — expected: stable, best
+  - 1.0       # no curriculum — expected: unstable or worse
+  - 10.0      # ReLU-like — expected: crash or severe degradation

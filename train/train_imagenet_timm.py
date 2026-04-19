@@ -163,6 +163,11 @@ def is_primary(rank):
 #  Training and evaluation
 # ---------------------------------------------------------------------------
 
+class TrainingDiverged(Exception):
+    """Raised when loss becomes NaN/Inf, indicating training has crashed."""
+    pass
+
+
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autocast,
                     scaler, model_ema, clip_grad, rank, world_size):
     model.train()
@@ -170,6 +175,7 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
     top1 = AverageMeter()
     top5 = AverageMeter()
     num_updates = epoch * len(loader)
+    nan_count = 0
 
     for batch_idx, (inputs, targets) in enumerate(loader):
         inputs, targets = inputs.to(device), targets.to(device)
@@ -177,6 +183,17 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
         with amp_autocast:
             outputs = model(inputs)
             loss = loss_fn(outputs, targets)
+
+        # NaN detection — if loss is NaN/Inf for 5 consecutive steps, abort
+        if not math.isfinite(loss.item()):
+            nan_count += 1
+            if nan_count >= 5:
+                raise TrainingDiverged(
+                    f"Loss diverged at epoch {epoch}, step {batch_idx} "
+                    f"(NaN/Inf for {nan_count} consecutive steps)")
+            continue  # skip this step, try next batch
+        else:
+            nan_count = 0
 
         optimizer.zero_grad()
         if scaler is not None:
@@ -398,15 +415,40 @@ def main():
     if is_primary(rank):
         print(f"\nStarting training from epoch {start_epoch} to {args.epochs}")
 
+    diverged = False
     for epoch in range(start_epoch, args.epochs):
         if world_size > 1 and hasattr(loader_train, "sampler"):
             loader_train.sampler.set_epoch(epoch)
 
         t0 = time.time()
-        train_metrics = train_one_epoch(
-            epoch, model, loader_train, optimizer, loss_fn, device,
-            amp_autocast, scaler, model_ema, args.clip_grad, rank, world_size,
-        )
+        try:
+            train_metrics = train_one_epoch(
+                epoch, model, loader_train, optimizer, loss_fn, device,
+                amp_autocast, scaler, model_ema, args.clip_grad, rank, world_size,
+            )
+        except TrainingDiverged as e:
+            if is_primary(rank):
+                print(f"\n{'='*60}")
+                print(f"  TRAINING DIVERGED: {e}")
+                print(f"  Saving partial results and exiting gracefully.")
+                print(f"{'='*60}")
+                result = {
+                    "model": args.model,
+                    "activation": args.activation,
+                    "diverged": True,
+                    "diverged_at_epoch": epoch,
+                    "best_top1": best_acc,
+                    "epochs_completed": epoch,
+                    "gamma_init": args.gamma_init,
+                }
+                with open(os.path.join(args.output, "result.json"), "w") as f:
+                    json.dump(result, f, indent=2)
+                if wandb_run:
+                    import wandb
+                    wandb.log({"diverged": True, "diverged_epoch": epoch})
+                    wandb.finish()
+            diverged = True
+            break
 
         # Evaluate (use EMA model if available)
         eval_model = model_ema.module if model_ema is not None else model
