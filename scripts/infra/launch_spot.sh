@@ -23,12 +23,23 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── Config (override via environment) ───────────────────────────
 
-S3_BUCKET="${S3_BUCKET:-s3://nelu-experiments}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
 REGION="${AWS_REGION:-us-east-1}"
 KEY_NAME="${KEY_NAME:-nelu-training}"
 SECURITY_GROUP="${SECURITY_GROUP:-sg-CHANGEME}"
 SUBNET="${SUBNET:-subnet-CHANGEME}"
-IAM_ROLE="${IAM_ROLE:-arn:aws:iam::instance-profile/S3Access}"
+IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
+
+# Validate required settings
+if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ "$SUBNET" = "subnet-CHANGEME" ]; then
+    echo "ERROR: Set SECURITY_GROUP and SUBNET environment variables"
+    exit 1
+fi
+
+if [ -z "$IAM_ROLE" ]; then
+    echo "ERROR: Set IAM_INSTANCE_PROFILE to the ARN of the instance profile with S3 access"
+    exit 1
+fi
 
 # Deep Learning AMI (Ubuntu 22.04) with CUDA pre-installed
 AMI="${AMI:-ami-0c02fb55956c7d316}"
@@ -46,12 +57,13 @@ if [ $# -lt 2 ]; then
     echo "  job_queue_dir: Directory containing jobs_node1.txt, jobs_node2.txt, ..."
     echo ""
     echo "  Environment variables:"
-    echo "    S3_BUCKET       S3 bucket for code/data/results (default: s3://nelu-experiments)"
-    echo "    AWS_REGION      AWS region (default: us-east-1)"
-    echo "    KEY_NAME        EC2 key pair name"
-    echo "    SECURITY_GROUP  Security group ID"
-    echo "    SUBNET          Subnet ID"
-    echo "    INSTANCE_TYPE   EC2 instance type (default: p5.48xlarge)"
+    echo "    S3_BUCKET              S3 bucket for code/data/results (default: s3://nelu-datasets/v2)"
+    echo "    AWS_REGION             AWS region (default: us-east-1)"
+    echo "    KEY_NAME               EC2 key pair name"
+    echo "    SECURITY_GROUP         Security group ID (REQUIRED)"
+    echo "    SUBNET                 Subnet ID (REQUIRED)"
+    echo "    IAM_INSTANCE_PROFILE   ARN of instance profile with S3 access (REQUIRED)"
+    echo "    INSTANCE_TYPE          EC2 instance type (default: p5.48xlarge)"
     exit 1
 fi
 
@@ -83,6 +95,10 @@ done
 
 # ── Launch instances ────────────────────────────────────────────
 
+INSTANCE_IDS_FILE="/tmp/nelu_instance_ids.txt"
+echo "# NELU spot instance tracker — $(date -u)" > "$INSTANCE_IDS_FILE"
+echo "# Format: INSTANCE_ID NODE_ID JOB_FILE" >> "$INSTANCE_IDS_FILE"
+
 echo ""
 echo "Launching $N_NODES spot instances..."
 
@@ -96,7 +112,7 @@ for i in $(seq 1 "$N_NODES"); do
         sed "s|__NODE_ID__|${i}|g" | \
         base64 | tr -d '\n')
 
-    # Request a spot instance
+    # Request a spot instance (one-time / terminate on interruption)
     INSTANCE_ID=$(aws ec2 run-instances \
         --image-id "$AMI" \
         --instance-type "$INSTANCE_TYPE" \
@@ -104,7 +120,7 @@ for i in $(seq 1 "$N_NODES"); do
         --security-group-ids "$SECURITY_GROUP" \
         --subnet-id "$SUBNET" \
         --iam-instance-profile "Arn=$IAM_ROLE" \
-        --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"persistent","InstanceInterruptionBehavior":"stop"}}' \
+        --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$MAX_SPOT_PRICE"'","SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
         --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":500,"VolumeType":"gp3","Iops":10000,"Throughput":500}}]' \
         --user-data "$USER_DATA" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=nelu-node-${i}},{Key=Project,Value=nelu}]" \
@@ -114,16 +130,21 @@ for i in $(seq 1 "$N_NODES"); do
 
     echo "  Instance: $INSTANCE_ID"
     echo "  Job file: jobs_node${i}.txt"
+    echo "$INSTANCE_ID $i ${JOB_DIR}/jobs_node${i}.txt" >> "$INSTANCE_IDS_FILE"
 done
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
 echo "  All $N_NODES instances launched."
+echo "  Instance IDs saved to: $INSTANCE_IDS_FILE"
 echo ""
 echo "  Monitor with:"
 echo "    aws ec2 describe-instances --filters 'Name=tag:Project,Values=nelu' \\"
 echo "      --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,Type:InstanceType}' \\"
 echo "      --output table --region $REGION"
+echo ""
+echo "  Auto-relaunch terminated instances with:"
+echo "    ./scripts/infra/monitor_spot.sh $INSTANCE_IDS_FILE"
 echo ""
 echo "  Results will appear in: ${S3_BUCKET}/results/"
 echo "═══════════════════════════════════════════════════════════"

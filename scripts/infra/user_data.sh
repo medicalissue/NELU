@@ -51,7 +51,7 @@ pip install --quiet \
     torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 pip install --quiet \
-    timm==1.0.11 wandb tqdm scikit-learn scipy ninja matplotlib
+    timm==1.0.11 wandb tqdm scikit-learn scipy ninja matplotlib pyyaml autoattack
 
 # Apex for LAMB optimizer (DeiT III)
 pip install --quiet packaging
@@ -75,6 +75,14 @@ rm /tmp/nelu-code.tar.gz
 # Download this node's job file
 aws s3 cp "${S3_BUCKET}/jobs/jobs_node${NODE_ID}.txt" \
     "${WORKSPACE}/scripts/jobs_node${NODE_ID}.txt" --quiet
+
+# Clone upstream training repos and apply NELU patches
+cd $HOME
+git clone https://github.com/facebookresearch/ConvNeXt.git convnext-train
+cd convnext-train && git apply ${WORKSPACE}/patches/convnext-train.patch && cd ..
+
+git clone https://github.com/facebookresearch/deit.git deit-train
+cd deit-train && git apply ${WORKSPACE}/patches/deit-train.patch && cd ..
 
 # ── 4. Download data from S3 ──────────────────────────────────
 

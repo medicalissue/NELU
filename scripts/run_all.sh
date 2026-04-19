@@ -23,7 +23,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-S3_BUCKET="${S3_BUCKET:-s3://nelu-experiments}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
 SHUTDOWN_WHEN_DONE="${SHUTDOWN_WHEN_DONE:-true}"
 
 # ── Parse arguments ─────────────────────────────────────────────
@@ -78,15 +78,17 @@ while IFS= read -r line; do
 
     echo ""
     echo "───────────────────────────────────────────────────────"
-    echo "  Job $JOB_NUM / $TOTAL: $PHASE $MODEL $ACT ${EXTRA_ARGS[*]:-}"
+    echo "  Job $JOB_NUM / $TOTAL: $PHASE $MODEL $ACT ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
     echo "───────────────────────────────────────────────────────"
 
     # Check if already done on S3
     RUN_NAME="${PHASE}_${MODEL}_${ACT}"
-    for arg in "${EXTRA_ARGS[@]}"; do
-        clean=$(echo "$arg" | sed 's/^--//; s/=/_/g')
-        RUN_NAME="${RUN_NAME}_${clean}"
-    done
+    if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+        for arg in "${EXTRA_ARGS[@]}"; do
+            clean=$(echo "$arg" | sed 's/^--//; s/=/_/g')
+            RUN_NAME="${RUN_NAME}_${clean}"
+        done
+    fi
 
     if aws s3 ls "${S3_BUCKET}/results/${RUN_NAME}/DONE" >/dev/null 2>&1; then
         echo "  Already complete on S3. Skipping."
@@ -95,7 +97,7 @@ while IFS= read -r line; do
     fi
 
     # Run the experiment
-    if bash "${REPO_ROOT}/scripts/run_single.sh" "$PHASE" "$MODEL" "$ACT" "${EXTRA_ARGS[@]}"; then
+    if bash "${REPO_ROOT}/scripts/run_single.sh" "$PHASE" "$MODEL" "$ACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; then
         echo "  Job $JOB_NUM complete."
     else
         echo "  Job $JOB_NUM FAILED (exit code $?)."

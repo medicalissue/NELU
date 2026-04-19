@@ -9,13 +9,13 @@ batch_size: 32          # per GPU; 32 * 8 = 256 effective (matches original 2 GP
 lr: 0.016
 opt: rmsproptf
 opt_eps: 0.001
-scheduler: step
+sched: step
 decay_epochs: 2.4
 decay_rate: 0.97
 weight_decay: 1.0e-5
 drop: 0.4
 drop_connect: 0.2
-use_amp: true
+amp: true
 model_ema: true
 model_ema_decay: 0.9999
 aa: rand-m9-mstd0.5

@@ -19,7 +19,7 @@ POLL_INTERVAL="${SPOT_POLL_INTERVAL:-5}"
 METADATA_URL="http://169.254.169.254/latest/meta-data/spot/instance-action"
 TOKEN_URL="http://169.254.169.254/latest/api/token"
 LOG_FILE="/var/log/spot-handler.log"
-S3_BUCKET="${S3_BUCKET:-s3://nelu-experiments}"
+S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets/v2}"
 
 log() {
     echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"

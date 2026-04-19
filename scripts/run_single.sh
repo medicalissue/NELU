@@ -61,6 +61,9 @@ case "$MODEL" in
     vit_large*)       CONFIG_FILE="configs/imagenet/vit_l16.yaml" ;;
     resnet*)          CONFIG_FILE="configs/cifar100/default.yaml" ;;
     mobilenet*)       CONFIG_FILE="configs/cifar100/default.yaml" ;;
+    wrn*)             CONFIG_FILE="configs/cifar100/default.yaml" ;;
+    densenet*)        CONFIG_FILE="configs/cifar100/default.yaml" ;;
+    shufflenet*)      CONFIG_FILE="configs/cifar100/default.yaml" ;;
     *)                CONFIG_FILE="configs/${PHASE}/default.yaml" ;;
 esac
 
@@ -71,11 +74,13 @@ fi
 
 # Build a unique run name
 RUN_NAME="${PHASE}_${MODEL}_${ACT}"
-for arg in "${EXTRA_ARGS[@]}"; do
-    # Strip leading dashes and convert to underscores for the name
-    clean=$(echo "$arg" | sed 's/^--//; s/=/_/g')
-    RUN_NAME="${RUN_NAME}_${clean}"
-done
+if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+    for arg in "${EXTRA_ARGS[@]}"; do
+        # Strip leading dashes and convert to underscores for the name
+        clean=$(echo "$arg" | sed 's/^--//; s/=/_/g')
+        RUN_NAME="${RUN_NAME}_${clean}"
+    done
+fi
 
 OUTPUT_DIR="${RESULTS_DIR}/${RUN_NAME}"
 S3_OUTPUT="${S3_BUCKET}/results/${RUN_NAME}"
@@ -90,7 +95,7 @@ echo "  Config:    $CONFIG_FILE"
 echo "  Output:    $OUTPUT_DIR"
 echo "  S3:        $S3_OUTPUT"
 echo "  Upstream:  $UPSTREAM_DIR"
-echo "  Extra:     ${EXTRA_ARGS[*]:-<none>}"
+echo "  Extra:     ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
 echo "==================================================================="
 
 # -- Check if already completed --------------------------------------
@@ -112,20 +117,20 @@ fi
 # -- Resume from S3 if checkpoint exists -----------------------------
 
 mkdir -p "$OUTPUT_DIR"
-RESUME_FLAG=""
-WANDB_FLAG=""
+RESUME_ARGS=()
+WANDB_ARGS=()
 
 if [ "$ENABLE_WANDB" = "1" ]; then
-    WANDB_FLAG="--wandb"
+    WANDB_ARGS=(--wandb)
 fi
 
 if aws s3 ls "${S3_OUTPUT}/checkpoint.pt" >/dev/null 2>&1; then
     echo "Found checkpoint on S3 -- downloading for resume..."
     aws s3 cp "${S3_OUTPUT}/checkpoint.pt" "${OUTPUT_DIR}/checkpoint.pt" --quiet
-    RESUME_FLAG="--resume ${OUTPUT_DIR}/checkpoint.pt"
+    RESUME_ARGS=(--resume "${OUTPUT_DIR}/checkpoint.pt")
     echo "  Resume from: ${OUTPUT_DIR}/checkpoint.pt"
 elif [ -f "${OUTPUT_DIR}/checkpoint.pt" ]; then
-    RESUME_FLAG="--resume ${OUTPUT_DIR}/checkpoint.pt"
+    RESUME_ARGS=(--resume "${OUTPUT_DIR}/checkpoint.pt")
     echo "  Resume from local: ${OUTPUT_DIR}/checkpoint.pt"
 fi
 
@@ -147,6 +152,9 @@ case "$PHASE" in
         case "$MODEL" in
             convnext_*)
                 # ConvNeXt training script (patched to support --act)
+                # Upstream main.py does NOT support --config; pass flags directly.
+                # Config YAML serves as documentation only.
+                DROP_PATH=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['drop_path'])" 2>/dev/null || echo "0.1")
                 TRAIN_CMD=(
                     torchrun
                     --nproc_per_node=8
@@ -155,9 +163,13 @@ case "$PHASE" in
                     --act "$ACT"
                     --data_path /data/imagenet
                     --output_dir "$OUTPUT_DIR"
-                    --config "${REPO_ROOT}/${CONFIG_FILE}"
-                    $WANDB_FLAG
-                    $RESUME_FLAG
+                    --drop_path "$DROP_PATH"
+                    --batch_size 128 --update_freq 4 --lr 4e-3
+                    --warmup_epochs 20 --epochs 300
+                    --model_ema true --model_ema_eval true
+                    --use_amp true
+                    --enable_wandb true --project nelu
+                    --auto_resume true
                     "${EXTRA_ARGS[@]}"
                 )
                 ;;
@@ -172,24 +184,36 @@ case "$PHASE" in
                     --data-dir /data/imagenet
                     --output "$OUTPUT_DIR"
                     --config "${REPO_ROOT}/${CONFIG_FILE}"
-                    $WANDB_FLAG
-                    $RESUME_FLAG
+                    "${WANDB_ARGS[@]}"
+                    "${RESUME_ARGS[@]}"
                     "${EXTRA_ARGS[@]}"
                 )
                 ;;
             vit_*)
                 # DeiT III training script (patched to support --act)
+                # Upstream main.py does NOT support --config; pass flags directly.
+                # Config YAML serves as documentation only.
+                DROP_PATH=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['drop_path'])" 2>/dev/null || echo "0.2")
+                LR=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['lr'])" 2>/dev/null || echo "3e-3")
                 TRAIN_CMD=(
                     torchrun
                     --nproc_per_node=8
                     "${UPSTREAM_DIR}/deit-train/main.py"
-                    --model "$MODEL"
+                    --model "deit_${MODEL#vit_}_LS"
                     --act "$ACT"
                     --data-path /data/imagenet
                     --output_dir "$OUTPUT_DIR"
-                    --config "${REPO_ROOT}/${CONFIG_FILE}"
-                    $WANDB_FLAG
-                    $RESUME_FLAG
+                    --drop-path "$DROP_PATH"
+                    --lr "$LR"
+                    --batch 256 --epochs 300
+                    --warmup-epochs 5 --weight-decay 0.05
+                    --opt fusedlamb --warmup-lr 1e-6
+                    --mixup 0.8 --cutmix 1.0
+                    --smoothing 0.0 --reprob 0.0
+                    --color-jitter 0.3 --ThreeAugment
+                    --bce-loss --unscale-lr
+                    --enable_wandb true --project nelu
+                    --auto_resume true
                     "${EXTRA_ARGS[@]}"
                 )
                 ;;
@@ -206,12 +230,14 @@ case "$PHASE" in
             --activation "$ACT"
             --config "${REPO_ROOT}/${CONFIG_FILE}"
             --output_dir "$OUTPUT_DIR"
-            $WANDB_FLAG
-                    $RESUME_FLAG
+            "${WANDB_ARGS[@]}"
+            "${RESUME_ARGS[@]}"
             "${EXTRA_ARGS[@]}"
         )
         ;;
     ablation)
+        # Ablation uses ConvNeXt upstream script — no --config support.
+        DROP_PATH=$(python3 -c "import yaml; print(yaml.safe_load(open('${REPO_ROOT}/${CONFIG_FILE}'))['drop_path'])" 2>/dev/null || echo "0.1")
         TRAIN_CMD=(
             torchrun
             --nproc_per_node=8
@@ -220,9 +246,13 @@ case "$PHASE" in
             --act "$ACT"
             --data_path /data/imagenet
             --output_dir "$OUTPUT_DIR"
-            --config "${REPO_ROOT}/${CONFIG_FILE}"
-            $WANDB_FLAG
-                    $RESUME_FLAG
+            --drop_path "$DROP_PATH"
+            --batch_size 128 --update_freq 4 --lr 4e-3
+            --warmup_epochs 20 --epochs 300
+            --model_ema true --model_ema_eval true
+            --use_amp true
+            --enable_wandb true --project nelu
+            --auto_resume true
             "${EXTRA_ARGS[@]}"
         )
         ;;
