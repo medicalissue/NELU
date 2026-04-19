@@ -1,12 +1,13 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-#  Launch a temporary on-demand instance for snapshot preparation,
-#  run setup_snapshot.sh via SSM, create an EBS snapshot, update
-#  DATA_SNAPSHOT in the local .env, and terminate the instance.
+#  Resume snapshot preparation on an existing instance, finish
+#  dataset sync via SSM, create an EBS snapshot, update
+#  DATA_SNAPSHOT in the local .env, and optionally terminate the
+#  instance.
 #
 #  Usage:
-#    ./scripts/infra/launch_snapshot_setup.sh
-#    ./scripts/infra/launch_snapshot_setup.sh --launch-only
+#    ./scripts/infra/resume_snapshot_setup.sh --instance-id i-xxxx
+#    ./scripts/infra/resume_snapshot_setup.sh --instance-id i-xxxx --keep-instance
 # ═══════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -16,7 +17,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/aws_common.sh"
 
 ENV_FILE=""
-LAUNCH_ONLY=0
+INSTANCE_ID=""
 KEEP_INSTANCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -28,16 +29,20 @@ while [ $# -gt 0 ]; do
             ENV_FILE="$2"
             shift 2
             ;;
-        --launch-only)
-            LAUNCH_ONLY=1
-            shift
+        --instance-id)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --instance-id requires a value" >&2
+                exit 1
+            fi
+            INSTANCE_ID="$2"
+            shift 2
             ;;
         --keep-instance)
             KEEP_INSTANCE=1
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--env-file FILE] [--launch-only] [--keep-instance]"
+            echo "Usage: $0 --instance-id INSTANCE_ID [--env-file FILE] [--keep-instance]"
             exit 0
             ;;
         *)
@@ -47,29 +52,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ -z "$INSTANCE_ID" ]; then
+    echo "ERROR: --instance-id is required" >&2
+    exit 1
+fi
+
 load_env_file "$ENV_FILE" "$REPO_ROOT"
 TARGET_ENV_FILE="$(resolve_env_file_path "$ENV_FILE" "$REPO_ROOT")"
 
 REGION="${AWS_REGION:-us-west-2}"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 DATA_SOURCE_S3="${DATA_SOURCE_S3:-$S3_BUCKET}"
-KEY_NAME="${KEY_NAME:-}"
-SECURITY_GROUP="${SECURITY_GROUP:-}"
-SUBNET_CANDIDATES="$(normalize_subnet_candidates || true)"
-IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
-INSTANCE_TYPE="${SNAPSHOT_INSTANCE_TYPE:-p5.48xlarge}"
-ROOT_VOL_SIZE="${SNAPSHOT_ROOT_VOLUME_SIZE:-200}"
-DATA_VOL_SIZE="${SNAPSHOT_DATA_VOLUME_SIZE:-500}"
-INSTANCE_NAME="${SNAPSHOT_SETUP_NAME:-nelu-snapshot-setup}"
 SSM_WAIT_TIMEOUT="${SNAPSHOT_SSM_WAIT_TIMEOUT:-900}"
 SETUP_WAIT_TIMEOUT="${SNAPSHOT_SETUP_WAIT_TIMEOUT:-14400}"
 KEEP_ON_FAILURE="${SNAPSHOT_KEEP_ON_FAILURE:-1}"
+SNAP_DESC="${SNAPSHOT_DESCRIPTION:-nelu-training-env-$(date +%Y%m%d)}"
 SSM_COMMAND_MAX_TIMEOUT=172800
-
-if [ -z "$KEY_NAME" ] || [ -z "$SECURITY_GROUP" ] || [ -z "$SUBNET_CANDIDATES" ] || [ -z "$IAM_ROLE" ]; then
-    echo "ERROR: KEY_NAME, SECURITY_GROUP, SUBNETS (or SUBNET), and IAM_INSTANCE_PROFILE must be set in .env" >&2
-    exit 1
-fi
 
 case "$SETUP_WAIT_TIMEOUT" in
     ''|*[!0-9]*)
@@ -163,64 +161,37 @@ dump_ssm_command_logs() {
         --output text 2>/dev/null || true
 }
 
-AMI_ID="$(resolve_ami "$REGION")"
+INSTANCE_STATE=$(aws ec2 describe-instances \
+    --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --query 'Reservations[0].Instances[0].State.Name' \
+    --output text 2>/dev/null || true)
 
-echo "Using AMI: $AMI_ID"
-echo "Subnet candidates: $SUBNET_CANDIDATES"
-echo "Uploading snapshot setup bundle to S3..."
-upload_repo_bundle "$REPO_ROOT" "${S3_BUCKET}/code/nelu-snapshot-setup.tar.gz"
-echo "  Bundle uploaded to ${S3_BUCKET}/code/nelu-snapshot-setup.tar.gz"
-
-INSTANCE_ID=""
-LAUNCHED_SUBNET=""
-ERR_FILE="$(mktemp)"
-for SUBNET in $SUBNET_CANDIDATES; do
-    echo "Trying snapshot setup subnet: $SUBNET"
-    if INSTANCE_ID=$(aws ec2 run-instances \
-        --region "$REGION" \
-        --image-id "$AMI_ID" \
-        --instance-type "$INSTANCE_TYPE" \
-        --key-name "$KEY_NAME" \
-        --security-group-ids "$SECURITY_GROUP" \
-        --subnet-id "$SUBNET" \
-        --iam-instance-profile "Arn=$IAM_ROLE" \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":'"$ROOT_VOL_SIZE"',"VolumeType":"gp3","Iops":10000,"Throughput":500}},{"DeviceName":"/dev/sdf","Ebs":{"VolumeSize":'"$DATA_VOL_SIZE"',"VolumeType":"gp3","Iops":10000,"Throughput":500}}]' \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Project,Value=nelu},{Key=Role,Value=snapshot-setup}]" \
-        --query 'Instances[0].InstanceId' \
-        --output text 2>"$ERR_FILE"); then
-        LAUNCHED_SUBNET="$SUBNET"
-        break
-    fi
-    sed 's/^/    /' "$ERR_FILE" >&2
-done
-
-rm -f "$ERR_FILE"
-if [ -z "$INSTANCE_ID" ]; then
-    echo "ERROR: failed to launch snapshot setup instance in any subnet" >&2
+if [ -z "$INSTANCE_STATE" ] || [ "$INSTANCE_STATE" = "None" ]; then
+    echo "ERROR: instance not found: $INSTANCE_ID" >&2
     exit 1
 fi
 
-aws ec2 wait instance-running --region "$REGION" --instance-ids "$INSTANCE_ID"
+if [ "$INSTANCE_STATE" != "running" ]; then
+    echo "ERROR: instance $INSTANCE_ID is not running (state: $INSTANCE_STATE)" >&2
+    exit 1
+fi
+
 PUBLIC_IP=$(aws ec2 describe-instances \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' \
-    --output text)
+    --output text 2>/dev/null || true)
 
-echo ""
-echo "Instance ready"
+echo "Resuming snapshot setup on existing instance"
 echo "  Instance ID: $INSTANCE_ID"
 echo "  Public IP:   $PUBLIC_IP"
-echo "  Subnet:      $LAUNCHED_SUBNET"
-echo "  AMI:         $AMI_ID"
+echo "  Region:      $REGION"
 
-if [ "$LAUNCH_ONLY" -eq 1 ]; then
-    echo ""
-    echo "Launch-only mode enabled."
-    echo "  Use SSM or SSH to run setup manually:"
-    echo "    sudo bash scripts/infra/setup_snapshot.sh"
-    exit 0
-fi
+echo ""
+echo "Uploading refreshed snapshot setup bundle to S3..."
+upload_repo_bundle "$REPO_ROOT" "${S3_BUCKET}/code/nelu-snapshot-setup.tar.gz"
+echo "  Bundle uploaded to ${S3_BUCKET}/code/nelu-snapshot-setup.tar.gz"
 
 echo ""
 echo "Waiting for SSM agent..."
@@ -229,7 +200,7 @@ if ! wait_for_ssm_online "$INSTANCE_ID" "$SSM_WAIT_TIMEOUT"; then
     exit 1
 fi
 
-COMMANDS_FILE="/tmp/nelu-snapshot-setup-commands-$$.json"
+COMMANDS_FILE="/tmp/nelu-snapshot-resume-commands-$$.json"
 python - "$COMMANDS_FILE" "$S3_BUCKET" "$REGION" "$DATA_SOURCE_S3" "$SETUP_WAIT_TIMEOUT" <<'PY'
 import json
 import shlex
@@ -240,23 +211,32 @@ bundle_uri = f"{s3_bucket}/code/nelu-snapshot-setup.tar.gz"
 workdir = "/opt/nelu-snapshot-setup"
 repo_dir = f"{workdir}/repo"
 
+resume_script = """set -euo pipefail
+mkdir -p /data/imagenet
+if command -v s5cmd >/dev/null 2>&1; then
+  s5cmd sync --show-progress "${DATA_SOURCE_S3%/}/imagenet/*" /data/imagenet/
+else
+  aws s3 sync "${DATA_SOURCE_S3%/}/imagenet/" /data/imagenet/ --no-progress
+fi
+cd /opt/nelu-snapshot-setup/repo
+bash scripts/download_data.sh /data
+"""
+
 script_body = " && ".join([
     f"mkdir -p {shlex.quote(workdir)}",
     f"aws s3 cp {shlex.quote(bundle_uri)} {shlex.quote(workdir + '/nelu-code.tar.gz')} --region {shlex.quote(region)}",
     f"rm -rf {shlex.quote(repo_dir)}",
     f"mkdir -p {shlex.quote(repo_dir)}",
     f"tar xzf {shlex.quote(workdir + '/nelu-code.tar.gz')} -C {shlex.quote(repo_dir)}",
-    f"cd {shlex.quote(repo_dir)}",
     (
         "sudo env "
         f"AWS_REGION={shlex.quote(region)} "
         f"S3_BUCKET={shlex.quote(s3_bucket)} "
         f"DATA_SOURCE_S3={shlex.quote(data_source_s3)} "
-        "bash scripts/infra/setup_snapshot.sh"
+        f"bash -lc {shlex.quote(resume_script)}"
     ),
 ])
-# SSM RunShellScript uses /bin/sh by default on some AMIs (dash on Ubuntu).
-# Wrap everything in an explicit bash invocation to get pipefail support.
+
 commands = [f"bash -c 'set -euo pipefail; {script_body}'"]
 
 with open(out_path, "w", encoding="utf-8") as fh:
@@ -266,12 +246,12 @@ with open(out_path, "w", encoding="utf-8") as fh:
     }, fh)
 PY
 
-echo "Running setup_snapshot.sh via SSM..."
+echo "Resuming dataset sync via SSM..."
 COMMAND_ID=$(aws ssm send-command \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --document-name "AWS-RunShellScript" \
-    --comment "NELU snapshot setup" \
+    --comment "NELU snapshot resume" \
     --parameters "file://${COMMANDS_FILE}" \
     --query 'Command.CommandId' \
     --output text)
@@ -281,7 +261,7 @@ echo "  SSM Command ID: $COMMAND_ID"
 echo "  SSM execution timeout: ${SETUP_WAIT_TIMEOUT}s"
 
 if ! wait_for_ssm_command "$COMMAND_ID" "$INSTANCE_ID" "$SETUP_WAIT_TIMEOUT"; then
-    echo "ERROR: snapshot setup failed on instance $INSTANCE_ID" >&2
+    echo "ERROR: snapshot resume failed on instance $INSTANCE_ID" >&2
     dump_ssm_command_logs "$COMMAND_ID" "$INSTANCE_ID"
     if [ "$KEEP_ON_FAILURE" -eq 1 ]; then
         echo "Instance left running for inspection: $INSTANCE_ID" >&2
@@ -303,7 +283,6 @@ if [ -z "$VOL_ID" ] || [ "$VOL_ID" = "None" ]; then
     exit 1
 fi
 
-SNAP_DESC="${SNAPSHOT_DESCRIPTION:-nelu-training-env-$(date +%Y%m%d)}"
 echo "Creating snapshot from volume $VOL_ID..."
 SNAP_ID=$(aws ec2 create-snapshot \
     --region "$REGION" \
