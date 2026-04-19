@@ -227,8 +227,7 @@ bundle_uri = f"{s3_bucket}/code/nelu-snapshot-setup.tar.gz"
 workdir = "/opt/nelu-snapshot-setup"
 repo_dir = f"{workdir}/repo"
 
-commands = [
-    "set -euo pipefail",
+script_body = " && ".join([
     f"mkdir -p {shlex.quote(workdir)}",
     f"aws s3 cp {shlex.quote(bundle_uri)} {shlex.quote(workdir + '/nelu-code.tar.gz')} --region {shlex.quote(region)}",
     f"rm -rf {shlex.quote(repo_dir)}",
@@ -242,7 +241,10 @@ commands = [
         f"DATA_SOURCE_S3={shlex.quote(data_source_s3)} "
         "bash scripts/infra/setup_snapshot.sh"
     ),
-]
+])
+# SSM RunShellScript uses /bin/sh by default on some AMIs (dash on Ubuntu).
+# Wrap everything in an explicit bash invocation to get pipefail support.
+commands = [f"bash -c 'set -euo pipefail; {script_body}'"]
 
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump({"commands": commands}, fh)
