@@ -66,6 +66,18 @@ echo "  NELU Training Environment Setup (for EBS snapshot)"
 echo "  $(date -u)"
 echo "═══════════════════════════════════════════════════════════"
 
+# ── 0. Install s5cmd ─────────────────────────────────────────
+echo ""
+echo "── 0. Installing s5cmd ──"
+if ! command -v s5cmd >/dev/null 2>&1; then
+    S5CMD_VER="2.3.0"
+    S5CMD_URL="https://github.com/peak/s5cmd/releases/download/v${S5CMD_VER}/s5cmd_${S5CMD_VER}_linux_amd64.tar.gz"
+    curl -fsSL "$S5CMD_URL" | tar xz -C /usr/local/bin s5cmd
+    echo "  s5cmd $(s5cmd version) installed"
+else
+    echo "  s5cmd already available: $(s5cmd version)"
+fi
+
 # ── 1. Format and mount the data volume ──────────────────────
 echo ""
 echo "── 1. Setting up /data volume ──"

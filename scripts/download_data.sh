@@ -72,6 +72,10 @@ AWS_OK=false
 if command -v aws >/dev/null 2>&1; then
     AWS_OK=true
 fi
+S5CMD_OK=false
+if command -v s5cmd >/dev/null 2>&1; then
+    S5CMD_OK=true
+fi
 
 if $IS_S3; then
     LOCAL="/tmp/nelu_dataset_staging"
@@ -101,6 +105,16 @@ s3_prefix_exists() {
     aws s3 ls "$uri" >/dev/null 2>&1
 }
 
+s3_sync() {
+    local src="$1"
+    local dest="$2"
+    if $S5CMD_OK; then
+        s5cmd sync --show-progress "${src%/}/*" "${dest%/}/"
+    else
+        aws s3 sync "$src" "$dest" --no-progress
+    fi
+}
+
 sync_dir_to_s3() {
     local src_dir="$1"
     local rel="$2"
@@ -108,7 +122,7 @@ sync_dir_to_s3() {
         return 0
     fi
     echo "  Uploading ${rel} -> ${S3_TARGET}/${rel}/"
-    aws s3 sync "$src_dir/" "${S3_TARGET}/${rel}/" --quiet
+    s3_sync "$src_dir/" "${S3_TARGET}/${rel}/"
     rm -rf "$src_dir"
 }
 
@@ -123,7 +137,7 @@ sync_dir_from_source_s3() {
 
     echo "  Syncing ${rel} from ${src_uri}"
     mkdir -p "$dest"
-    aws s3 sync "$src_uri" "$dest/" --quiet
+    s3_sync "$src_uri" "$dest/"
 }
 
 copy_dir_s3_to_s3() {
@@ -142,7 +156,7 @@ copy_dir_s3_to_s3() {
     fi
 
     echo "  Copying ${rel} from ${src_uri} to ${dest_uri}"
-    aws s3 sync "$src_uri" "$dest_uri" --quiet
+    s3_sync "$src_uri" "$dest_uri/"
 }
 
 download_and_extract_tar() {
