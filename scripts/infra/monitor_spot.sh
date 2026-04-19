@@ -67,6 +67,16 @@ if [ ! -f "$IDS_FILE" ]; then
     exit 1
 fi
 
+# Parse ORCH_RUN_ID from tracker file header (set by launch_spot.sh)
+ORCH_RUN_ID=""
+if grep -q "^# Run ID:" "$IDS_FILE"; then
+    ORCH_RUN_ID=$(grep "^# Run ID:" "$IDS_FILE" | head -1 | awk '{print $NF}')
+fi
+if [ -z "$ORCH_RUN_ID" ]; then
+    ORCH_RUN_ID="monitor-$(date -u '+%Y%m%dT%H%M%SZ')"
+    echo "WARNING: No Run ID in tracker file, using fallback: $ORCH_RUN_ID"
+fi
+
 echo "═══════════════════════════════════════════════════════════"
 echo "  NELU Spot Instance Monitor"
 echo "═══════════════════════════════════════════════════════════"
@@ -112,7 +122,7 @@ relaunch_instance() {
     fi
 
     AMI_ID="$(resolve_ami "$REGION")" || return 1
-    USER_DATA_FILE="$(render_user_data_file "$SCRIPT_DIR/user_data.sh" "$S3_BUCKET" "$NODE_ID" "$WANDB_KEY")"
+    USER_DATA_FILE="$(render_user_data_file "$SCRIPT_DIR/user_data.sh" "$S3_BUCKET" "$NODE_ID" "$WANDB_KEY" "$ORCH_RUN_ID")"
     NEW_ID=""
     ERR_FILE="$(mktemp)"
 

@@ -223,6 +223,7 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
+    grad_norms = AverageMeter()
     nan_count = 0
     optimizer.zero_grad(set_to_none=True)
 
@@ -256,9 +257,13 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
         if scaler is not None:
             scaler.scale(loss).backward()
             if should_step:
+                scaler.unscale_(optimizer)
                 if clip_grad is not None:
-                    scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                    gn = nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                else:
+                    gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9)  # just measure, don't clip
+                if math.isfinite(gn.item()):
+                    grad_norms.update(gn.item())
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
@@ -266,7 +271,11 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
             loss.backward()
             if should_step:
                 if clip_grad is not None:
-                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                    gn = nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                else:
+                    gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9)
+                if math.isfinite(gn.item()):
+                    grad_norms.update(gn.item())
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
@@ -283,7 +292,8 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
         top1.update(acc1.item(), inputs.size(0))
         top5.update(acc5.item(), inputs.size(0))
 
-    return OrderedDict(loss=losses.avg, top1=top1.avg, top5=top5.avg)
+    return OrderedDict(loss=losses.avg, top1=top1.avg, top5=top5.avg,
+                       grad_norm=grad_norms.avg)
 
 
 @torch.no_grad()
@@ -534,11 +544,25 @@ def main():
         if is_best:
             best_acc = val_metrics["top1"]
 
-        # Gamma stats
-        gamma_stats = {}
-        if args.activation in ("nelu", "nilu") and is_primary(rank):
+        # Diagnostics: gamma, gate entropy, weight norms, grad norm
+        diag = {}
+        if is_primary(rank):
             raw_model = model.module if hasattr(model, "module") else model
-            gamma_stats = collect_gamma_stats(raw_model)
+
+            # Gamma stats (nelu/nilu only)
+            if args.activation in ("nelu", "nilu"):
+                diag.update(collect_gamma_stats(raw_model))
+                # Gate entropy on a small probe batch
+                from train.gamma_logging import measure_gate_entropy
+                probe = next(iter(loader_val))[0][:64]
+                diag.update(measure_gate_entropy(raw_model, probe, device))
+
+            # Weight norms (all activations)
+            from train.gamma_logging import log_weight_norms
+            diag.update(log_weight_norms(raw_model))
+
+            # Grad norm
+            diag["train/grad_norm"] = train_metrics.get("grad_norm", 0.0)
 
         if is_primary(rank):
             print(f"Epoch {epoch:3d}/{args.epochs} | "
@@ -546,8 +570,12 @@ def main():
                   f"val loss {val_metrics['loss']:.4f} top1 {val_metrics['top1']:.2f} "
                   f"top5 {val_metrics['top5']:.2f} | "
                   f"best {best_acc:.2f} | {elapsed:.1f}s", end="")
-            if gamma_stats:
-                print(f" | gamma_mean {gamma_stats.get('nelu/gamma/mean', 0):.4f}", end="")
+            gamma_mean = diag.get("nelu/gamma/mean")
+            if gamma_mean is not None:
+                print(f" | γ={gamma_mean:.4f}", end="")
+            entropy_mean = diag.get("gate_entropy/mean")
+            if entropy_mean is not None:
+                print(f" | H̄={entropy_mean:.3f}", end="")
             print()
 
             if wandb_run:
@@ -561,7 +589,7 @@ def main():
                     "val/top5": val_metrics["top5"],
                     "lr": optimizer.param_groups[0]["lr"],
                 }
-                log_data.update(gamma_stats)
+                log_data.update(diag)
                 wandb.log(log_data)
 
             # Save checkpoint (includes wandb_id for run continuity across spot interruptions)

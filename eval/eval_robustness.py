@@ -69,20 +69,28 @@ CORRUPTIONS_C = [
 
 # ── Model loading ─────────────────────────────────────────────────
 
+def _infer_rms_mode(model_name):
+    """CNN (NCHW) models need last_3dims; ViT (channel-last) needs last_dim."""
+    if model_name.startswith(("efficientnet_", "convnext")):
+        return "last_3dims"
+    return "last_dim"
+
+
 def build_model(model_name, activation, num_classes=1000):
     """Create model with activation swap, load to GPU with DataParallel."""
     model = timm.create_model(model_name, pretrained=False, num_classes=num_classes)
+    rms_mode = _infer_rms_mode(model_name)
 
     if activation == "nelu":
-        n = replace_activation(model, nn.GELU, NELU)
+        n = replace_activation(model, nn.GELU, NELU, rms_mode=rms_mode)
         if n == 0:
-            n = replace_activation(model, nn.ReLU, NELU)
-        print(f"Replaced {n} modules with NELU")
+            n = replace_activation(model, nn.ReLU, NELU, rms_mode=rms_mode)
+        print(f"Replaced {n} modules with NELU (rms_mode={rms_mode})")
     elif activation == "nilu":
-        n = replace_activation(model, nn.SiLU, NiLU)
+        n = replace_activation(model, nn.SiLU, NiLU, rms_mode=rms_mode)
         if n == 0:
-            n = replace_activation(model, nn.ReLU, NiLU)
-        print(f"Replaced {n} modules with NiLU")
+            n = replace_activation(model, nn.ReLU, NiLU, rms_mode=rms_mode)
+        print(f"Replaced {n} modules with NiLU (rms_mode={rms_mode})")
 
     return model
 
