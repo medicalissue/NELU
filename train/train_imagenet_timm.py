@@ -541,7 +541,12 @@ def main():
         model = DDP(model, device_ids=[local_rank])
 
     # -- Data --
-    data_config = resolve_data_config(vars(args), model=model)
+    # timm's resolve_data_config asserts input_size is tuple/list; when the
+    # YAML gives a scalar (e.g. 224), hide it during resolve and then apply
+    # it ourselves to the resulting dict.
+    resolve_args = dict(vars(args))
+    resolve_args.pop("input_size", None)
+    data_config = resolve_data_config(resolve_args, model=model)
     if args.input_size:
         data_config["input_size"] = (3, args.input_size, args.input_size)
 
