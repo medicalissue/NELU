@@ -82,21 +82,31 @@ fi
 echo ""
 echo "── 1. Setting up /data volume ──"
 
-# Find the additional EBS volume (not the root)
-# Find the EBS data volume.  We attached it as /dev/sdf, but NVMe
-# instances rename it.  Strategy: find any block device that is NOT
-# the root device and NOT already mounted.
+# Find the additional EBS volume (not the root). On Nitro instance types,
+# local instance-store NVMe disks can appear before the attached EBS data
+# volume, so prefer EBS by-id paths and ignore LVM-backed instance store.
 DATA_DEV=""
-ROOT_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null || echo "")
-for dev in /dev/sdf /dev/xvdf /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1; do
-    [ -b "$dev" ] || continue
-    # Skip if this is the root device or a partition of it
+ROOT_DEV=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || echo "")
+declare -A seen_devs=()
+candidate_devs=()
+
+for dev in /dev/sdf /dev/xvdf /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol* /dev/nvme*n1; do
+    [ -e "$dev" ] || continue
+    resolved=$(readlink -f "$dev")
+    [ -b "$resolved" ] || continue
+    [ -n "${seen_devs[$resolved]:-}" ] && continue
+    seen_devs[$resolved]=1
+    candidate_devs+=("$resolved")
+done
+
+for dev in "${candidate_devs[@]}"; do
     devbase=$(basename "$dev")
     [ "$devbase" = "$ROOT_DEV" ] && continue
     [[ "$devbase" == "${ROOT_DEV}"* ]] && continue
-    # Skip if already mounted
     mountpoint -q "$dev" 2>/dev/null && continue
     findmnt -rn -S "$dev" >/dev/null 2>&1 && continue
+    fstype=$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -n1 || true)
+    [ "$fstype" = "LVM2_member" ] && continue
     DATA_DEV="$dev"
     break
 done

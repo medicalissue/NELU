@@ -17,25 +17,47 @@ echo "NELU training instance starting — Node ${NODE_ID}"
 echo "$(date -u)"
 
 # ── 1. Mount data volume (from EBS snapshot) ──
-# Find the non-root, unmounted block device (our EBS data volume).
+# Prefer explicit EBS identifiers; Nitro instance-store NVMe devices can
+# appear ahead of the attached data EBS volume and are not mountable here.
 DATA_DEV=""
-ROOT_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null || echo "")
-for dev in /dev/sdf /dev/xvdf /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1; do
-    [ -b "$dev" ] || continue
+ROOT_DEV=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || echo "")
+declare -A seen_devs=()
+candidate_devs=()
+
+for dev in /dev/sdf /dev/xvdf /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol* /dev/nvme*n1; do
+    [ -e "$dev" ] || continue
+    resolved=$(readlink -f "$dev")
+    [ -b "$resolved" ] || continue
+    [ -n "${seen_devs[$resolved]:-}" ] && continue
+    seen_devs[$resolved]=1
+    candidate_devs+=("$resolved")
+done
+
+mkdir -p /data
+for dev in "${candidate_devs[@]}"; do
     devbase=$(basename "$dev")
     [ "$devbase" = "$ROOT_DEV" ] && continue
     [[ "$devbase" == "${ROOT_DEV}"* ]] && continue
     findmnt -rn -S "$dev" >/dev/null 2>&1 && continue
-    DATA_DEV="$dev"
-    break
+    fstype=$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -n1 || true)
+    [ "$fstype" = "LVM2_member" ] && continue
+    case "$fstype" in
+        ext4|xfs)
+            if mount "$dev" /data 2>/dev/null; then
+                DATA_DEV="$dev"
+                break
+            fi
+            ;;
+    esac
 done
-if [ -n "$DATA_DEV" ]; then
-    mkdir -p /data
-    mount "$DATA_DEV" /data 2>/dev/null || true
-    echo "Mounted $DATA_DEV on /data"
-else
-    echo "WARNING: No data volume found"
+
+if [ -z "$DATA_DEV" ]; then
+    echo "ERROR: Failed to locate and mount the EBS data volume on /data"
+    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+    exit 1
 fi
+
+echo "Mounted $DATA_DEV on /data"
 
 # ── 2. Activate conda env ──
 source /data/env/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
