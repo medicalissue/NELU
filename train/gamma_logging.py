@@ -154,6 +154,8 @@ def measure_gate_entropy(model: nn.Module, probe_batch: torch.Tensor,
 
 def log_weight_norms(model: nn.Module) -> Dict[str, float]:
     """Per-layer weight Frobenius norms + summary stats."""
+    if hasattr(model, '_orig_mod'):
+        model = model._orig_mod
     norms = {}
     all_norms = []
     for name, param in model.named_parameters():
