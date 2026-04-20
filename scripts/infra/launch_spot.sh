@@ -56,7 +56,9 @@ REGION="${AWS_REGION:-us-west-2}"
 KEY_NAME="${KEY_NAME:-nelu-training}"
 SECURITY_GROUP="${SECURITY_GROUP:-sg-CHANGEME}"
 IAM_ROLE="${IAM_INSTANCE_PROFILE:-}"
-SUBNET_CANDIDATES="$(normalize_subnet_candidates || true)"
+SUBNET_AZ_PRIORITY="${SUBNET_AZ_PRIORITY:-us-west-2d us-west-2b us-west-2c us-west-2a}"
+SUBNET_CANDIDATES_RAW="$(normalize_subnet_candidates || true)"
+SUBNET_CANDIDATES="$(order_subnet_candidates_by_az "$REGION" "$SUBNET_AZ_PRIORITY" "$SUBNET_CANDIDATES_RAW")"
 
 # Validate required settings
 if [ "$SECURITY_GROUP" = "sg-CHANGEME" ] || [ -z "$SUBNET_CANDIDATES" ]; then
@@ -104,6 +106,7 @@ if [ $# -lt 2 ]; then
     echo "    SECURITY_GROUP         Security group ID (REQUIRED)"
     echo "    SUBNETS                Comma/space-separated subnet IDs to try (REQUIRED)"
     echo "    SUBNET                 Single subnet fallback (legacy)"
+    echo "    SUBNET_AZ_PRIORITY     Preferred AZ order (default: us-west-2d us-west-2b us-west-2c us-west-2a)"
     echo "    IAM_INSTANCE_PROFILE   ARN of instance profile with S3 access (REQUIRED)"
     echo "    INSTANCE_TYPE          EC2 instance type (default: p5.48xlarge)"
     echo "    SPOT_RETRY_INTERVAL    Seconds between full retry rounds (default: 60)"

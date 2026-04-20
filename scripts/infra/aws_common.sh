@@ -69,6 +69,48 @@ print(" ".join(ordered))
 PY
 }
 
+order_subnet_candidates_by_az() {
+    local region="$1"
+    local az_priority="${2:-}"
+    local subnet_candidates="${3:-}"
+    local subnet_json=""
+
+    if [ -z "$subnet_candidates" ] || [ -z "$az_priority" ]; then
+        printf '%s\n' "$subnet_candidates"
+        return 0
+    fi
+
+    subnet_json=$(aws ec2 describe-subnets \
+        --region "$region" \
+        --subnet-ids $subnet_candidates \
+        --query 'Subnets[].{Id:SubnetId,AZ:AvailabilityZone}' \
+        --output json 2>/dev/null) || {
+        printf '%s\n' "$subnet_candidates"
+        return 0
+    }
+
+    python - "$az_priority" "$subnet_candidates" "$subnet_json" <<'PY'
+import json
+import re
+import sys
+
+priority = [p for p in re.split(r"[\s,]+", sys.argv[1].strip()) if p]
+original = [p for p in sys.argv[2].split() if p]
+records = json.loads(sys.argv[3])
+az_by_id = {record["Id"]: record["AZ"] for record in records}
+priority_rank = {az: idx for idx, az in enumerate(priority)}
+
+ordered = sorted(
+    original,
+    key=lambda subnet: (
+        priority_rank.get(az_by_id.get(subnet, ""), len(priority)),
+        original.index(subnet),
+    ),
+)
+print(" ".join(ordered))
+PY
+}
+
 resolve_ami() {
     local region="$1"
     local ami_override="${AMI:-}"
