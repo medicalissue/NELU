@@ -384,25 +384,36 @@ def validate(model, loader, eval_loss_fn, device, amp_autocast, rank, world_size
     return OrderedDict(loss=losses.avg, top1=top1.avg, top5=top5.avg)
 
 
-def validate_imagenet_layout(dataset_train, dataset_val, num_classes):
-    train_classes = getattr(dataset_train, "classes", None)
-    val_classes = getattr(dataset_val, "classes", None)
+def validate_imagenet_layout(train_dir, val_dir, num_classes):
+    train_path = Path(train_dir)
+    val_path = Path(val_dir)
 
-    if train_classes is None or val_classes is None:
+    if not train_path.is_dir():
+        raise RuntimeError(f"ImageNet train directory not found: {train_path}")
+    if not val_path.is_dir():
+        raise RuntimeError(f"ImageNet val directory not found: {val_path}")
+
+    train_classes = sorted(p.name for p in train_path.iterdir() if p.is_dir())
+    val_classes = sorted(p.name for p in val_path.iterdir() if p.is_dir())
+    train_root_files = sorted(p.name for p in train_path.iterdir() if p.is_file())
+    val_root_files = sorted(p.name for p in val_path.iterdir() if p.is_file())
+
+    if train_root_files:
         raise RuntimeError(
-            "ImageNet datasets do not expose `classes`; cannot validate train/val layout."
+            f"ImageNet train directory contains unexpected root files. Sample: {train_root_files[:10]}"
         )
-
-    train_classes = list(train_classes)
-    val_classes = list(val_classes)
+    if val_root_files:
+        raise RuntimeError(
+            f"ImageNet val directory still contains root files. Sample: {val_root_files[:10]}"
+        )
 
     if len(train_classes) != num_classes:
         raise RuntimeError(
-            f"Train directory exposes {len(train_classes)} classes, expected {num_classes}."
+            f"Train directory exposes {len(train_classes)} class dirs, expected {num_classes}."
         )
     if len(val_classes) != num_classes:
         raise RuntimeError(
-            f"Validation directory exposes {len(val_classes)} classes, expected {num_classes}. "
+            f"Validation directory exposes {len(val_classes)} class dirs, expected {num_classes}. "
             "This usually means val/ is flat or misorganized."
         )
 
@@ -412,7 +423,7 @@ def validate_imagenet_layout(dataset_train, dataset_val, num_classes):
         only_train = sorted(train_set - val_set)[:10]
         only_val = sorted(val_set - train_set)[:10]
         raise RuntimeError(
-            "ImageNet train/val class mappings do not match.\n"
+            "ImageNet train/val class directory sets do not match.\n"
             f"  train-only sample: {only_train}\n"
             f"  val-only sample: {only_val}"
         )
@@ -510,10 +521,10 @@ def main():
 
     train_dir = os.path.join(args.data_dir, "train")
     val_dir = os.path.join(args.data_dir, "val")
+    validate_imagenet_layout(train_dir, val_dir, args.num_classes)
 
     dataset_train = create_dataset("", root=train_dir, is_training=True)
     dataset_val = create_dataset("", root=val_dir, is_training=False)
-    validate_imagenet_layout(dataset_train, dataset_val, args.num_classes)
 
     val_batch_size = args.val_batch_size or (args.batch_size * 2)
 
