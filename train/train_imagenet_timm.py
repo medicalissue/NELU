@@ -297,7 +297,7 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device, amp_autocast, rank, world_size):
+def validate(model, loader, eval_loss_fn, device, amp_autocast, rank, world_size):
     model.eval()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -307,7 +307,7 @@ def validate(model, loader, loss_fn, device, amp_autocast, rank, world_size):
         inputs, targets = inputs.to(device), targets.to(device)
         with amp_autocast:
             outputs = model(inputs)
-            loss = loss_fn(outputs, targets)
+            loss = eval_loss_fn(outputs, targets)
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
         if world_size > 1:
@@ -464,12 +464,13 @@ def main():
     # -- Loss --
     if mixup_active:
         from timm.loss import SoftTargetCrossEntropy
-        loss_fn = SoftTargetCrossEntropy().to(device)
+        train_loss_fn = SoftTargetCrossEntropy().to(device)
     elif args.smoothing > 0:
         from timm.loss import LabelSmoothingCrossEntropy
-        loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing).to(device)
+        train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing).to(device)
     else:
-        loss_fn = nn.CrossEntropyLoss().to(device)
+        train_loss_fn = nn.CrossEntropyLoss().to(device)
+    eval_loss_fn = nn.CrossEntropyLoss().to(device)
 
     # -- AMP --
     scaler = None
@@ -517,7 +518,7 @@ def main():
         t0 = time.time()
         try:
             train_metrics = train_one_epoch(
-                epoch, model, loader_train, optimizer, loss_fn, device,
+                epoch, model, loader_train, optimizer, train_loss_fn, device,
                 amp_autocast, scaler, model_ema, args.clip_grad, rank, world_size,
                 mixup_fn=mixup_fn, update_freq=args.update_freq,
             )
@@ -547,7 +548,7 @@ def main():
 
         # Evaluate (use EMA model if available)
         eval_model = model_ema.module if model_ema is not None else model
-        val_metrics = validate(eval_model, loader_val, loss_fn, device,
+        val_metrics = validate(eval_model, loader_val, eval_loss_fn, device,
                                amp_autocast, rank, world_size)
 
         scheduler.step(epoch + 1)
