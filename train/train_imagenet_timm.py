@@ -804,16 +804,17 @@ def main():
         if is_primary(rank):
             raw_model = model.module if hasattr(model, "module") else model
 
+            from train.gamma_logging import measure_gate_stats, log_weight_norms
+            probe = next(iter(loader_val))[0][:64]
+
             # Gamma stats (nelu/nilu only)
             if args.activation in ("nelu", "nilu"):
                 diag.update(collect_gamma_stats(raw_model))
-                # Gate entropy on a small probe batch
-                from train.gamma_logging import measure_gate_entropy
-                probe = next(iter(loader_val))[0][:64]
-                diag.update(measure_gate_entropy(raw_model, probe, device))
+
+            # Gate entropy + variance (all activations — key comparison metric)
+            diag.update(measure_gate_stats(raw_model, probe, device))
 
             # Weight norms (all activations)
-            from train.gamma_logging import log_weight_norms
             diag.update(log_weight_norms(raw_model))
 
             # Grad norm

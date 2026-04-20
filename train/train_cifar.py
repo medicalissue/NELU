@@ -658,13 +658,18 @@ def main():
         if is_best:
             best_acc = test_acc
 
-        # Gamma stats for gated activations
+        from train.gamma_logging import measure_gate_stats, log_weight_norms
+
+        # Gamma stats (nelu/nilu only)
         gamma_stats = {}
-        entropy_stats = {}
         if args.activation in ("nelu", "nilu"):
             gamma_stats = collect_gamma_stats(model)
-            from train.gamma_logging import measure_gate_entropy
-            entropy_stats = measure_gate_entropy(model, probe_batch, device)
+
+        # Gate entropy + variance (all activations)
+        gate_stats = measure_gate_stats(model, probe_batch, device)
+
+        # Weight norms (all activations)
+        weight_norm_stats = log_weight_norms(model)
 
         log_entry = {
             "epoch": epoch,
@@ -676,7 +681,8 @@ def main():
             "time": elapsed,
         }
         log_entry.update(gamma_stats)
-        log_entry.update(entropy_stats)
+        log_entry.update(gate_stats)
+        log_entry.update(weight_norm_stats)
         training_log.append(log_entry)
 
         print(f"Epoch {epoch:3d}/{args.epochs} | "
@@ -685,6 +691,9 @@ def main():
               f"{elapsed:.1f}s", end="")
         if gamma_stats:
             print(f" | gamma_mean {gamma_stats.get('nelu/gamma/mean', 0):.4f}", end="")
+        if gate_stats:
+            print(f" | H {gate_stats.get('gate_entropy/mean', 0):.3f}"
+                  f" S {gate_stats.get('gate_var/mean', 0):.4f}", end="")
         print()
 
         if wandb_run:
@@ -700,7 +709,8 @@ def main():
                 "lr": optimizer.param_groups[0]["lr"],
             }
             wandb_metrics.update(gamma_stats)
-            wandb_metrics.update(entropy_stats)
+            wandb_metrics.update(gate_stats)
+            wandb_metrics.update(weight_norm_stats)
             wandb.log(wandb_metrics)
 
         # Save checkpoints (includes wandb_id for run continuity across spot interruptions)
