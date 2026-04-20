@@ -63,6 +63,7 @@ DATA_VOL_SIZE="${SNAPSHOT_DATA_VOLUME_SIZE:-500}"
 INSTANCE_NAME="${SNAPSHOT_SETUP_NAME:-nelu-snapshot-setup}"
 SSM_WAIT_TIMEOUT="${SNAPSHOT_SSM_WAIT_TIMEOUT:-900}"
 SETUP_WAIT_TIMEOUT="${SNAPSHOT_SETUP_WAIT_TIMEOUT:-14400}"
+SNAPSHOT_WAIT_TIMEOUT="${SNAPSHOT_WAIT_TIMEOUT:-86400}"
 KEEP_ON_FAILURE="${SNAPSHOT_KEEP_ON_FAILURE:-1}"
 SSM_COMMAND_MAX_TIMEOUT=172800
 
@@ -80,6 +81,18 @@ esac
 
 if [ "$SETUP_WAIT_TIMEOUT" -le 0 ] || [ "$SETUP_WAIT_TIMEOUT" -gt "$SSM_COMMAND_MAX_TIMEOUT" ]; then
     echo "ERROR: SNAPSHOT_SETUP_WAIT_TIMEOUT must be between 1 and ${SSM_COMMAND_MAX_TIMEOUT} seconds" >&2
+    exit 1
+fi
+
+case "$SNAPSHOT_WAIT_TIMEOUT" in
+    ''|*[!0-9]*)
+        echo "ERROR: SNAPSHOT_WAIT_TIMEOUT must be a positive integer number of seconds" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$SNAPSHOT_WAIT_TIMEOUT" -le 0 ]; then
+    echo "ERROR: SNAPSHOT_WAIT_TIMEOUT must be greater than 0 seconds" >&2
     exit 1
 fi
 
@@ -161,6 +174,48 @@ dump_ssm_command_logs() {
         --instance-id "$instance_id" \
         --query 'StandardErrorContent' \
         --output text 2>/dev/null || true
+}
+
+wait_for_snapshot_completed() {
+    local snapshot_id="$1"
+    local timeout="$2"
+    local start_ts
+    local state
+    local progress
+
+    start_ts=$(date +%s)
+    while true; do
+        state=$(aws ec2 describe-snapshots \
+            --region "$REGION" \
+            --snapshot-ids "$snapshot_id" \
+            --query 'Snapshots[0].State' \
+            --output text 2>/dev/null || true)
+        progress=$(aws ec2 describe-snapshots \
+            --region "$REGION" \
+            --snapshot-ids "$snapshot_id" \
+            --query 'Snapshots[0].Progress' \
+            --output text 2>/dev/null || true)
+        case "$state" in
+            completed)
+                return 0
+                ;;
+            error)
+                echo "ERROR: snapshot $snapshot_id entered error state" >&2
+                return 1
+                ;;
+            pending|"")
+                echo "  Snapshot status: ${state:-unknown} ${progress:+($progress)}"
+                ;;
+            *)
+                echo "  Snapshot status: $state ${progress:+($progress)}"
+                ;;
+        esac
+        if [ $(( $(date +%s) - start_ts )) -ge "$timeout" ]; then
+            echo "ERROR: snapshot $snapshot_id did not complete within ${timeout}s" >&2
+            return 1
+        fi
+        sleep 30
+    done
 }
 
 AMI_ID="$(resolve_ami "$REGION")"
@@ -313,7 +368,11 @@ SNAP_ID=$(aws ec2 create-snapshot \
     --query 'SnapshotId' \
     --output text)
 
-aws ec2 wait --region "$REGION" snapshot-completed --snapshot-ids "$SNAP_ID"
+echo "Waiting for snapshot completion..."
+if ! wait_for_snapshot_completed "$SNAP_ID" "$SNAPSHOT_WAIT_TIMEOUT"; then
+    echo "Instance left running for inspection: $INSTANCE_ID" >&2
+    exit 1
+fi
 set_env_value "$TARGET_ENV_FILE" "DATA_SNAPSHOT" "$SNAP_ID"
 
 echo "Snapshot ready: $SNAP_ID"

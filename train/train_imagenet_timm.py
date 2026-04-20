@@ -355,14 +355,27 @@ def main():
         print(f"World size: {world_size}, rank: {rank}")
 
     # -- Model --
-    model = timm.create_model(
-        args.model,
-        pretrained=args.pretrained,
-        num_classes=args.num_classes,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        drop_connect_rate=args.drop_connect,
-    )
+    model_kwargs = {
+        "pretrained": args.pretrained,
+        "num_classes": args.num_classes,
+        "drop_rate": args.drop,
+        "drop_path_rate": args.drop_path,
+    }
+    if args.drop_connect > 0:
+        model_kwargs["drop_connect_rate"] = args.drop_connect
+
+    try:
+        model = timm.create_model(args.model, **model_kwargs)
+    except TypeError as exc:
+        if "drop_connect_rate" not in str(exc) or "drop_connect_rate" not in model_kwargs:
+            raise
+        if is_primary(rank):
+            print(
+                f"Model {args.model} does not accept drop_connect_rate; "
+                "retrying without it."
+            )
+        model_kwargs.pop("drop_connect_rate", None)
+        model = timm.create_model(args.model, **model_kwargs)
 
     # Apply activation swap
     n_swapped = apply_activation_swap(
