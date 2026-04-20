@@ -96,7 +96,7 @@ mkdir -p "$LOCAL"
 
 local_dir_populated() {
     local dir="$1"
-    [ -d "$dir" ] && find "$dir" -mindepth 1 -maxdepth 1 | read -r _
+    [ -d "$dir" ] && find "$dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
 }
 
 s3_prefix_exists() {

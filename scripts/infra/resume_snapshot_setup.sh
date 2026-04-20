@@ -222,22 +222,23 @@ cd /opt/nelu-snapshot-setup/repo
 bash scripts/download_data.sh /data
 """
 
-script_body = " && ".join([
+commands = [
+    "set -euo pipefail",
     f"mkdir -p {shlex.quote(workdir)}",
     f"aws s3 cp {shlex.quote(bundle_uri)} {shlex.quote(workdir + '/nelu-code.tar.gz')} --region {shlex.quote(region)}",
     f"rm -rf {shlex.quote(repo_dir)}",
     f"mkdir -p {shlex.quote(repo_dir)}",
     f"tar xzf {shlex.quote(workdir + '/nelu-code.tar.gz')} -C {shlex.quote(repo_dir)}",
+    "cat >/tmp/nelu-resume.sh <<'EOF'\n" + resume_script + "\nEOF",
+    "chmod +x /tmp/nelu-resume.sh",
     (
         "sudo env "
         f"AWS_REGION={shlex.quote(region)} "
         f"S3_BUCKET={shlex.quote(s3_bucket)} "
         f"DATA_SOURCE_S3={shlex.quote(data_source_s3)} "
-        f"bash -lc {shlex.quote(resume_script)}"
+        "bash /tmp/nelu-resume.sh"
     ),
-])
-
-commands = [f"bash -c 'set -euo pipefail; {script_body}'"]
+]
 
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump({
