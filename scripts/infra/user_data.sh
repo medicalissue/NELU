@@ -12,6 +12,8 @@ export WANDB_API_KEY="__WANDB_API_KEY__"
 ORCH_RUN_ID="__ORCH_RUN_ID__"
 INTERRUPTED_EXIT_CODE="${INTERRUPTED_EXIT_CODE:-90}"
 SPOT_INTERRUPT_MARKER="${SPOT_INTERRUPT_MARKER:-/tmp/nelu_spot_interrupted}"
+EXPECTED_GPUS="${EXPECTED_GPUS:-8}"
+MAX_HEALTH_ATTEMPTS="${MAX_HEALTH_ATTEMPTS:-3}"
 
 echo "NELU training instance starting — Node ${NODE_ID}"
 echo "$(date -u)"
@@ -117,11 +119,103 @@ export WANDB_INIT_TIMEOUT=600
 export WANDB_DISABLE_CODE=true
 export WANDB_HTTP_TIMEOUT=120
 
-# ── 6. Start spot interrupt handler ──
+# ── 6. Pre-flight GPU health check ──
+# p5 spot pool occasionally hands out hosts with a dead NVLink / defective
+# GPU (NCCL reports "P2P is disabled between NVLINK connected GPUs …
+# probably due to a hardware issue"). Detect before DDP init so we can
+# self-terminate and let the orchestrator grab a different host.
+#
+# We skip the FAILED marker so launch_spot.sh sees `terminated` without
+# FAILED and calls launch_node_instance for this slot. A counter at
+# s3://…/orchestrator/<run>/node<N>.health_attempts caps retries so a
+# truly-broken config doesn't loop forever.
+
+HEALTH_ATTEMPT_KEY="${S3_BUCKET}/orchestrator/${ORCH_RUN_ID}/node${NODE_ID}.health_attempts"
+
+check_gpu_health() {
+    local gpu_count
+    gpu_count=$(nvidia-smi -L 2>/dev/null | wc -l)
+    if [ "$gpu_count" -ne "$EXPECTED_GPUS" ]; then
+        echo "HEALTH: expected $EXPECTED_GPUS GPUs, found $gpu_count"
+        nvidia-smi -L || true
+        return 1
+    fi
+
+    # P2P matrix: legitimate rows start with "GPU<n>" and should contain
+    # only X / OK. "NS" anywhere means that GPU's P2P link is dead.
+    # grep -w avoids matching CNS/GNS/TNS legend tokens.
+    local p2p_out
+    p2p_out=$(nvidia-smi topo -p2p r 2>/dev/null || true)
+    if echo "$p2p_out" | grep -E '^[[:space:]]*GPU[0-9]+[[:space:]]' | grep -qw 'NS'; then
+        echo "HEALTH: P2P matrix has NS entries (broken NVLink/NVSwitch):"
+        echo "$p2p_out" | grep -E '^[[:space:]]*GPU[0-9]+[[:space:]]'
+        return 1
+    fi
+
+    # XID / NVRM errors in kernel log indicate driver-level GPU faults.
+    if sudo dmesg -T 2>/dev/null | grep -iE 'Xid|NVRM: .*error' | tail -n 5 | grep -q .; then
+        echo "HEALTH: XID / NVRM errors in dmesg:"
+        sudo dmesg -T | grep -iE 'Xid|NVRM: .*error' | tail -n 5
+        return 1
+    fi
+
+    echo "HEALTH: ok (${gpu_count} GPUs, P2P clean, no XID)"
+    return 0
+}
+
+HEALTH_COUNT=0
+if aws s3 cp "$HEALTH_ATTEMPT_KEY" /tmp/health_attempts --quiet 2>/dev/null; then
+    HEALTH_COUNT=$(tr -d '\n' </tmp/health_attempts)
+fi
+HEALTH_COUNT=${HEALTH_COUNT:-0}
+
+set +e
+check_gpu_health
+HEALTH_RC=$?
+set -e
+
+if [ $HEALTH_RC -ne 0 ]; then
+    HEALTH_COUNT=$((HEALTH_COUNT + 1))
+    echo "HEALTH: failure #${HEALTH_COUNT}/${MAX_HEALTH_ATTEMPTS}"
+
+    INST_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+    if [ -n "$INST_ID" ]; then
+        aws ec2 create-tags --resources "$INST_ID" \
+            --tags "Key=Health,Value=bad_hardware" 2>/dev/null || true
+    fi
+
+    if [ "$HEALTH_COUNT" -ge "$MAX_HEALTH_ATTEMPTS" ]; then
+        echo "HEALTH: max retries exhausted — writing FAILED marker"
+        FAIL_FILE="/tmp/node${NODE_ID}.failed.txt"
+        {
+            echo "node_id=${NODE_ID}"
+            echo "run_id=${ORCH_RUN_ID}"
+            echo "exit_code=bad_hardware"
+            echo "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "instance_id=${INST_ID}"
+            echo "health_attempts=${HEALTH_COUNT}"
+        } > "$FAIL_FILE"
+        aws s3 cp "$FAIL_FILE" \
+            "${S3_BUCKET}/orchestrator/${ORCH_RUN_ID}/node${NODE_ID}.FAILED" \
+            --quiet 2>/dev/null || true
+    else
+        printf '%s' "$HEALTH_COUNT" > /tmp/health_attempts
+        aws s3 cp /tmp/health_attempts "$HEALTH_ATTEMPT_KEY" --quiet 2>/dev/null || true
+        echo "HEALTH: self-terminating; orchestrator will relaunch this slot on a different host"
+    fi
+
+    sudo shutdown -h now
+    exit 0
+fi
+
+# Healthy: drop any stale attempt counter from prior launches.
+aws s3 rm "$HEALTH_ATTEMPT_KEY" --quiet 2>/dev/null || true
+
+# ── 7. Start spot interrupt handler ──
 bash "${WORKSPACE}/scripts/infra/spot_interrupt_handler.sh" &
 echo "Spot handler PID: $!"
 
-# ── 7. Start training ──
+# ── 8. Start training ──
 echo "Starting training — Node ${NODE_ID}"
 cd "$WORKSPACE"
 set +e
@@ -156,6 +250,6 @@ if [ $RUN_ALL_EXIT -ne 0 ]; then
     exit $RUN_ALL_EXIT
 fi
 
-# ── 8. Shutdown ──
+# ── 9. Shutdown ──
 echo "All jobs complete. Shutting down."
 sudo shutdown -h now
