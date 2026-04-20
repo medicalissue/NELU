@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -169,6 +170,52 @@ def is_primary(rank):
     return rank == 0
 
 
+class TrainingInterrupted(Exception):
+    """Raised when a spot interruption or SIGTERM requests a graceful stop."""
+    pass
+
+
+_INTERRUPTION_REQUESTED = False
+
+
+def _request_interruption(signum, _frame):
+    global _INTERRUPTION_REQUESTED
+    _INTERRUPTION_REQUESTED = True
+    print(f"\n[signal] Received signal {signum}; will stop after the current step.", flush=True)
+
+
+def interruption_requested():
+    return _INTERRUPTION_REQUESTED
+
+
+def save_checkpoint(state, output_dir, interrupted=False):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_path / "checkpoint.pt"
+    torch.save(state, checkpoint_path)
+    if interrupted:
+        (output_path / "INTERRUPTED").touch()
+
+
+def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id,
+                           model_ema=None, scaler=None, epoch=0):
+    raw_model = model.module if hasattr(model, "module") else model
+    state = {
+        "epoch": epoch,
+        "model": raw_model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "best_acc": best_acc,
+        "args": vars(args),
+        "wandb_id": wandb_id,
+    }
+    if model_ema is not None:
+        state["model_ema"] = model_ema.state_dict()
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
+    return state
+
+
 def init_wandb_run(args, rank, saved_wandb_id=None):
     if not args.wandb or not is_primary(rank):
         return None, saved_wandb_id
@@ -228,6 +275,10 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
     optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, (inputs, targets) in enumerate(loader):
+        if interruption_requested():
+            raise TrainingInterrupted(
+                f"Interruption requested at epoch {epoch}, step {batch_idx}."
+            )
         inputs, targets = inputs.to(device), targets.to(device)
         metric_targets = targets
 
@@ -292,6 +343,11 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, device, amp_autoca
         top1.update(acc1.item(), inputs.size(0))
         top5.update(acc5.item(), inputs.size(0))
 
+        if interruption_requested():
+            raise TrainingInterrupted(
+                f"Interruption requested at epoch {epoch}, step {batch_idx}."
+            )
+
     return OrderedDict(loss=losses.avg, top1=top1.avg, top5=top5.avg,
                        grad_norm=grad_norms.avg)
 
@@ -303,7 +359,11 @@ def validate(model, loader, eval_loss_fn, device, amp_autocast, rank, world_size
     top1 = AverageMeter()
     top5 = AverageMeter()
 
-    for inputs, targets in loader:
+    for batch_idx, (inputs, targets) in enumerate(loader):
+        if interruption_requested():
+            raise TrainingInterrupted(
+                f"Interruption requested during validation at step {batch_idx}."
+            )
         inputs, targets = inputs.to(device), targets.to(device)
         with amp_autocast:
             outputs = model(inputs)
@@ -328,6 +388,8 @@ def validate(model, loader, eval_loss_fn, device, amp_autocast, rank, world_size
 
 def main():
     args = parse_args()
+    signal.signal(signal.SIGTERM, _request_interruption)
+    signal.signal(signal.SIGINT, _request_interruption)
 
     # Load YAML config if provided
     if args.config and os.path.exists(args.config):
@@ -511,6 +573,7 @@ def main():
         print(f"\nStarting training from epoch {start_epoch} to {args.epochs}")
 
     diverged = False
+    interrupted = False
     for epoch in range(start_epoch, args.epochs):
         if world_size > 1 and hasattr(loader_train, "sampler"):
             loader_train.sampler.set_epoch(epoch)
@@ -545,11 +608,62 @@ def main():
                     wandb.finish()
             diverged = True
             break
+        except TrainingInterrupted as e:
+            interrupted = True
+            if is_primary(rank):
+                print(f"\n{'='*60}")
+                print(f"  TRAINING INTERRUPTED: {e}")
+                print("  Saving checkpoint for automatic spot resume.")
+                print(f"{'='*60}")
+                interrupted_state = build_checkpoint_state(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    best_acc=best_acc,
+                    args=args,
+                    wandb_id=wandb_id,
+                    model_ema=model_ema,
+                    scaler=scaler,
+                    epoch=epoch - 1,
+                )
+                interrupted_state["interrupted_at_epoch"] = epoch
+                save_checkpoint(interrupted_state, args.output, interrupted=True)
+                if wandb_run:
+                    import wandb
+                    wandb.log({"epoch": epoch, "interrupted": True, "interrupted_epoch": epoch})
+                    wandb.finish()
+            break
 
         # Evaluate (use EMA model if available)
         eval_model = model_ema.module if model_ema is not None else model
-        val_metrics = validate(eval_model, loader_val, eval_loss_fn, device,
-                               amp_autocast, rank, world_size)
+        try:
+            val_metrics = validate(eval_model, loader_val, eval_loss_fn, device,
+                                   amp_autocast, rank, world_size)
+        except TrainingInterrupted as e:
+            interrupted = True
+            if is_primary(rank):
+                print(f"\n{'='*60}")
+                print(f"  TRAINING INTERRUPTED: {e}")
+                print("  Saving checkpoint for automatic spot resume.")
+                print(f"{'='*60}")
+                interrupted_state = build_checkpoint_state(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    best_acc=best_acc,
+                    args=args,
+                    wandb_id=wandb_id,
+                    model_ema=model_ema,
+                    scaler=scaler,
+                    epoch=epoch - 1,
+                )
+                interrupted_state["interrupted_at_epoch"] = epoch
+                save_checkpoint(interrupted_state, args.output, interrupted=True)
+                if wandb_run:
+                    import wandb
+                    wandb.log({"epoch": epoch, "interrupted": True, "interrupted_epoch": epoch})
+                    wandb.finish()
+            break
 
         scheduler.step(epoch + 1)
         elapsed = time.time() - t0
@@ -607,26 +721,27 @@ def main():
                 wandb.log(log_data)
 
             # Save checkpoint (includes wandb_id for run continuity across spot interruptions)
-            raw_model = model.module if hasattr(model, "module") else model
-            state = {
-                "epoch": epoch,
-                "model": raw_model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "best_acc": best_acc,
-                "args": vars(args),
-                "wandb_id": wandb_id,
-            }
-            if model_ema is not None:
-                state["model_ema"] = model_ema.state_dict()
-            if scaler is not None:
-                state["scaler"] = scaler.state_dict()
-
-            torch.save(state, os.path.join(args.output, "checkpoint.pt"))
+            state = build_checkpoint_state(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                best_acc=best_acc,
+                args=args,
+                wandb_id=wandb_id,
+                model_ema=model_ema,
+                scaler=scaler,
+                epoch=epoch,
+            )
+            save_checkpoint(state, args.output)
             if is_best:
                 torch.save(state, os.path.join(args.output, "checkpoint-best.pt"))
 
     # Final summary
+    if interrupted:
+        if is_primary(rank):
+            print("\nTraining interrupted cleanly. Resume checkpoint saved.")
+        return
+
     if is_primary(rank):
         print(f"\nTraining complete. Best top-1: {best_acc:.2f}%")
         result = {

@@ -32,6 +32,8 @@ export WANDB_HTTP_TIMEOUT=120
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 SHUTDOWN_WHEN_DONE="${SHUTDOWN_WHEN_DONE:-true}"
+INTERRUPTED_EXIT_CODE="${INTERRUPTED_EXIT_CODE:-90}"
+SPOT_INTERRUPT_MARKER="${SPOT_INTERRUPT_MARKER:-/tmp/nelu_spot_interrupted}"
 
 # ── GPU slot pool for single-GPU jobs ──────────────────────────
 # Runs up to NUM_GPUS single-GPU jobs in parallel using a FIFO semaphore.
@@ -102,7 +104,11 @@ slot_drain() {
         fi
 
         if [ "$status_rc" -ne 0 ]; then
-            FAILED=$((FAILED + 1))
+            if [ "$status_rc" -eq "$INTERRUPTED_EXIT_CODE" ] || [ -f "$SPOT_INTERRUPT_MARKER" ]; then
+                INTERRUPTED=1
+            else
+                FAILED=$((FAILED + 1))
+            fi
         fi
     done
     SLOT_PIDS=()
@@ -149,6 +155,7 @@ echo ""
 
 mkdir -p logs
 slot_init
+rm -f "$SPOT_INTERRUPT_MARKER"
 
 # ── Background S3 sync — upload checkpoints every 10 minutes ──
 # This ensures that if spot interruption handler fails or checkpoint
@@ -173,6 +180,7 @@ trap "[ -n \"$SYNC_PID\" ] && kill $SYNC_PID 2>/dev/null; slot_cleanup" EXIT
 JOB_NUM=0
 FAILED=0
 SKIPPED=0
+INTERRUPTED=0
 
 while IFS= read -r line; do
     # Skip comments and blank lines
@@ -215,10 +223,19 @@ while IFS= read -r line; do
     else
         # Multi-GPU job (imagenet, ablation) — drain single-GPU jobs first
         slot_drain
+        if [ "$INTERRUPTED" -eq 1 ]; then
+            echo "  Spot interruption detected while draining queued jobs. Exiting for replacement."
+            exit "$INTERRUPTED_EXIT_CODE"
+        fi
         if bash "${REPO_ROOT}/scripts/run_single.sh" "$PHASE" "$MODEL" "$ACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; then
             echo "  Job $JOB_NUM complete."
         else
-            echo "  Job $JOB_NUM FAILED (exit code $?)."
+            rc=$?
+            if [ "$rc" -eq "$INTERRUPTED_EXIT_CODE" ] || [ -f "$SPOT_INTERRUPT_MARKER" ]; then
+                echo "  Spot interruption detected. Exiting for replacement."
+                exit "$INTERRUPTED_EXIT_CODE"
+            fi
+            echo "  Job $JOB_NUM FAILED (exit code $rc)."
             FAILED=$((FAILED + 1))
         fi
     fi
@@ -227,6 +244,11 @@ done < "$JOB_FILE"
 
 # Drain any remaining single-GPU jobs
 slot_drain
+if [ "$INTERRUPTED" -eq 1 ]; then
+    echo ""
+    echo "Spot interruption detected. Exiting for replacement."
+    exit "$INTERRUPTED_EXIT_CODE"
+fi
 
 # ── Summary ─────────────────────────────────────────────────────
 

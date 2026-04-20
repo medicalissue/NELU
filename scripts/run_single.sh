@@ -28,6 +28,7 @@ RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/results}"
 # UPSTREAM_DIR no longer needed — all models train via train_imagenet_timm.py
 ENABLE_WANDB="${ENABLE_WANDB:-1}"  # set to 0 to disable wandb
 NELU_ENV_BIN="${NELU_ENV_BIN:-/data/env/nelu/bin}"
+INTERRUPTED_EXIT_CODE="${INTERRUPTED_EXIT_CODE:-90}"
 
 resolve_executable() {
     local candidate
@@ -104,6 +105,7 @@ fi
 
 OUTPUT_DIR="${RESULTS_DIR}/${RUN_NAME}"
 S3_OUTPUT="${S3_BUCKET}/results/${RUN_NAME}"
+INTERRUPTED_MARKER="${OUTPUT_DIR}/INTERRUPTED"
 
 echo "==================================================================="
 echo "  NELU Experiment Runner"
@@ -137,6 +139,7 @@ fi
 # -- Resume from S3 if checkpoint exists -----------------------------
 
 mkdir -p "$OUTPUT_DIR"
+rm -f "$INTERRUPTED_MARKER"
 RESUME_ARGS=()
 WANDB_ARGS=()
 
@@ -308,6 +311,12 @@ set +e
 "${TRAIN_CMD[@]}" 2>&1 | tee "${OUTPUT_DIR}/train.log"
 TRAIN_EXIT=${PIPESTATUS[0]}
 set -e
+
+if [ -f "$INTERRUPTED_MARKER" ]; then
+    echo "Training interrupted for spot replacement. Syncing partial state to S3..."
+    aws s3 sync "$OUTPUT_DIR" "$S3_OUTPUT" --quiet 2>/dev/null || true
+    exit "$INTERRUPTED_EXIT_CODE"
+fi
 
 if [ $TRAIN_EXIT -ne 0 ]; then
     echo "Training exited with code $TRAIN_EXIT"

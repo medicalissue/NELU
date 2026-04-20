@@ -22,6 +22,8 @@ LOG_FILE="/var/log/spot-handler.log"
 S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 RESULTS_DIR="${RESULTS_DIR:-/data/results}"
 LOG_DIR="${LOG_DIR:-/data/logs}"
+SPOT_INTERRUPT_MARKER="${SPOT_INTERRUPT_MARKER:-/tmp/nelu_spot_interrupted}"
+SPOT_SYNC_GRACE_PERIOD="${SPOT_SYNC_GRACE_PERIOD:-60}"
 
 log() {
     echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -54,10 +56,13 @@ while true; do
     if [ "$HTTP_CODE" = "200" ]; then
         ACTION=$(cat /tmp/spot-action.json)
         log "SPOT INTERRUPTION DETECTED: $ACTION"
+        touch "$SPOT_INTERRUPT_MARKER"
 
         # Find and signal the training process.
-        # We rely on epoch checkpoints plus an emergency sync here.
-        TRAIN_PIDS=$(pgrep -f "torchrun\|train/train_imagenet_timm.py\|train/train_cifar.py\|scripts/run_all.sh\|scripts/run_single.sh" 2>/dev/null || echo "")
+        # The training scripts handle SIGTERM by saving a resume checkpoint
+        # and writing an INTERRUPTED marker. We deliberately avoid killing
+        # run_all.sh so the node is not marked as FAILED.
+        TRAIN_PIDS=$(pgrep -f "torchrun\|train/train_imagenet_timm.py\|train/train_cifar.py" 2>/dev/null || echo "")
 
         if [ -n "$TRAIN_PIDS" ]; then
             log "Sending SIGTERM to training processes: $TRAIN_PIDS"
@@ -68,8 +73,8 @@ while true; do
             log "No training processes found."
         fi
 
-        log "Waiting 30 seconds before emergency sync..."
-        sleep 30
+        log "Waiting ${SPOT_SYNC_GRACE_PERIOD}s before emergency sync..."
+        sleep "$SPOT_SYNC_GRACE_PERIOD"
 
         log "Emergency S3 sync..."
         [ -d "$RESULTS_DIR" ] && aws s3 sync "$RESULTS_DIR/" "${S3_BUCKET}/results/" --quiet 2>/dev/null || true

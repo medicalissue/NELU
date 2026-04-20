@@ -10,6 +10,8 @@ S3_BUCKET="__S3_BUCKET__"
 NODE_ID="__NODE_ID__"
 export WANDB_API_KEY="__WANDB_API_KEY__"
 ORCH_RUN_ID="__ORCH_RUN_ID__"
+INTERRUPTED_EXIT_CODE="${INTERRUPTED_EXIT_CODE:-90}"
+SPOT_INTERRUPT_MARKER="${SPOT_INTERRUPT_MARKER:-/tmp/nelu_spot_interrupted}"
 
 echo "NELU training instance starting — Node ${NODE_ID}"
 echo "$(date -u)"
@@ -112,6 +114,10 @@ aws s3 cp "/data/logs/train_node${NODE_ID}.log" \
 
 if [ $RUN_ALL_EXIT -ne 0 ]; then
     echo "run_all.sh exited with code $RUN_ALL_EXIT"
+    if [ "$RUN_ALL_EXIT" -eq "$INTERRUPTED_EXIT_CODE" ] || [ -f "$SPOT_INTERRUPT_MARKER" ]; then
+        echo "Spot interruption detected — skipping FAILED marker so the orchestrator can relaunch."
+        exit 0
+    fi
     if [ -n "${ORCH_RUN_ID:-}" ]; then
         FAIL_FILE="/data/logs/node${NODE_ID}.failed.txt"
         {

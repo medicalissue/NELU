@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import signal
 import time
 from pathlib import Path
 
@@ -342,13 +343,57 @@ def get_dataloaders(data_dir, batch_size, num_workers=4):
 #  Training loop
 # ---------------------------------------------------------------------------
 
+class TrainingInterrupted(Exception):
+    """Raised when SIGTERM/SIGINT requests a graceful stop."""
+    pass
+
+
+_INTERRUPTION_REQUESTED = False
+
+
+def _request_interruption(signum, _frame):
+    global _INTERRUPTION_REQUESTED
+    _INTERRUPTION_REQUESTED = True
+    print(f"\n[signal] Received signal {signum}; will stop after the current step.", flush=True)
+
+
+def interruption_requested():
+    return _INTERRUPTION_REQUESTED
+
+
+def save_checkpoint(state, output_dir, interrupted=False):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_path / "checkpoint.pt"
+    torch.save(state, checkpoint_path)
+    if interrupted:
+        (output_path / "INTERRUPTED").touch()
+
+
+def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id,
+                           training_log, epoch):
+    return {
+        "epoch": epoch,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "best_acc": best_acc,
+        "args": vars(args),
+        "training_log": training_log,
+        "wandb_id": wandb_id,
+    }
+
 def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
                     scaler=None, use_amp=False):
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
-    for inputs, targets in loader:
+    for batch_idx, (inputs, targets) in enumerate(loader):
+        if interruption_requested():
+            raise TrainingInterrupted(
+                f"Interruption requested at epoch {epoch}, step {batch_idx}."
+            )
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         with torch.amp.autocast("cuda", enabled=use_amp):
@@ -365,6 +410,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
         _, predicted = outputs.max(1)
         correct += predicted.eq(targets).sum().item()
         total += inputs.size(0)
+        if interruption_requested():
+            raise TrainingInterrupted(
+                f"Interruption requested at epoch {epoch}, step {batch_idx}."
+            )
     scheduler.step()
     return total_loss / total, 100.0 * correct / total
 
@@ -375,7 +424,11 @@ def evaluate(model, loader, device, use_amp=False):
     total_loss = 0.0
     correct = 0
     total = 0
-    for inputs, targets in loader:
+    for batch_idx, (inputs, targets) in enumerate(loader):
+        if interruption_requested():
+            raise TrainingInterrupted(
+                f"Interruption requested during evaluation at step {batch_idx}."
+            )
         inputs, targets = inputs.to(device), targets.to(device)
         with torch.amp.autocast("cuda", enabled=use_amp):
             outputs = model(inputs)
@@ -456,6 +509,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    signal.signal(signal.SIGTERM, _request_interruption)
+    signal.signal(signal.SIGINT, _request_interruption)
 
     # Load YAML config if provided (overrides CLI defaults)
     if args.config and os.path.exists(args.config):
@@ -533,12 +588,37 @@ def main():
     probe_batch = next(iter(test_loader))[0][:32].to(device)
 
     # Training
+    interrupted = False
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer,
-                                                 scheduler, device, epoch,
-                                                 scaler=scaler, use_amp=args.amp)
-        test_loss, test_acc = evaluate(model, test_loader, device, use_amp=args.amp)
+        try:
+            train_loss, train_acc = train_one_epoch(model, train_loader, optimizer,
+                                                     scheduler, device, epoch,
+                                                     scaler=scaler, use_amp=args.amp)
+            test_loss, test_acc = evaluate(model, test_loader, device, use_amp=args.amp)
+        except TrainingInterrupted as e:
+            interrupted = True
+            print(f"\n{'='*60}")
+            print(f"  TRAINING INTERRUPTED: {e}")
+            print("  Saving checkpoint for automatic spot resume.")
+            print(f"{'='*60}")
+            interrupted_state = build_checkpoint_state(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                best_acc=best_acc,
+                args=args,
+                wandb_id=wandb_id,
+                training_log=training_log,
+                epoch=epoch - 1,
+            )
+            interrupted_state["interrupted_at_epoch"] = epoch
+            save_checkpoint(interrupted_state, args.output_dir, interrupted=True)
+            if wandb_run:
+                import wandb
+                wandb.log({"epoch": epoch, "interrupted": True, "interrupted_epoch": epoch})
+                wandb.finish()
+            break
         elapsed = time.time() - t0
 
         is_best = test_acc > best_acc
@@ -579,19 +659,23 @@ def main():
             wandb.log(log_entry)
 
         # Save checkpoints (includes wandb_id for run continuity across spot interruptions)
-        state = {
-            "epoch": epoch,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "best_acc": best_acc,
-            "args": vars(args),
-            "training_log": training_log,
-            "wandb_id": wandb_id,
-        }
-        torch.save(state, os.path.join(args.output_dir, "checkpoint.pt"))
+        state = build_checkpoint_state(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            best_acc=best_acc,
+            args=args,
+            wandb_id=wandb_id,
+            training_log=training_log,
+            epoch=epoch,
+        )
+        save_checkpoint(state, args.output_dir)
         if is_best:
             torch.save(state, os.path.join(args.output_dir, "checkpoint-best.pt"))
+
+    if interrupted:
+        print("\nTraining interrupted cleanly. Resume checkpoint saved.")
+        return
 
     # Save final result.json
     result = {
