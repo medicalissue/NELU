@@ -19,12 +19,29 @@ Provides three complementary views into how NELU/NiLU layers evolve:
 """
 
 import math
-from typing import Dict
+from typing import Dict, Tuple, Type
 
 import torch
 import torch.nn as nn
 
 from nelu.activations import NELU, NiLU, _GatedBase, collect_gamma_stats
+
+# timm ships its own GELU/SiLU subclasses that don't inherit from nn.GELU/nn.SiLU.
+# Collect all known GELU-like and SiLU-like classes so isinstance works regardless.
+_GELU_CLASSES: Tuple[Type, ...] = (nn.GELU,)
+_SILU_CLASSES: Tuple[Type, ...] = (nn.SiLU,)
+try:
+    import timm.layers.activations as _timm_act  # type: ignore[import-untyped]
+    for _name in ('GELU', 'FastGELU', 'QuickGELU', 'ApproxGELU'):
+        _cls = getattr(_timm_act, _name, None)
+        if _cls is not None and _cls not in _GELU_CLASSES:
+            _GELU_CLASSES = _GELU_CLASSES + (_cls,)
+    for _name in ('SiLU', 'Swish', 'HardSwish'):
+        _cls = getattr(_timm_act, _name, None)
+        if _cls is not None and _cls not in _SILU_CLASSES:
+            _SILU_CLASSES = _SILU_CLASSES + (_cls,)
+except ImportError:
+    pass
 
 
 def log_gamma_stats(model: nn.Module) -> Dict[str, float]:
@@ -50,6 +67,11 @@ def measure_gate_stats(model: nn.Module, probe_batch: torch.Tensor,
         gate_entropy/layer_{i}, gate_entropy/mean, min, max
         gate_var/layer_{i},     gate_var/mean,     min, max
     """
+    # torch.compile wraps the model in OptimizedModule whose compiled forward
+    # bypasses Python hooks entirely — unwrap to the original nn.Module.
+    if hasattr(model, '_orig_mod'):
+        model = model._orig_mod
+
     probe_batch = probe_batch.to(device)
     stats: Dict[str, float] = {}
     hooks = []
