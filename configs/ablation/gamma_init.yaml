@@ -44,6 +44,7 @@ aa: rand-m9-mstd0.5-inc1
 color_jitter: 0.4
 smoothing: 0.1
 mixup: 0.8
+mixup_prob: 1.0              # apply mixup/cutmix to every batch (matches ConvNeXt main recipe)
 cutmix: 1.0
 reprob: 0.25
 remode: pixel

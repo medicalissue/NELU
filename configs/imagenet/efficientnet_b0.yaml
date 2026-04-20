@@ -37,6 +37,7 @@ aa: original                 # AutoAugment (paper-original policy)
 color_jitter: 0.0
 smoothing: 0.1
 mixup: 0.0
+mixup_prob: 1.0              # (unused when mixup=cutmix=0; kept for yaml uniformity)
 cutmix: 0.0
 reprob: 0.2
 remode: pixel

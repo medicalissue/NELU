@@ -122,8 +122,10 @@ def parse_args():
     p.add_argument("--reprob", type=float, default=0.0, help="Random erasing prob")
     p.add_argument("--color-jitter", type=float, default=0.0)
     p.add_argument("--smoothing", type=float, default=0.1, help="Label smoothing")
-    p.add_argument("--mixup", type=float, default=0.0)
-    p.add_argument("--cutmix", type=float, default=0.0)
+    p.add_argument("--mixup", type=float, default=0.0, help="Mixup alpha (0 disables)")
+    p.add_argument("--cutmix", type=float, default=0.0, help="CutMix alpha (0 disables)")
+    p.add_argument("--mixup-prob", type=float, default=1.0,
+                   help="Probability of applying Mixup/CutMix per batch (AugReg: 0.5)")
     p.add_argument("--aug-repeats", type=int, default=0,
                    help="Repeated Augmentation count (DeiT/ConvNeXt use 3; 0 disables)")
 
@@ -586,6 +588,7 @@ def main():
         mixup_fn = Mixup(
             mixup_alpha=args.mixup,
             cutmix_alpha=args.cutmix,
+            prob=args.mixup_prob,
             label_smoothing=args.smoothing,
             num_classes=args.num_classes,
         )

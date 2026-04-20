@@ -1,49 +1,58 @@
-# ViT-Large/16 on ImageNet-1k — DeiT recipe adapted for L/16
-# Reference: Touvron et al., 2021 (DeiT-B recipe, scaled up for 24 layers)
-# drop_path raised from 0.1 → 0.4 to offset deeper stack
-# Training time: ~90h on 8xH100 per activation
+# ViT-Large/16 on ImageNet-1k — AugReg recipe ("medium2")
+# Reference: Steiner et al., 2021 (arXiv:2106.10270)
+#            + google-research/big_vision/configs/vit_i1k.py
+# Expected: from-scratch IN-1k at 300ep is hard for ViT-L; AugReg (medium2)
+# is the most stable published recipe. Paper reports L/16 at 224 benefits
+# from the same regularization as B/16 but underperforms B/16 without
+# upstream pretraining (21k/JFT). Used here for stable GELU/NELU baselines,
+# not absolute SOTA.
+#
+# Paper uses identical hyperparameters to B/16 for the "medium2" recipe;
+# this config is intentionally a drop-in twin of vit_b16.yaml except for
+# `model`. See vit_b16.yaml for deviation notes.
 
 # ── Model ───────────────────────────────────────────────────────
 model: vit_large_patch16_224
 pretrained: false
 num_classes: 1000
-drop: 0.0
-drop_path: 0.4               # scaled up from DeiT-B 0.1 for 24-layer model
+drop: 0.1                       # paper §3.3: 0 or 0.1 sweep; 0.1 selected
+drop_path: 0.1                  # paired with drop (0 or 0.1)
 
 # ── Data ────────────────────────────────────────────────────────
 data_path: /data/imagenet
 input_size: 224
-batch_size: 128              # per GPU; 128 * 8 GPUs * update_freq=1 = 1024
-val_batch_size: 256
+batch_size: 256                 # per GPU; 256 × 8 GPUs × update_freq=2 = 4096
+val_batch_size: 512
 workers: 10
 
-# ── Optimizer ───────────────────────────────────────────────────
+# ── Optimizer (paper: Adam + decoupled wd ≡ AdamW) ──────────────
 opt: adamw
 opt_eps: 1.0e-8
-lr: 1.0e-3                   # 5e-4 × (1024/512) linear scaling from DeiT-B base
-weight_decay: 0.05
+lr: 1.0e-3                      # peak, paired with effective batch 4096
+weight_decay: 1.0e-4            # paper §3.3: "0.1 × LR", decoupled
 
 # ── Scheduler ───────────────────────────────────────────────────
 sched: cosine
 epochs: 300
-warmup_epochs: 5
+warmup_epochs: 32               # 10,000 steps @ batch 4096 ≈ 32 epochs
 warmup_lr: 1.0e-6
-min_lr: 1.0e-5
+min_lr: 0.0                     # paper: cosine decay → 0
 
 # ── Augmentation / regularization ───────────────────────────────
-aa: rand-m9-mstd0.5-inc1
-color_jitter: 0.3
-smoothing: 0.1
-mixup: 0.8
-cutmix: 1.0
-reprob: 0.25
-remode: pixel
-repeated_aug: true           # → aug_repeats=3 (RepeatedAug sampler)
+aa: rand-m15-n2-mstd0.5         # paper "medium2": N=2, M=15
+color_jitter: 0.0               # not used (inception crop + flip only)
+smoothing: 0.0                  # paper uses sigmoid x-ent, no label smoothing
+mixup: 0.5                      # paper "medium2" Mixup α=0.5
+mixup_prob: 0.5                 # paper "medium2" Mixup p=0.5
+cutmix: 0.0                     # not used
+reprob: 0.0                     # not used
+remode: pixel                   # (ignored when reprob=0)
+repeated_aug: false
 
 # ── Training ────────────────────────────────────────────────────
 amp: true
-clip_grad: null
-update_freq: 1
-model_ema: true
-model_ema_decay: 0.99996
+clip_grad: 1.0                  # paper §3.4: global-norm clip 1.0
+update_freq: 2                  # → effective batch 4096 (256 × 8 × 2)
+model_ema: false                # paper: no EMA
+model_ema_decay: 0.9999         # (unused)
 seed: 42
