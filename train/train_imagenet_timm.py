@@ -62,21 +62,16 @@ def infer_rms_mode(model_name):
     return "last_dim"
 
 
-def _collect_src_classes(base_cls: type) -> tuple:
-    """Return base_cls plus any timm variants that share the same name."""
-    classes = [base_cls]
-    try:
-        import timm.layers.activations as _tact  # type: ignore[import-untyped]
-        for attr in dir(_tact):
-            cls = getattr(_tact, attr)
-            if (isinstance(cls, type)
-                    and issubclass(cls, nn.Module)
-                    and cls.__name__ == base_cls.__name__
-                    and cls is not base_cls):
-                classes.append(cls)
-    except ImportError:
-        pass
-    return tuple(classes)
+def _replace_activation_by_name(model: nn.Module, cls_name: str,
+                                 tgt_cls: type, **kwargs) -> int:
+    """Replace all modules whose class name matches cls_name."""
+    count = 0
+    for parent in model.modules():
+        for child_name, child in list(parent.named_children()):
+            if type(child).__name__ == cls_name:
+                setattr(parent, child_name, tgt_cls(**kwargs))
+                count += 1
+    return count
 
 
 def apply_activation_swap(model, activation, **kwargs):
@@ -85,16 +80,22 @@ def apply_activation_swap(model, activation, **kwargs):
     if entry is None:
         return 0
     src_cls, tgt_cls, desc = entry
-    # Collect timm variants of src_cls (e.g. timm.GELU != nn.GELU)
-    src_classes = _collect_src_classes(src_cls)
-    n = 0
-    for cls in src_classes:
-        n += replace_activation(model, cls, tgt_cls, **kwargs)
+
+    # 1. Try isinstance-based swap (covers nn.GELU, nn.SiLU)
+    n = replace_activation(model, src_cls, tgt_cls, **kwargs)
+
+    # 2. Name-based fallback: catches timm variants (timm.GELU != nn.GELU)
     if n == 0:
-        # Try swapping ReLU as fallback
+        n = _replace_activation_by_name(model, src_cls.__name__, tgt_cls, **kwargs)
+        if n > 0:
+            desc = f"{src_cls.__name__}(timm) -> {tgt_cls.__name__}"
+
+    # 3. ReLU fallback (models built with ReLU by default)
+    if n == 0:
         n = replace_activation(model, nn.ReLU, tgt_cls, **kwargs)
         if n > 0:
             desc = f"ReLU -> {tgt_cls.__name__}"
+
     print(f"[activation swap] {desc}: replaced {n} modules")
     return n
 
