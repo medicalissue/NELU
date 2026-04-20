@@ -223,7 +223,7 @@ bash scripts/download_data.sh /data
 """
 
 commands = [
-    "set -euo pipefail",
+    "set -eu",
     f"mkdir -p {shlex.quote(workdir)}",
     f"aws s3 cp {shlex.quote(bundle_uri)} {shlex.quote(workdir + '/nelu-code.tar.gz')} --region {shlex.quote(region)}",
     f"rm -rf {shlex.quote(repo_dir)}",
