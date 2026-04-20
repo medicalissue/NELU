@@ -62,13 +62,34 @@ def infer_rms_mode(model_name):
     return "last_dim"
 
 
+def _collect_src_classes(base_cls: type) -> tuple:
+    """Return base_cls plus any timm variants that share the same name."""
+    classes = [base_cls]
+    try:
+        import timm.layers.activations as _tact  # type: ignore[import-untyped]
+        for attr in dir(_tact):
+            cls = getattr(_tact, attr)
+            if (isinstance(cls, type)
+                    and issubclass(cls, nn.Module)
+                    and cls.__name__ == base_cls.__name__
+                    and cls is not base_cls):
+                classes.append(cls)
+    except ImportError:
+        pass
+    return tuple(classes)
+
+
 def apply_activation_swap(model, activation, **kwargs):
     """Apply activation swap and return the count of replaced modules."""
     entry = _SWAP_TABLE.get(activation)
     if entry is None:
         return 0
     src_cls, tgt_cls, desc = entry
-    n = replace_activation(model, src_cls, tgt_cls, **kwargs)
+    # Collect timm variants of src_cls (e.g. timm.GELU != nn.GELU)
+    src_classes = _collect_src_classes(src_cls)
+    n = 0
+    for cls in src_classes:
+        n += replace_activation(model, cls, tgt_cls, **kwargs)
     if n == 0:
         # Try swapping ReLU as fallback
         n = replace_activation(model, nn.ReLU, tgt_cls, **kwargs)
