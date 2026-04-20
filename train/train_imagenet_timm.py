@@ -18,11 +18,13 @@ import argparse
 import json
 import math
 import os
+import random
 import signal
 import time
 from collections import OrderedDict
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -94,6 +96,8 @@ def parse_args():
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     p.add_argument("--wandb-project", type=str, default="nelu-imagenet")
     p.add_argument("--compile", action="store_true", help="Use torch.compile")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Base random seed for reproducible training")
 
     # Model
     p.add_argument("--model", type=str, default="efficientnet_b0")
@@ -166,6 +170,17 @@ def setup_distributed():
         torch.cuda.set_device(local_rank)
         return rank, world_size, local_rank
     return 0, 1, 0
+
+
+def seed_everything(seed, rank):
+    seed = int(seed) + int(rank)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    return seed
 
 
 def is_primary(rank):
@@ -457,11 +472,13 @@ def main():
 
     rank, world_size, local_rank = setup_distributed()
     device = torch.device(f"cuda:{local_rank}")
+    effective_seed = seed_everything(args.seed, rank)
 
     if is_primary(rank):
         os.makedirs(args.output, exist_ok=True)
         print(f"Training {args.model} with activation={args.activation}")
         print(f"World size: {world_size}, rank: {rank}")
+        print(f"Seed: base={args.seed}, effective(rank0)={effective_seed}")
 
     # -- Model --
     model_kwargs = {
