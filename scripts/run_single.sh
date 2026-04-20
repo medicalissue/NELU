@@ -27,6 +27,26 @@ S3_BUCKET="${S3_BUCKET:-s3://nelu-datasets}"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/results}"
 # UPSTREAM_DIR no longer needed — all models train via train_imagenet_timm.py
 ENABLE_WANDB="${ENABLE_WANDB:-1}"  # set to 0 to disable wandb
+NELU_ENV_BIN="${NELU_ENV_BIN:-/data/env/nelu/bin}"
+
+resolve_executable() {
+    local candidate
+    for candidate in "$@"; do
+        [ -n "$candidate" ] || continue
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+PYTHON_BIN="$(resolve_executable "${PYTHON_BIN:-}" "${NELU_ENV_BIN}/python" python3 python || true)"
+TORCHRUN_BIN="$(resolve_executable "${TORCHRUN_BIN:-}" "${NELU_ENV_BIN}/torchrun" torchrun || true)"
 
 # -- Parse arguments -------------------------------------------------
 
@@ -141,6 +161,11 @@ if [ ! -f "${REPO_ROOT}/${CONFIG_FILE}" ]; then
     exit 1
 fi
 
+if [ -z "$PYTHON_BIN" ]; then
+    echo "ERROR: python executable not found. Tried ${NELU_ENV_BIN}/python, python3, python." >&2
+    exit 1
+fi
+
 # -- Determine the training command ----------------------------------
 
 # PYTHONPATH includes the NELU repo so that `import nelu` and
@@ -153,8 +178,12 @@ case "$PHASE" in
             convnext_*)
                 # ConvNeXt via train_imagenet_timm.py (timm has ConvNeXt built-in)
                 # No upstream repo needed.
+                if [ -z "$TORCHRUN_BIN" ]; then
+                    echo "ERROR: torchrun executable not found. Tried ${NELU_ENV_BIN}/torchrun and PATH." >&2
+                    exit 1
+                fi
                 TRAIN_CMD=(
-                    torchrun
+                    "$TORCHRUN_BIN"
                     --nproc_per_node=8
                     "${REPO_ROOT}/train/train_imagenet_timm.py"
                     --model "$MODEL"
@@ -170,8 +199,12 @@ case "$PHASE" in
                 ;;
             efficientnet_*)
                 # Thin wrapper that creates a timm model + activation swap
+                if [ -z "$TORCHRUN_BIN" ]; then
+                    echo "ERROR: torchrun executable not found. Tried ${NELU_ENV_BIN}/torchrun and PATH." >&2
+                    exit 1
+                fi
                 TRAIN_CMD=(
-                    torchrun
+                    "$TORCHRUN_BIN"
                     --nproc_per_node=8
                     "${REPO_ROOT}/train/train_imagenet_timm.py"
                     --model "$MODEL"
@@ -188,8 +221,12 @@ case "$PHASE" in
             vit_*|deit_*)
                 # ViT training using DeiT recipe via train_imagenet_timm.py
                 # No upstream repo needed — AdamW + cosine + standard augmentation
+                if [ -z "$TORCHRUN_BIN" ]; then
+                    echo "ERROR: torchrun executable not found. Tried ${NELU_ENV_BIN}/torchrun and PATH." >&2
+                    exit 1
+                fi
                 TRAIN_CMD=(
-                    torchrun
+                    "$TORCHRUN_BIN"
                     --nproc_per_node=8
                     "${REPO_ROOT}/train/train_imagenet_timm.py"
                     --model "$MODEL"
@@ -211,7 +248,7 @@ case "$PHASE" in
         ;;
     cifar100)
         TRAIN_CMD=(
-            python "${REPO_ROOT}/train/train_cifar.py"
+            "$PYTHON_BIN" "${REPO_ROOT}/train/train_cifar.py"
             --model "$MODEL"
             --activation "$ACT"
             --config "${REPO_ROOT}/${CONFIG_FILE}"
@@ -223,8 +260,12 @@ case "$PHASE" in
         ;;
     ablation)
         # Ablation uses train_imagenet_timm.py with ConvNeXt config
+        if [ -z "$TORCHRUN_BIN" ]; then
+            echo "ERROR: torchrun executable not found. Tried ${NELU_ENV_BIN}/torchrun and PATH." >&2
+            exit 1
+        fi
         TRAIN_CMD=(
-            torchrun
+            "$TORCHRUN_BIN"
             --nproc_per_node=8
             "${REPO_ROOT}/train/train_imagenet_timm.py"
             --model "$MODEL"
@@ -242,7 +283,7 @@ case "$PHASE" in
         # Robustness evaluation (ImageNet-C, -A, -R, -O)
         # MODEL = model name, ACT = activation, EXTRA_ARGS should contain --checkpoint
         TRAIN_CMD=(
-            python "${REPO_ROOT}/eval/eval_robustness.py"
+            "$PYTHON_BIN" "${REPO_ROOT}/eval/eval_robustness.py"
             --model "$MODEL"
             --activation "$ACT"
             --data-root /data

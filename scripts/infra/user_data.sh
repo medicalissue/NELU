@@ -40,6 +40,9 @@ source /data/env/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
 source /opt/conda/etc/profile.d/conda.sh 2>/dev/null || \
 source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || true
 conda activate /data/env/nelu 2>/dev/null || conda activate nelu 2>/dev/null || true
+if [ -d /data/env/nelu/bin ]; then
+    export PATH="/data/env/nelu/bin:${PATH}"
+fi
 
 # ── 3. Refresh code ──
 WORKSPACE="/data/repos/NELU"
