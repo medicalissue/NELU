@@ -1,24 +1,48 @@
-# ConvNeXt-Tiny on ImageNet-1k
-# FB recipe: https://github.com/facebookresearch/ConvNeXt
+# ConvNeXt-Tiny on ImageNet-1k — FB recipe
+# Reference: https://github.com/facebookresearch/ConvNeXt/blob/main/TRAINING.md
 # Expected: ~82.1% top-1 (GELU baseline)
+
+# ── Model ───────────────────────────────────────────────────────
 model: convnext_tiny
-dataset: imagenet
-data_path: /data/imagenet
-epochs: 300
-batch_size: 512         # per GPU; effective batch = 512 * 8 = 4096
-update_freq: 1
-lr: 4.0e-3
-warmup_epochs: 20
-weight_decay: 0.05
+pretrained: false
+num_classes: 1000
+drop: 0.0
 drop_path: 0.1
+
+# ── Data ────────────────────────────────────────────────────────
+data_path: /data/imagenet
+input_size: 224
+batch_size: 512              # per GPU; 512 * 8 GPUs * update_freq=1 = 4096
+val_batch_size: 1024
+workers: 10
+
+# ── Optimizer ───────────────────────────────────────────────────
 opt: adamw
-use_amp: true
-model_ema: true
-model_ema_decay: 0.9999
+opt_eps: 1.0e-8
+lr: 4.0e-3                   # FB base lr at effective batch 4096
+weight_decay: 0.05
+
+# ── Scheduler ───────────────────────────────────────────────────
+sched: cosine
+epochs: 300
+warmup_epochs: 20
+warmup_lr: 1.0e-6
+min_lr: 1.0e-6
+
+# ── Augmentation / regularization ───────────────────────────────
+aa: rand-m9-mstd0.5-inc1
+color_jitter: 0.4
+smoothing: 0.1
 mixup: 0.8
 cutmix: 1.0
-smoothing: 0.1
 reprob: 0.25
-color_jitter: 0.4
-aa: rand-m9-mstd0.5-inc1
-repeated_aug: true
+remode: pixel
+repeated_aug: true           # → aug_repeats=3 (RepeatedAug sampler)
+
+# ── Training ────────────────────────────────────────────────────
+amp: true
+clip_grad: null
+update_freq: 1
+model_ema: true
+model_ema_decay: 0.9999
+seed: 42

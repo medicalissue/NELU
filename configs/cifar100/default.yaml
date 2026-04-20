@@ -1,17 +1,33 @@
-# CIFAR-100 default recipe (matches original pytorch-cifar100 standard)
+# CIFAR-100 default recipe — ResNet-family standard
 # SGD + MultiStepLR with 1-epoch linear warmup
+# Reference: original ResNet paper CIFAR recipe (He et al., 2015)
+#   — milestones [60, 120, 160] × 0.2 is the community standard.
+
+# ── Model ───────────────────────────────────────────────────────
 model: resnet20
-dataset: cifar100
-data_path: /data
-epochs: 200
+
+# ── Data ────────────────────────────────────────────────────────
+data_dir: /data                # torchvision.datasets.CIFAR100 root
 batch_size: 128
+val_batch_size: 256
+num_workers: 4
+
+# ── Optimizer ───────────────────────────────────────────────────
+optimizer: sgd
 lr: 0.1
-opt: sgd
 momentum: 0.9
 weight_decay: 5.0e-4
+
+# ── Scheduler ───────────────────────────────────────────────────
 scheduler: multistep
-milestones: [60, 120, 160]
-lr_gamma: 0.2
+epochs: 200
+milestones: [60, 120, 160]     # stage boundaries where lr × lr_gamma
+lr_gamma: 0.2                  # 0.1 → 0.02 → 0.004 → 0.0008
 warmup_epochs: 1
+warmup_start_factor: 1.0e-3    # first batch lr = warmup_start_factor × lr
+min_lr: 0.0                    # unused for multistep
+
+# ── Training ────────────────────────────────────────────────────
 amp: true
 compile: true
+seed: 42

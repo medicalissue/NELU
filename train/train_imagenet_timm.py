@@ -124,6 +124,8 @@ def parse_args():
     p.add_argument("--smoothing", type=float, default=0.1, help="Label smoothing")
     p.add_argument("--mixup", type=float, default=0.0)
     p.add_argument("--cutmix", type=float, default=0.0)
+    p.add_argument("--aug-repeats", type=int, default=0,
+                   help="Repeated Augmentation count (DeiT/ConvNeXt use 3; 0 disables)")
 
     # Optimizer
     p.add_argument("--opt", type=str, default="rmsproptf")
@@ -461,11 +463,18 @@ def main():
         alias_map = {
             "data_path": "data_dir",
             "use_amp": "amp",
+            "img_size": "input_size",
+            "repeated_aug": "aug_repeats",
         }
         for k, v in cfg.items():
             attr = k.replace("-", "_")
             attr = alias_map.get(attr, attr)
-            if hasattr(args, attr) and attr != "config":
+            if attr == "config":
+                continue
+            # repeated_aug: bool → aug_repeats: int (3 = standard DeiT/ConvNeXt)
+            if k in ("repeated_aug", "repeated-aug") and isinstance(v, bool):
+                v = 3 if v else 0
+            if hasattr(args, attr):
                 setattr(args, attr, v)
 
     args.update_freq = max(1, args.update_freq)
@@ -545,8 +554,8 @@ def main():
 
     val_batch_size = args.val_batch_size or (args.batch_size * 2)
 
-    loader_train = create_loader(
-        dataset_train, input_size=data_config["input_size"],
+    loader_kwargs = dict(
+        input_size=data_config["input_size"],
         batch_size=args.batch_size, is_training=True,
         re_prob=args.reprob, re_mode=args.remode,
         color_jitter=args.color_jitter,
@@ -555,6 +564,9 @@ def main():
         distributed=world_size > 1,
         pin_memory=True,
     )
+    if args.aug_repeats and args.aug_repeats > 0:
+        loader_kwargs["num_aug_repeats"] = args.aug_repeats
+    loader_train = create_loader(dataset_train, **loader_kwargs)
     loader_val = create_loader(
         dataset_val, input_size=data_config["input_size"],
         batch_size=val_batch_size, is_training=False,

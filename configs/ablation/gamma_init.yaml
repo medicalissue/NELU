@@ -1,35 +1,64 @@
-# Gamma initialization ablation
-# Three regimes that tell the full story:
-#   1e-6  — near-zero (default): gate ≈ 0.5, near-linear start
-#   1.0   — no curriculum: gate at "standard GELU-like" sharpness from step 0
-#   10.0  — ReLU-like: gate nearly binary from step 0
+# Gamma-initialization ablation (ConvNeXt-T, abbreviated schedule)
+# Tests the curriculum hypothesis: near-zero γ start beats γ=1 / γ=10 starts
+# on architectures without post-activation BN (e.g. ConvNeXt).
 #
-# We expect 1.0 and 10.0 to crash or diverge on architectures without
-# post-activation BatchNorm (e.g. ConvNeXt). This is the point —
-# it demonstrates that the near-zero curriculum is essential.
+# The three gamma_init_values below are the documented sweep targets (fed
+# as --gamma_init via run_single.sh extra args). The training script itself
+# ignores this list and uses whatever --gamma_init is passed on the CLI.
 #
-# The training script should catch divergence (NaN loss) and exit
-# gracefully with a partial result, not hang or corrupt other jobs.
+# Expected outcome:
+#   1e-6  — near-zero: stable, best accuracy
+#   1.0   — GELU-sharp gate from step 0: unstable or worse
+#   10.0  — ReLU-like gate: likely crash / severe degradation
+# Training script should catch NaN loss and exit gracefully.
+
+# ── Model ───────────────────────────────────────────────────────
 model: convnext_tiny
-dataset: imagenet
-data_path: /data/imagenet
-epochs: 90
-batch_size: 128
-lr: 4.0e-3
-warmup_epochs: 20
-weight_decay: 0.05
+pretrained: false
+num_classes: 1000
+drop: 0.0
 drop_path: 0.1
+
+# ── Data ────────────────────────────────────────────────────────
+data_path: /data/imagenet
+input_size: 224
+batch_size: 128              # per GPU; 128 * 8 = 1024 effective (smaller than main recipe)
+val_batch_size: 256
+workers: 10
+
+# ── Optimizer ───────────────────────────────────────────────────
 opt: adamw
-amp: true
-compile: true
-model_ema: false
+opt_eps: 1.0e-8
+lr: 4.0e-3                   # FB base lr (kept despite smaller batch — ablation, not prod)
+weight_decay: 0.05
+
+# ── Scheduler ───────────────────────────────────────────────────
+sched: cosine
+epochs: 90                   # abbreviated from 300 — enough to see divergence
+warmup_epochs: 20
+warmup_lr: 1.0e-6
+min_lr: 1.0e-6
+
+# ── Augmentation / regularization ───────────────────────────────
+aa: rand-m9-mstd0.5-inc1
+color_jitter: 0.4
+smoothing: 0.1
 mixup: 0.8
 cutmix: 1.0
-smoothing: 0.1
 reprob: 0.25
-color_jitter: 0.4
+remode: pixel
+repeated_aug: true
 
+# ── Training ────────────────────────────────────────────────────
+amp: true
+clip_grad: null
+update_freq: 1
+model_ema: false             # disabled for ablation — want raw signal, not EMA-smoothed
+model_ema_decay: 0.9999      # (unused when model_ema=false)
+seed: 42
+
+# ── Ablation sweep (reference; not consumed by train script) ────
 gamma_init_values:
-  - 1.0e-6    # near-zero (default) — expected: stable, best
-  - 1.0       # no curriculum — expected: unstable or worse
-  - 10.0      # ReLU-like — expected: crash or severe degradation
+  - 1.0e-6                   # near-zero (default) — expected: stable, best
+  - 1.0                      # no curriculum — expected: unstable or worse
+  - 10.0                     # ReLU-like — expected: crash or severe degradation

@@ -1,29 +1,49 @@
-# ViT-Base/16 on ImageNet-1k
-# DeiT recipe (Touvron et al., 2021) with AdamW
+# ViT-Base/16 on ImageNet-1k — DeiT recipe
+# Reference: Touvron et al., 2021 (https://arxiv.org/abs/2012.12877)
 # Expected: ~81.8% top-1 (DeiT-B baseline)
 # Training time: ~25h on 8xH100 per activation
+
+# ── Model ───────────────────────────────────────────────────────
 model: deit_base_patch16_224
-dataset: imagenet
+pretrained: false
+num_classes: 1000
+drop: 0.0
+drop_path: 0.1
+
+# ── Data ────────────────────────────────────────────────────────
 data_path: /data/imagenet
-epochs: 300
-batch_size: 128          # per GPU; 128 * 8 = 1024 effective
-lr: 1.0e-3              # 5e-4 * (1024/512) linear scaling
+input_size: 224
+batch_size: 128              # per GPU; 128 * 8 GPUs * update_freq=1 = 1024
+val_batch_size: 256
+workers: 10
+
+# ── Optimizer ───────────────────────────────────────────────────
 opt: adamw
+opt_eps: 1.0e-8
+lr: 1.0e-3                   # 5e-4 × (1024/512) linear scaling from DeiT-B base
 weight_decay: 0.05
+
+# ── Scheduler ───────────────────────────────────────────────────
 sched: cosine
+epochs: 300
 warmup_epochs: 5
 warmup_lr: 1.0e-6
 min_lr: 1.0e-5
-drop_path: 0.1
-mixup: 0.8
-cutmix: 1.0
-smoothing: 0.1
-reprob: 0.25
-remode: pixel
+
+# ── Augmentation / regularization ───────────────────────────────
 aa: rand-m9-mstd0.5-inc1
 color_jitter: 0.3
-repeated_aug: true
+smoothing: 0.1
+mixup: 0.8
+cutmix: 1.0
+reprob: 0.25
+remode: pixel
+repeated_aug: true           # → aug_repeats=3 (RepeatedAug sampler)
+
+# ── Training ────────────────────────────────────────────────────
 amp: true
-compile: true
+clip_grad: null
+update_freq: 1
 model_ema: true
 model_ema_decay: 0.99996
+seed: 42

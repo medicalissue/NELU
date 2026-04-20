@@ -1,23 +1,51 @@
-# EfficientNet-B0 on ImageNet-1k
-# Original paper recipe (Tan & Le, 2019) with AutoAugment
+# EfficientNet-B0 on ImageNet-1k — original paper recipe
+# Reference: Tan & Le, 2019 (https://arxiv.org/abs/1905.11946)
 # Expected: ~77.1% top-1 (SiLU baseline)
+
+# ── Model ───────────────────────────────────────────────────────
 model: efficientnet_b0
-dataset: imagenet
+pretrained: false
+num_classes: 1000
+drop: 0.2                    # classifier dropout (paper: 0.2 for B0)
+drop_path: 0.2               # stochastic depth / drop-connect
+
+# ── Data ────────────────────────────────────────────────────────
 data_path: /data/imagenet
-img_size: 224
-epochs: 350
-batch_size: 128         # per GPU; 128 * 8 = 1024 effective
-lr: 0.064               # 0.016 * (1024/256) — linear scaling from batch 256
+input_size: 224              # native resolution
+batch_size: 128              # per GPU; 128 * 8 GPUs * update_freq=1 = 1024
+val_batch_size: 256
+workers: 10
+
+# ── Optimizer ───────────────────────────────────────────────────
 opt: rmsproptf
-opt_eps: 0.001
-sched: step
-decay_epochs: 2.4
-decay_rate: 0.97
+opt_eps: 1.0e-3              # RMSProp-TF default epsilon
+lr: 0.064                    # 0.016 × (1024/256) linear scaling from paper batch 256
 weight_decay: 1.0e-5
-drop: 0.2
-drop_path: 0.2
+momentum: 0.9
+
+# ── Scheduler ───────────────────────────────────────────────────
+sched: step
+epochs: 350
+decay_epochs: 2.4            # decay every 2.4 epochs (paper)
+decay_rate: 0.97             # × 0.97 per decay step (paper)
+warmup_epochs: 3             # 3-epoch linear warmup for initial stability
+warmup_lr: 1.0e-6
+min_lr: 1.0e-6
+
+# ── Augmentation / regularization ───────────────────────────────
+aa: original                 # AutoAugment (paper-original policy)
+color_jitter: 0.0
 smoothing: 0.1
-amp: true
-aa: original            # AutoAugment (original paper)
-remode: pixel
+mixup: 0.0
+cutmix: 0.0
 reprob: 0.2
+remode: pixel
+repeated_aug: false
+
+# ── Training ────────────────────────────────────────────────────
+amp: true
+clip_grad: null
+update_freq: 1
+model_ema: true
+model_ema_decay: 0.9999
+seed: 42

@@ -499,6 +499,19 @@ def parse_args():
     p.add_argument("--lr", type=float, default=0.1)
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight_decay", type=float, default=5e-4)
+    p.add_argument("--optimizer", type=str, default="sgd", choices=["sgd"])
+    p.add_argument("--scheduler", type=str, default="multistep",
+                   choices=["multistep", "cosine"])
+    p.add_argument("--milestones", type=int, nargs="+", default=[60, 120, 160],
+                   help="MultiStepLR milestones (epoch indices)")
+    p.add_argument("--lr_gamma", type=float, default=0.2,
+                   help="MultiStepLR decay factor")
+    p.add_argument("--warmup_epochs", type=int, default=1,
+                   help="Linear warmup epochs from start_factor*lr to lr")
+    p.add_argument("--warmup_start_factor", type=float, default=1e-3,
+                   help="Initial multiplier on lr for the first batch of warmup")
+    p.add_argument("--min_lr", type=float, default=0.0,
+                   help="Cosine schedule floor (ignored for multistep)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output_dir", type=str, default="results/cifar")
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
@@ -563,15 +576,26 @@ def main():
     # AMP scaler
     scaler = torch.amp.GradScaler('cuda') if args.amp else None
 
-    # Optimizer + scheduler (MultiStepLR with 1-epoch linear warmup)
+    # Optimizer + scheduler (LinearLR warmup → main schedule)
     optimizer = optim.SGD(model.parameters(), lr=args.lr,
                           momentum=args.momentum, weight_decay=args.weight_decay)
-    main_scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[60, 120, 160], gamma=0.2)
+
+    warmup_epochs = max(1, int(args.warmup_epochs))
+    if args.scheduler == "multistep":
+        main_scheduler = optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=list(args.milestones), gamma=args.lr_gamma)
+    elif args.scheduler == "cosine":
+        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, args.epochs - warmup_epochs),
+            eta_min=args.min_lr)
+    else:
+        raise ValueError(f"Unknown scheduler: {args.scheduler}")
+
     warmup_scheduler = optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1e-3, total_iters=1)
+        optimizer, start_factor=args.warmup_start_factor, total_iters=warmup_epochs)
     scheduler = optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[1])
+        optimizer, schedulers=[warmup_scheduler, main_scheduler],
+        milestones=[warmup_epochs])
 
     # Resume
     start_epoch = 0
