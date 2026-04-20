@@ -105,14 +105,17 @@ def measure_gate_stats(model: nn.Module, probe_batch: torch.Tensor,
                 _record_gate(stats, gate, idx)
         return _fn
 
+    _GELU_NAMES = {'GELU', 'GELUTanh', 'FastGELU', 'QuickGELU', 'ApproxGELU'}
+    _SILU_NAMES = {'SiLU', 'Swish', 'HardSwish'}
+
     for module in model.modules():
         if isinstance(module, _GatedBase):
             hooks.append(module.register_forward_hook(_make_gated_hook(layer_idx)))
             layer_idx += 1
-        elif isinstance(module, nn.GELU):
+        elif isinstance(module, _GELU_CLASSES) or type(module).__name__ in _GELU_NAMES:
             hooks.append(module.register_forward_hook(_make_gelu_hook(layer_idx)))
             layer_idx += 1
-        elif isinstance(module, nn.SiLU):
+        elif isinstance(module, _SILU_CLASSES) or type(module).__name__ in _SILU_NAMES:
             hooks.append(module.register_forward_hook(_make_silu_hook(layer_idx)))
             layer_idx += 1
 
