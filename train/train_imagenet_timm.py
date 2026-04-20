@@ -384,6 +384,40 @@ def validate(model, loader, eval_loss_fn, device, amp_autocast, rank, world_size
     return OrderedDict(loss=losses.avg, top1=top1.avg, top5=top5.avg)
 
 
+def validate_imagenet_layout(dataset_train, dataset_val, num_classes):
+    train_classes = getattr(dataset_train, "classes", None)
+    val_classes = getattr(dataset_val, "classes", None)
+
+    if train_classes is None or val_classes is None:
+        raise RuntimeError(
+            "ImageNet datasets do not expose `classes`; cannot validate train/val layout."
+        )
+
+    train_classes = list(train_classes)
+    val_classes = list(val_classes)
+
+    if len(train_classes) != num_classes:
+        raise RuntimeError(
+            f"Train directory exposes {len(train_classes)} classes, expected {num_classes}."
+        )
+    if len(val_classes) != num_classes:
+        raise RuntimeError(
+            f"Validation directory exposes {len(val_classes)} classes, expected {num_classes}. "
+            "This usually means val/ is flat or misorganized."
+        )
+
+    if train_classes != val_classes:
+        train_set = set(train_classes)
+        val_set = set(val_classes)
+        only_train = sorted(train_set - val_set)[:10]
+        only_val = sorted(val_set - train_set)[:10]
+        raise RuntimeError(
+            "ImageNet train/val class mappings do not match.\n"
+            f"  train-only sample: {only_train}\n"
+            f"  val-only sample: {only_val}"
+        )
+
+
 # ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
@@ -479,6 +513,7 @@ def main():
 
     dataset_train = create_dataset("", root=train_dir, is_training=True)
     dataset_val = create_dataset("", root=val_dir, is_training=False)
+    validate_imagenet_layout(dataset_train, dataset_val, args.num_classes)
 
     val_batch_size = args.val_batch_size or (args.batch_size * 2)
 

@@ -188,6 +188,12 @@ fi
 DOWNLOAD_CMD+=(/data)
 "${DOWNLOAD_CMD[@]}"
 
+echo "  Validating ImageNet val layout..."
+python3 "$REPO_ROOT/scripts/reorganize_imagenet_val.py" \
+    --train-dir /data/imagenet/train \
+    --val-dir /data/imagenet/val \
+    --check-only
+
 # ── 6. Verify ────────────────────────────────────────────────
 echo ""
 echo "── 6. Verification ──"
@@ -197,6 +203,8 @@ echo "  CUDA:         $(python -c 'import torch; print(torch.version.cuda)')"
 echo "  timm:         $(python -c 'import timm; print(timm.__version__)')"
 echo "  GPUs:         $(nvidia-smi -L | wc -l)"
 echo "  ImageNet:     $(ls /data/imagenet/train/ 2>/dev/null | wc -l) classes"
+echo "  ImageNet val: $(ls /data/imagenet/val/ 2>/dev/null | wc -l) class dirs"
+echo "  ImageNet val root files: $(find /data/imagenet/val -maxdepth 1 -type f 2>/dev/null | wc -l)"
 echo "  CIFAR-100:    $(ls /data/cifar-100-python/ 2>/dev/null | wc -l) files"
 echo "  ImageNet-C:   $(ls /data/ImageNet-C/ 2>/dev/null | wc -l) corruptions"
 echo "  ImageNet-A:   $(ls /data/imagenet-a/ 2>/dev/null | wc -l) classes"

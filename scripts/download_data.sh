@@ -68,6 +68,8 @@ IS_S3=false
 [[ "$TARGET" == s3://* ]] && IS_S3=true
 
 DATA_SOURCE_S3="${DATA_SOURCE_S3:-${S3_BUCKET:-s3://nelu-datasets}}"
+IMAGENET_VAL_LABELS_FILE="${IMAGENET_VAL_LABELS_FILE:-}"
+IMAGENET_VAL_LABELS_URL="${IMAGENET_VAL_LABELS_URL:-https://raw.githubusercontent.com/tensorflow/models/master/research/slim/datasets/imagenet_2012_validation_synset_labels.txt}"
 AWS_OK=false
 if command -v aws >/dev/null 2>&1; then
     AWS_OK=true
@@ -97,6 +99,26 @@ mkdir -p "$LOCAL"
 local_dir_populated() {
     local dir="$1"
     [ -d "$dir" ] && find "$dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
+}
+
+ensure_imagenet_layout_local() {
+    local dest="$1"
+    local mode="${2:-repair}"
+    local args=(
+        python3 "$REPO_ROOT/scripts/reorganize_imagenet_val.py"
+        --train-dir "${dest}/train"
+        --val-dir "${dest}/val"
+    )
+    if [ -n "$IMAGENET_VAL_LABELS_FILE" ]; then
+        args+=(--synset-labels "$IMAGENET_VAL_LABELS_FILE")
+    fi
+    if [ -n "$IMAGENET_VAL_LABELS_URL" ]; then
+        args+=(--labels-url "$IMAGENET_VAL_LABELS_URL")
+    fi
+    if [ "$mode" = "check" ]; then
+        args+=(--check-only)
+    fi
+    "${args[@]}"
 }
 
 s3_prefix_exists() {
@@ -242,13 +264,16 @@ ensure_imagenet() {
         return 0
     fi
     if ! $IS_S3 && [ -d "${dest}/train" ] && [ -d "${dest}/val" ]; then
-        echo "  Already present locally."
-        return 0
-    fi
-    if copy_dir_s3_to_s3 "$rel"; then
+        if ensure_imagenet_layout_local "$dest" check >/dev/null 2>&1; then
+            echo "  Already present locally."
+            return 0
+        fi
+        echo "  Existing ImageNet layout needs repair. Reorganizing val/..."
+        ensure_imagenet_layout_local "$dest"
         return 0
     fi
     if sync_dir_from_source_s3 "$rel" "$dest"; then
+        ensure_imagenet_layout_local "$dest"
         sync_dir_to_s3 "$dest" "$rel"
         return 0
     fi
@@ -371,7 +396,11 @@ if $IS_S3; then
     done
 else
     echo "  Target: $LOCAL"
-    echo "  $(dataset_status_local "imagenet")  imagenet"
+    if ensure_imagenet_layout_local "${LOCAL}/imagenet" check >/dev/null 2>&1; then
+        echo "  OK  imagenet"
+    else
+        echo "  MISSING  imagenet"
+    fi
     echo "  $(dataset_status_local "cifar-100-python")  cifar-100-python"
     echo "  $(dataset_status_local "CIFAR-100-C")  CIFAR-100-C"
     echo "  $(dataset_status_local "ImageNet-C")  ImageNet-C"
