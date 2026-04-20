@@ -1,12 +1,13 @@
 # EfficientNet-B4 on ImageNet-1k
-# timm RandAugment recipe with stronger regularization
-# Expected: ~82.9% top-1 (SiLU baseline)
+# Original paper recipe (Tan & Le, 2019) with AutoAugment
+# Expected: ~82.6% top-1 (SiLU baseline)
 model: efficientnet_b4
 dataset: imagenet
 data_path: /data/imagenet
-epochs: 450
+img_size: 380           # B4 native resolution
+epochs: 350
 batch_size: 128         # per GPU; 128 * 8 = 1024 effective
-lr: 0.032               # 0.016 * sqrt(1024/256) — sqrt scaling from 2 GPU * 128
+lr: 0.064               # 0.016 * (1024/256) — linear scaling from batch 256
 opt: rmsproptf
 opt_eps: 0.001
 sched: step
@@ -14,10 +15,9 @@ decay_epochs: 2.4
 decay_rate: 0.97
 weight_decay: 1.0e-5
 drop: 0.4
-drop_connect: 0.2
+drop_path: 0.2
+smoothing: 0.1
 amp: true
-model_ema: true
-model_ema_decay: 0.9999
-aa: rand-m9-mstd0.5
+aa: original            # AutoAugment (original paper)
 remode: pixel
 reprob: 0.3

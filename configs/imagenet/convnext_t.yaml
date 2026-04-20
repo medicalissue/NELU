@@ -5,8 +5,8 @@ model: convnext_tiny
 dataset: imagenet
 data_path: /data/imagenet
 epochs: 300
-batch_size: 128         # per GPU
-update_freq: 4          # effective batch = 128 * 8 * 4 = 4096 (FB recipe)
+batch_size: 512         # per GPU; effective batch = 512 * 8 = 4096
+update_freq: 1
 lr: 4.0e-3
 warmup_epochs: 20
 weight_decay: 0.05
@@ -20,3 +20,5 @@ cutmix: 1.0
 smoothing: 0.1
 reprob: 0.25
 color_jitter: 0.4
+aa: rand-m9-mstd0.5-inc1
+repeated_aug: true

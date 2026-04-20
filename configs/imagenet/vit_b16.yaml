@@ -22,6 +22,7 @@ reprob: 0.25
 remode: pixel
 aa: rand-m9-mstd0.5-inc1
 color_jitter: 0.3
+repeated_aug: true
 amp: true
 compile: true
 model_ema: true
