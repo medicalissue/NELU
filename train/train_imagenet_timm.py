@@ -108,6 +108,8 @@ def parse_args():
     p.add_argument("--data-dir", type=str, default="/data/imagenet")
     p.add_argument("--input-size", type=int, default=None)
     p.add_argument("-b", "--batch-size", type=int, default=32)
+    p.add_argument("--val-batch-size", type=int, default=None,
+                   help="Validation batch size per GPU; defaults to 2x train batch size")
     p.add_argument("--workers", type=int, default=8)
 
     # Augmentation
@@ -478,6 +480,8 @@ def main():
     dataset_train = create_dataset("", root=train_dir, is_training=True)
     dataset_val = create_dataset("", root=val_dir, is_training=False)
 
+    val_batch_size = args.val_batch_size or (args.batch_size * 2)
+
     loader_train = create_loader(
         dataset_train, input_size=data_config["input_size"],
         batch_size=args.batch_size, is_training=True,
@@ -490,7 +494,7 @@ def main():
     )
     loader_val = create_loader(
         dataset_val, input_size=data_config["input_size"],
-        batch_size=args.batch_size, is_training=False,
+        batch_size=val_batch_size, is_training=False,
         num_workers=args.workers,
         distributed=world_size > 1,
         pin_memory=True,
@@ -634,11 +638,11 @@ def main():
                     wandb.finish()
             break
 
-        # Evaluate (use EMA model if available)
-        eval_model = model_ema.module if model_ema is not None else model
+        # Evaluate the raw model every epoch, and the EMA model separately when enabled.
+        raw_eval_model = model.module if hasattr(model, "module") else model
         try:
-            val_metrics = validate(eval_model, loader_val, eval_loss_fn, device,
-                                   amp_autocast, rank, world_size)
+            raw_val_metrics = validate(raw_eval_model, loader_val, eval_loss_fn, device,
+                                       amp_autocast, rank, world_size)
         except TrainingInterrupted as e:
             interrupted = True
             if is_primary(rank):
@@ -665,12 +669,52 @@ def main():
                     wandb.finish()
             break
 
+        ema_val_metrics = None
+        if model_ema is not None:
+            try:
+                ema_val_metrics = validate(
+                    model_ema.module,
+                    loader_val,
+                    eval_loss_fn,
+                    device,
+                    amp_autocast,
+                    rank,
+                    world_size,
+                )
+            except TrainingInterrupted as e:
+                interrupted = True
+                if is_primary(rank):
+                    print(f"\n{'='*60}")
+                    print(f"  TRAINING INTERRUPTED: {e}")
+                    print("  Saving checkpoint for automatic spot resume.")
+                    print(f"{'='*60}")
+                    interrupted_state = build_checkpoint_state(
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        best_acc=best_acc,
+                        args=args,
+                        wandb_id=wandb_id,
+                        model_ema=model_ema,
+                        scaler=scaler,
+                        epoch=epoch - 1,
+                    )
+                    interrupted_state["interrupted_at_epoch"] = epoch
+                    save_checkpoint(interrupted_state, args.output, interrupted=True)
+                    if wandb_run:
+                        import wandb
+                        wandb.log({"epoch": epoch, "interrupted": True, "interrupted_epoch": epoch})
+                        wandb.finish()
+                break
+
+        selected_val_metrics = ema_val_metrics if ema_val_metrics is not None else raw_val_metrics
+
         scheduler.step(epoch + 1)
         elapsed = time.time() - t0
 
-        is_best = val_metrics["top1"] > best_acc
+        is_best = selected_val_metrics["top1"] > best_acc
         if is_best:
-            best_acc = val_metrics["top1"]
+            best_acc = selected_val_metrics["top1"]
 
         # Diagnostics: gamma, gate entropy, weight norms, grad norm
         diag = {}
@@ -694,9 +738,17 @@ def main():
 
         if is_primary(rank):
             print(f"Epoch {epoch:3d}/{args.epochs} | "
-                  f"train loss {train_metrics['loss']:.4f} top1 {train_metrics['top1']:.2f} | "
-                  f"val loss {val_metrics['loss']:.4f} top1 {val_metrics['top1']:.2f} "
-                  f"top5 {val_metrics['top5']:.2f} | "
+                  f"train loss {train_metrics['loss']:.4f} "
+                  f"proxy@1 {train_metrics['top1']:.2f} "
+                  f"proxy@5 {train_metrics['top5']:.2f} | "
+                  f"val(raw) loss {raw_val_metrics['loss']:.4f} "
+                  f"top1 {raw_val_metrics['top1']:.2f} "
+                  f"top5 {raw_val_metrics['top5']:.2f}", end="")
+            if ema_val_metrics is not None:
+                print(f" | val(ema) loss {ema_val_metrics['loss']:.4f} "
+                      f"top1 {ema_val_metrics['top1']:.2f} "
+                      f"top5 {ema_val_metrics['top5']:.2f}", end="")
+            print(f" | "
                   f"best {best_acc:.2f} | {elapsed:.1f}s", end="")
             gamma_mean = diag.get("nelu/gamma/mean")
             if gamma_mean is not None:
@@ -711,12 +763,25 @@ def main():
                 log_data = {
                     "epoch": epoch,
                     "train/loss": train_metrics["loss"],
-                    "train/top1": train_metrics["top1"],
-                    "val/loss": val_metrics["loss"],
-                    "val/top1": val_metrics["top1"],
-                    "val/top5": val_metrics["top5"],
+                    "train/proxy_top1": train_metrics["top1"],
+                    "train/proxy_top5": train_metrics["top5"],
+                    "time/epoch_seconds": elapsed,
+                    "val_selected/loss": selected_val_metrics["loss"],
+                    "val_selected/top1": selected_val_metrics["top1"],
+                    "val_selected/top5": selected_val_metrics["top5"],
+                    "val_raw/loss": raw_val_metrics["loss"],
+                    "val_raw/top1": raw_val_metrics["top1"],
+                    "val_raw/top5": raw_val_metrics["top5"],
+                    "val_selected/uses_ema": float(ema_val_metrics is not None),
+                    "best/val_selected_top1": best_acc,
                     "lr": optimizer.param_groups[0]["lr"],
                 }
+                if ema_val_metrics is not None:
+                    log_data.update({
+                        "val_ema/loss": ema_val_metrics["loss"],
+                        "val_ema/top1": ema_val_metrics["top1"],
+                        "val_ema/top5": ema_val_metrics["top5"],
+                    })
                 log_data.update(diag)
                 wandb.log(log_data)
 

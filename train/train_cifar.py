@@ -316,7 +316,10 @@ CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_STD = (0.2675, 0.2565, 0.2761)
 
 
-def get_dataloaders(data_dir, batch_size, num_workers=4):
+def get_dataloaders(data_dir, train_batch_size, val_batch_size=None, num_workers=4):
+    if val_batch_size is None:
+        val_batch_size = train_batch_size * 2
+
     train_transform = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -331,10 +334,10 @@ def get_dataloaders(data_dir, batch_size, num_workers=4):
                                   transform=train_transform)
     test_ds = datasets.CIFAR100(data_dir, train=False, download=True,
                                  transform=test_transform)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+    train_loader = DataLoader(train_ds, batch_size=train_batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True,
                               drop_last=True)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+    test_loader = DataLoader(test_ds, batch_size=val_batch_size, shuffle=False,
                              num_workers=num_workers, pin_memory=True)
     return train_loader, test_loader
 
@@ -491,6 +494,8 @@ def parse_args():
                     choices=["relu", "gelu", "silu", "nelu", "nilu"])
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--val_batch_size", type=int, default=None,
+                   help="Validation batch size; defaults to 2x train batch size")
     p.add_argument("--lr", type=float, default=0.1)
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight_decay", type=float, default=5e-4)
@@ -537,8 +542,12 @@ def main():
     saved_wandb_id = None
 
     # Data
-    train_loader, test_loader = get_dataloaders(args.data_dir, args.batch_size,
-                                                 args.num_workers)
+    train_loader, test_loader = get_dataloaders(
+        args.data_dir,
+        args.batch_size,
+        args.val_batch_size,
+        args.num_workers,
+    )
     # Model
     model = build_model(args.model, args.activation, num_classes=100)
     model = model.to(device)
@@ -656,7 +665,19 @@ def main():
 
         if wandb_run:
             import wandb
-            wandb.log(log_entry)
+            wandb_metrics = {
+                "epoch": epoch,
+                "train/loss": train_loss,
+                "train/top1": train_acc,
+                "time/epoch_seconds": elapsed,
+                "test/loss": test_loss,
+                "test/top1": test_acc,
+                "best/test_top1": best_acc,
+                "lr": optimizer.param_groups[0]["lr"],
+            }
+            wandb_metrics.update(gamma_stats)
+            wandb_metrics.update(entropy_stats)
+            wandb.log(wandb_metrics)
 
         # Save checkpoints (includes wandb_id for run continuity across spot interruptions)
         state = build_checkpoint_state(
