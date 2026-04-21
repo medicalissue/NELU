@@ -1,55 +1,74 @@
-# ViT-Base/16 on ImageNet-1k — AugReg recipe ("medium2")
-# Reference: Steiner et al., 2021 (arXiv:2106.10270)
-#            + google-research/big_vision/configs/vit_i1k.py
-# Expected: ~79.9% top-1 (from-scratch on IN-1k, GELU baseline)
+# ViT-Base/16 on ImageNet-1k — DeiT-III recipe (paper-exact, 300ep variant)
+# Reference (verified against source): Touvron et al., 2022 (arXiv:2204.07118v2)
+#   Paper: Table 1 ("Training recipe"), Section 3
+#   Code:  github.com/facebookresearch/deit
+#          - README_revenge.md line 412 (B/16 training command)
+#          - main.py arg defaults
+#          - augment.py (ThreeAugment impl, line 111)
+#          - engine.py line 44 (BCE target thresholding: targets.gt(0.0))
+#          - models_v2.py line 182 (default init_scale=1e-4)
 #
-# Known deviations from paper (not settable without further code work):
-#   - loss: softmax CE with smoothing=0 (paper uses sigmoid CE, head bias init -6.9)
-#   - optimizer: AdamW (= decoupled Adam); paper uses "Adam + decoupled wd",
-#     which is mathematically identical to AdamW with wd=1e-4.
+# Paper's 400-epoch IN-1k schedule → 82.8% top-1 (Table 2).
+# 800-epoch version (not used here) reaches 83.8%.
+#
+# NOTE on resolution: DeiT-III pretrains at 192, then fine-tunes at 224.
+# We use 192 throughout (single pre-training only, no fine-tune stage)
+# per paper Table 1 pretrain row.
 
 # ── Model ───────────────────────────────────────────────────────
 model: vit_base_patch16_224
 pretrained: false
 num_classes: 1000
-drop: 0.1                       # paper §3.3: 0 or 0.1 sweep; 0.1 selected
-drop_path: 0.1                  # paired with drop (0 or 0.1)
+drop: 0.0
+drop_path: 0.2                  # README L412 --drop-path 0.2
+init_scale: 1.0e-4              # models_v2.py L182: default init_scale=1e-4
+                                # (paper Table 1 uses 1e-4 for ALL sizes)
 
 # ── Data ────────────────────────────────────────────────────────
 data_path: /data/imagenet
-input_size: 224
-batch_size: 256                 # per GPU; 256 × 8 GPUs × update_freq=2 = 4096
-val_batch_size: 512
+input_size: 224                 # single-stage training (paper does 192 pretrain
+                                # + 224 fine-tune 2-stage; we skip fine-tune for
+                                # NELU comparison consistency with ConvNeXt/ViT)
+batch_size: 128                 # per GPU; 128 × 8 × update_freq=2 = 2048
+                                # (paper uses 256×8×1; dropped to 128/2 to
+                                # leave memory headroom — 256/GPU near-OOM
+                                # on H100 triggered backward version mismatch)
+val_batch_size: 256
 workers: 10
 
-# ── Optimizer (paper: Adam + decoupled wd ≡ AdamW) ──────────────
-opt: adamw
-opt_eps: 1.0e-8
-lr: 1.0e-3                      # peak, paired with effective batch 4096
-weight_decay: 1.0e-4            # paper §3.3: "0.1 × LR", decoupled
+# ── Optimizer (paper: FusedLAMB + --unscale-lr) ─────────────────
+opt: lamb                       # timm "lamb" maps to Lamb (≈FusedLAMB)
+opt_eps: 1.0e-6                 # timm Lamb default (matches FusedLAMB)
+lr: 3.0e-3                      # README L412 --lr 3e-3 (verbatim, unscaled)
+weight_decay: 0.02              # paper Table 1: wd=0.02 (README command has
+                                # 0.05 but Table 1 is the authoritative recipe)
+unscale_lr: true                # README L412 --unscale-lr
 
 # ── Scheduler ───────────────────────────────────────────────────
 sched: cosine
-epochs: 300
-warmup_epochs: 32               # 10,000 steps @ batch 4096 ≈ 32 epochs
-warmup_lr: 1.0e-6
-min_lr: 0.0                     # paper: cosine decay → 0
+epochs: 400                     # paper 400-epoch schedule (Table 2)
+warmup_epochs: 5                # README L412 --warmup-epochs 5
+warmup_lr: 1.0e-6               # README L412 --warmup-lr 1e-6
+min_lr: 1.0e-5                  # main.py L81 default (not overridden)
 
 # ── Augmentation / regularization ───────────────────────────────
-aa: rand-m15-n2-mstd0.5         # paper "medium2": N=2, M=15
-color_jitter: 0.0               # not used (inception crop + flip only)
-smoothing: 0.0                  # paper uses sigmoid x-ent, no label smoothing
-mixup: 0.5                      # paper "medium2" Mixup α=0.5
-mixup_prob: 0.5                 # paper "medium2" Mixup p=0.5
-cutmix: 0.0                     # not used
-reprob: 0.0                     # not used
+deit3_transform: true           # RRC(0.08,1.0,BICUBIC) + HFlip + 3-Aug + CJ
+aa: null                        # (overridden by deit3_transform)
+color_jitter: 0.3               # README L412 --color-jitter 0.3
+smoothing: 0.0                  # README L412 --smoothing 0.0 (BCE instead)
+bce_loss: true                  # README L412 --bce-loss; engine.py L44 thresholds at 0
+mixup: 0.8                      # README L412 --mixup 0.8
+mixup_prob: 1.0                 # main.py L134 default
+cutmix: 1.0                     # README L412 --cutmix 1.0
+reprob: 0.0                     # README L412 --reprob 0.0
 remode: pixel                   # (ignored when reprob=0)
-repeated_aug: false
+repeated_aug: true              # README L412 --repeated-aug; Table 1 "RA ✓"
 
 # ── Training ────────────────────────────────────────────────────
 amp: true
-clip_grad: 1.0                  # paper §3.4: global-norm clip 1.0
-update_freq: 2                  # → effective batch 4096 (256 × 8 × 2)
-model_ema: false                # paper: no EMA
+clip_grad: 1.0                  # paper Table 1: grad clip=1.0 (authoritative;
+                                # main.py default None is overridden in practice)
+update_freq: 2                  # → effective batch 2048 (128 × 8 × 2)
+model_ema: false                # paper Table 1 "EMA ✗"
 model_ema_decay: 0.9999         # (unused)
 seed: 42

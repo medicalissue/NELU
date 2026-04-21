@@ -489,6 +489,118 @@ __global__ void bwd_2pass_vec(
     flush_dg_smem(sh_dg, dgamma_out, N);
 }
 
+// bwd_2pass_vec_glbdg / bwd_2pass_scalar_glbdg — no sh_dg smem; direct
+// global atomicAdd to dgamma_out. Used when N*sizeof(float) exceeds the
+// per-block smem cap (e.g. ConvNeXt stage3 with C*H*W=200704).
+template <typename T, int BLOCK>
+__global__ void bwd_2pass_vec_glbdg(
+    const T* __restrict__ z,
+    const float* __restrict__ rho_in,
+    const T* __restrict__ dy,
+    T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
+    int N)
+{
+    constexpr int K = VecK<T>::K;
+    __shared__ float warp_buf[BLOCK / WARP];
+    __shared__ float bcast;
+
+    int r = blockIdx.x;
+    float rho = rho_in[r];
+    float inv = 1.f / rho;
+    const T* zr  = z  + (long)r * N;
+    const T* dyr = dy + (long)r * N;
+    T*       dzr = dz + (long)r * N;
+
+    int Npack = N / K;
+
+    float s_local = 0.f;
+    for (int i = threadIdx.x; i < Npack; i += BLOCK) {
+        float zv[K], gv[K], gcs[K];
+        load_pack(zr,  i, zv);
+        load_pack(dyr, i, gv);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
+        #pragma unroll
+        for (int k = 0; k < K; ++k) {
+            float t  = gcs[k] * zv[k] * inv;
+            float sg = nilu_sigmoid(t);
+            float sp = sg * (1.f - sg);
+            float c  = gv[k] * zv[k] * zv[k] * sp;
+            s_local += c;
+            atomicAdd(dgamma_out + (K*i + k), c * inv);
+        }
+    }
+    float S = block_sum_bcast(s_local, warp_buf, &bcast);
+    float cf = S * (inv * inv) / (float)N;
+
+    for (int i = threadIdx.x; i < Npack; i += BLOCK) {
+        float zv[K], gv[K], gcs[K];
+        load_pack(zr,  i, zv);
+        load_pack(dyr, i, gv);
+        #pragma unroll
+        for (int k = 0; k < K; ++k) gcs[k] = gamma[K*i + k];
+        float out[K];
+        #pragma unroll
+        for (int k = 0; k < K; ++k) {
+            float t  = gcs[k] * zv[k] * inv;
+            float sg = nilu_sigmoid(t);
+            float sp = sg * (1.f - sg);
+            float h  = sg + t * sp;
+            out[k] = gv[k] * h - cf * t;
+        }
+        store_pack(dzr, i, out);
+    }
+}
+
+template <typename T, int BLOCK>
+__global__ void bwd_2pass_scalar_glbdg(
+    const T* __restrict__ z,
+    const float* __restrict__ rho_in,
+    const T* __restrict__ dy,
+    T* __restrict__ dz,
+    const float* __restrict__ gamma,
+    float* __restrict__ dgamma_out,
+    int N)
+{
+    __shared__ float warp_buf[BLOCK / WARP];
+    __shared__ float bcast;
+
+    int r = blockIdx.x;
+    float rho = rho_in[r];
+    float inv = 1.f / rho;
+    const T* zr  = z  + (long)r * N;
+    const T* dyr = dy + (long)r * N;
+    T*       dzr = dz + (long)r * N;
+
+    float s_local = 0.f;
+    for (int i = threadIdx.x; i < N; i += BLOCK) {
+        float zi = (float)zr[i];
+        float gi = (float)dyr[i];
+        float gc = gamma[i];
+        float t  = gc * zi * inv;
+        float sg = nilu_sigmoid(t);
+        float sp = sg * (1.f - sg);
+        float c  = gi * zi * zi * sp;
+        s_local += c;
+        atomicAdd(dgamma_out + i, c * inv);
+    }
+    float S = block_sum_bcast(s_local, warp_buf, &bcast);
+    float cf = S * (inv * inv) / (float)N;
+
+    for (int i = threadIdx.x; i < N; i += BLOCK) {
+        float zi = (float)zr[i];
+        float gi = (float)dyr[i];
+        float gc = gamma[i];
+        float t  = gc * zi * inv;
+        float sg = nilu_sigmoid(t);
+        float sp = sg * (1.f - sg);
+        float h  = sg + t * sp;
+        dzr[i] = (T)(gi * h - cf * t);
+    }
+}
+
 template <typename T, int BLOCK>
 __global__ void bwd_2pass_scalar(
     const T* __restrict__ z,
@@ -636,33 +748,52 @@ void launch_bwd(const scalar_t* z, const float* rho, const scalar_t* dy,
             KERN<<<M, block, (SMEM_BYTES), s>>>(z, rho, dy, dz, gamma, dgamma, N);    \
         } while (0)
 
-    if (vec && sm_zg <= max_smem) {
+    // When sh_dg (N * fp32) exceeds per-block smem cap (H100 ≈ 228 KB),
+    // we cannot hold per-row dgamma partials in smem. Fall back to a
+    // glbdg variant that atomicAdds directly into global dgamma_out.
+    const bool dg_fits = sm_dg <= max_smem;
+
+    if (vec && dg_fits && sm_zg <= max_smem) {
         switch (block) {
             case 128: LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 128>),  sm_zg); break;
             case 256: LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 256>),  sm_zg); break;
             case 512: LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 512>),  sm_zg); break;
             default:  LAUNCH_BWD((bwd_double_cached_vec<scalar_t, 1024>), sm_zg); break;
         }
-    } else if (vec && sm_z <= max_smem) {
+    } else if (vec && dg_fits && sm_z <= max_smem) {
         switch (block) {
             case 128: LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 128>),  sm_z); break;
             case 256: LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 256>),  sm_z); break;
             case 512: LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 512>),  sm_z); break;
             default:  LAUNCH_BWD((bwd_z_cached_vec<scalar_t, 1024>), sm_z); break;
         }
-    } else if (vec) {
+    } else if (vec && dg_fits) {
         switch (block) {
             case 128: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 128>),  sm_dg); break;
             case 256: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 256>),  sm_dg); break;
             case 512: LAUNCH_BWD((bwd_2pass_vec<scalar_t, 512>),  sm_dg); break;
             default:  LAUNCH_BWD((bwd_2pass_vec<scalar_t, 1024>), sm_dg); break;
         }
-    } else {
+    } else if (dg_fits) {
         switch (block) {
             case 128: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 128>),  sm_dg); break;
             case 256: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 256>),  sm_dg); break;
             case 512: LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 512>),  sm_dg); break;
             default:  LAUNCH_BWD((bwd_2pass_scalar<scalar_t, 1024>), sm_dg); break;
+        }
+    } else if (vec) {
+        switch (block) {
+            case 128: LAUNCH_BWD((bwd_2pass_vec_glbdg<scalar_t, 128>),  0); break;
+            case 256: LAUNCH_BWD((bwd_2pass_vec_glbdg<scalar_t, 256>),  0); break;
+            case 512: LAUNCH_BWD((bwd_2pass_vec_glbdg<scalar_t, 512>),  0); break;
+            default:  LAUNCH_BWD((bwd_2pass_vec_glbdg<scalar_t, 1024>), 0); break;
+        }
+    } else {
+        switch (block) {
+            case 128: LAUNCH_BWD((bwd_2pass_scalar_glbdg<scalar_t, 128>),  0); break;
+            case 256: LAUNCH_BWD((bwd_2pass_scalar_glbdg<scalar_t, 256>),  0); break;
+            case 512: LAUNCH_BWD((bwd_2pass_scalar_glbdg<scalar_t, 512>),  0); break;
+            default:  LAUNCH_BWD((bwd_2pass_scalar_glbdg<scalar_t, 1024>), 0); break;
         }
     }
     #undef LAUNCH_BWD

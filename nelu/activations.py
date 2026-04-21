@@ -127,8 +127,15 @@ class _GatedBase(nn.Module):
         self.eps = eps
         self.rms_mode = rms_mode
         self._is_nelu_gamma_module = True
-        self.gamma = nn.Parameter(torch.tensor(float(gamma_init),
-                                               dtype=torch.float32))
+        # Shape (1,) not () — broadcasting makes the math identical, but
+        # many optimizers assume parameters have rank ≥ 1. timm's LAMB,
+        # for instance, does `p.grad.div_(clip_global_grad_norm)` with
+        # clip_global_grad_norm shape [1]; in-place broadcast can't
+        # change a 0-dim grad's rank and crashes. Keeping γ as (1,)
+        # avoids the whole class of issues.
+        self.gamma = nn.Parameter(
+            torch.full((1,), float(gamma_init), dtype=torch.float32)
+        )
 
     def extra_repr(self) -> str:
         return (
@@ -140,6 +147,19 @@ class _GatedBase(nn.Module):
 
     def reduction_dims(self, z: torch.Tensor) -> tuple[int, ...]:
         return _dims_from_rms_mode(z, self.rms_mode)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
+                              strict, missing_keys, unexpected_keys, error_msgs):
+        # Back-compat: older checkpoints saved γ as a 0-dim scalar.
+        # Reshape to (1,) so load_state_dict matches the new param shape.
+        gamma_key = prefix + "gamma"
+        tensor = state_dict.get(gamma_key)
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 0:
+            state_dict[gamma_key] = tensor.reshape(1)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
 
 
 class NELU(_GatedBase):

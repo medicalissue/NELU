@@ -150,6 +150,17 @@ def parse_args():
                    help="Probability of applying Mixup/CutMix per batch (AugReg: 0.5)")
     p.add_argument("--aug-repeats", type=int, default=0,
                    help="Repeated Augmentation count (DeiT/ConvNeXt use 3; 0 disables)")
+    p.add_argument("--bce-loss", action="store_true",
+                   help="DeiT-III: use BCE-with-logits on thresholded Mixup targets")
+    p.add_argument("--init-scale", type=float, default=None,
+                   help="DeiT-III LayerScale init value (timm init_values), "
+                        "e.g. 1e-4 for ViT-B, 1e-5 for ViT-L. None = timm default.")
+    p.add_argument("--deit3-transform", action="store_true",
+                   help="DeiT-III: replace timm's inception crop + RandAug with "
+                        "RandomResizedCrop + flip + ThreeAugment + ColorJitter.")
+    p.add_argument("--unscale-lr", action="store_true",
+                   help="DeiT-III: use --lr verbatim without the batch-size scaling "
+                        "that some optimizers (LAMB) apply internally.")
 
     # Optimizer
     p.add_argument("--opt", type=str, default="rmsproptf")
@@ -522,6 +533,9 @@ def main():
     }
     if args.drop_connect > 0:
         model_kwargs["drop_connect_rate"] = args.drop_connect
+    # DeiT-III LayerScale: timm ViTs accept `init_values=` to enable LayerScale.
+    if args.init_scale is not None:
+        model_kwargs["init_values"] = args.init_scale
 
     try:
         model = timm.create_model(args.model, **model_kwargs)
@@ -546,6 +560,22 @@ def main():
     if is_primary(rank):
         param_count = sum(p.numel() for p in model.parameters())
         print(f"Parameters: {param_count:,}, swapped activations: {n_swapped}")
+
+    # DeiT-III: head bias init to -log(num_classes-1) ≈ -6.9 for 1000 classes.
+    # Provides a calibrated sigmoid prior of 1/num_classes. Without this,
+    # LayerScale(1e-4) + BCE loss + random head weights drives logits deeply
+    # negative → sigmoid ≈ 0 → BCE gradient ≈ 0 → model never learns
+    # (manifests as train loss ~0.01 and val top1 stuck at random chance).
+    if args.bce_loss:
+        head_mod = getattr(model, "head", None)
+        if isinstance(head_mod, nn.Linear) and head_mod.bias is not None:
+            import math as _math
+            prior = _math.log(1.0 / max(1, args.num_classes - 1))  # ≈ -6.907
+            with torch.no_grad():
+                head_mod.bias.fill_(prior)
+            if is_primary(rank):
+                print(f"[DeiT-III] initialized head.bias to {prior:.3f} "
+                      f"(sigmoid prior = 1/{args.num_classes})")
 
     model = model.to(device)
 
@@ -596,13 +626,63 @@ def main():
     if args.aug_repeats and args.aug_repeats > 0:
         loader_kwargs["num_aug_repeats"] = args.aug_repeats
     loader_train = create_loader(dataset_train, **loader_kwargs)
-    loader_val = create_loader(
-        dataset_val, input_size=data_config["input_size"],
+
+    # DeiT-III: replace timm's transform with the paper's exact pipeline
+    # (simple RandomResizedCrop + flip + ThreeAugment + ColorJitter +
+    # normalize). Matches facebookresearch/deit main_deit3.py when --src.
+    if args.deit3_transform:
+        import random as _py_random
+        from torchvision import transforms as _tv
+        MEAN = (0.485, 0.456, 0.406)
+        STD  = (0.229, 0.224, 0.225)
+        crop_size = data_config["input_size"][-1]
+
+        class _ThreeAugment(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.ops = [
+                    _tv.RandomGrayscale(p=1.0),
+                    _tv.RandomSolarize(threshold=128, p=1.0),
+                    _tv.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+                ]
+            def forward(self, img):
+                return self.ops[_py_random.randint(0, 2)](img)
+
+        cj = args.color_jitter
+        deit3_tf = _tv.Compose([
+            _tv.RandomResizedCrop(
+                crop_size, scale=(0.08, 1.0),
+                interpolation=_tv.InterpolationMode.BICUBIC),
+            _tv.RandomHorizontalFlip(),
+            _ThreeAugment(),
+            _tv.ColorJitter(cj, cj, cj),
+            _tv.ToTensor(),
+            _tv.Normalize(MEAN, STD),
+        ])
+        # timm wraps dataset in a PrefetchLoader; the underlying .dataset
+        # attribute exposes the raw ImageDataset whose .transform is what
+        # actually runs per sample.
+        inner = loader_train.dataset
+        if hasattr(inner, "transform"):
+            inner.transform = deit3_tf
+        else:
+            raise RuntimeError("Could not locate dataset.transform to override for DeiT-III transform")
+        if is_primary(rank):
+            print(f"[deit3] replaced train transform: "
+                  f"RRC({crop_size}, scale=(0.08,1.0), BICUBIC) + HFlip + ThreeAugment + "
+                  f"ColorJitter({cj}) + Normalize")
+    val_loader_kwargs = dict(
+        input_size=data_config["input_size"],
         batch_size=val_batch_size, is_training=False,
         num_workers=args.workers,
         distributed=world_size > 1,
         pin_memory=True,
     )
+    if args.deit3_transform:
+        # DeiT-III Table 1: "Test crop ratio = 1.0" (no center-crop; just
+        # resize to input_size). timm default is 0.875 — override here.
+        val_loader_kwargs["crop_pct"] = 1.0
+    loader_val = create_loader(dataset_val, **val_loader_kwargs)
 
     mixup_fn = None
     mixup_active = args.mixup > 0.0 or args.cutmix > 0.0
@@ -633,7 +713,25 @@ def main():
     )
 
     # -- Loss --
-    if mixup_active:
+    if args.bce_loss:
+        # DeiT-III: BCE-with-logits on multi-hot targets obtained by
+        # thresholding Mixup soft targets at 0 (matches main_deit3.py).
+        class _Deit3BCE(nn.Module):
+            def __init__(self, num_classes):
+                super().__init__()
+                self.num_classes = num_classes
+                self.bce = nn.BCEWithLogitsLoss()
+            def forward(self, logits, targets):
+                if targets.ndim == 1:  # hard labels (no mixup active)
+                    targets = torch.nn.functional.one_hot(
+                        targets, num_classes=self.num_classes
+                    ).to(logits.dtype)
+                else:
+                    # soft targets from Mixup → multi-hot via > 0 threshold
+                    targets = targets.gt(0.0).to(logits.dtype)
+                return self.bce(logits, targets)
+        train_loss_fn = _Deit3BCE(args.num_classes).to(device)
+    elif mixup_active:
         from timm.loss import SoftTargetCrossEntropy
         train_loss_fn = SoftTargetCrossEntropy().to(device)
     elif args.smoothing > 0:
@@ -662,6 +760,17 @@ def main():
         raw_model = model.module if hasattr(model, "module") else model
         raw_model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
+        # Back-compat: older NELU/NiLU checkpoints saved γ as 0-dim, so
+        # optimizer state (exp_avg, exp_avg_sq, momentum_buffer, ...) is
+        # also 0-dim. The new γ Parameter is (1,), so reshape the state
+        # tensors to match — otherwise optimizer.step() hits an in-place
+        # shape mismatch on first update.
+        for p in raw_model.parameters():
+            if p.ndim == 1 and p.numel() == 1 and p in optimizer.state:
+                st = optimizer.state[p]
+                for k, v in list(st.items()):
+                    if isinstance(v, torch.Tensor) and v.ndim == 0:
+                        st[k] = v.reshape(1)
         if "scheduler" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt.get("epoch", 0) + 1
