@@ -77,8 +77,11 @@ class _GatedGLU(nn.Module):
         g = self.w_gate(x)
         u = self.w_up(x)
         axes = (g.ndim - 1,)
-        rho = rms(g, axes, self.eps)
-        h = g * type(self)._gate_fn(self.gamma * g / rho)
+        # Upcast the statistics path to float32 (see GateNorm.forward).
+        g_fp32 = g.float()
+        rho = rms(g_fp32, axes, self.eps)
+        gate = type(self)._gate_fn(self.gamma * g_fp32 / rho)
+        h = g * gate.to(g.dtype)
         return self.w_down(h * u)
 
     def extra_repr(self) -> str:

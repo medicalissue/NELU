@@ -121,7 +121,13 @@ def _register(op: str) -> None:
         grad_z, dgamma = torch.ops.gate_norm.__getattr__(f"{op}_bwd")(
             z, rho, grad_y, gamma
         )
-        return grad_z, dgamma.to(gamma.dtype).reshape(gamma.shape), None
+        # `gamma` here is the length-N broadcast we constructed outside
+        # the custom op (see `_fused`). The surrounding autograd graph
+        # records an `expand` on the upstream scalar Parameter, so the
+        # summation back to shape (1,) happens through
+        # `ExpandBackward` — we return the per-feature gradient
+        # unchanged.
+        return grad_z, dgamma.to(gamma.dtype), None
 
     torch.library.register_autograd(fwd_name, _backward, setup_context=_setup)
 

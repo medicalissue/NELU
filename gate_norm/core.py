@@ -85,10 +85,18 @@ class GateNorm(nn.Module):
         if z.is_cuda:
             fused = self._fused_backend()
             if fused is not None:
+                # The fused kernels already upcast statistics to float32
+                # internally (see gate_norm/csrc/*.cu); safe under AMP.
                 return fused(z, self.gamma, axes=axes, eps=self.eps)
-        rho = rms(z, axes, self.eps)
-        t = self.gamma * z / rho
-        return z * type(self)._gate_python(t)
+        # Python fallback: upcast the gate-input statistics to float32 so
+        # RMS, γ·z/ρ and the squashing function do not suffer fp16/bf16
+        # underflow. The outer multiplication by z keeps the model's
+        # activation dtype so the AMP autocast contract is preserved.
+        z_fp32 = z.float()
+        rho = rms(z_fp32, axes, self.eps)
+        t = self.gamma * z_fp32 / rho
+        gate = type(self)._gate_python(t)
+        return z * gate.to(z.dtype)
 
     def extra_repr(self) -> str:
         return (
