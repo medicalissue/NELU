@@ -216,25 +216,62 @@ run_job() {
         --exclude "lease" --exclude "complete" --exclude "checkpoint-*.pth.tar" \
         --exact-timestamps --only-show-errors || true
 
-    # timm's CheckpointSaver writes into "${args.output}/${args.experiment}/"
-    # — i.e. /tmp/runs/<exp>/<exp>/last.pth.tar. S3 mirrors this nested
-    # layout. So the resume point and W&B sidecar live under the nested
-    # subdir, not under $outdir directly.
-    local ckptdir="${outdir}/${exp}"
+    # Locate the last.pth.tar. timm's CheckpointSaver writes into
+    # "${args.output}/${args.experiment}/" so it lives at $outdir/$exp/
+    # in practice, but we also probe $outdir/ directly as a safety net
+    # against future timm layout changes. find(1) is our truth: if there
+    # is exactly one last.pth.tar anywhere under $outdir we use it, no
+    # matter where timm chose to put it.
+    local last_ckpt=""
+    if [[ -f "${outdir}/${exp}/last.pth.tar" ]]; then
+        last_ckpt="${outdir}/${exp}/last.pth.tar"
+    elif [[ -f "${outdir}/last.pth.tar" ]]; then
+        last_ckpt="${outdir}/last.pth.tar"
+    else
+        # Fallback: anywhere under outdir.
+        last_ckpt=$(find "$outdir" -maxdepth 3 -name 'last.pth.tar' 2>/dev/null | head -1)
+    fi
+
+    # Defence-in-depth: if S3 prefix is non-empty but we still didn't
+    # find last.pth.tar, something is wrong (layout mismatch, download
+    # failure). Refuse to silently train from scratch over a live exp.
+    local s3_has_ckpt=0
+    if aws s3 ls "${s3_prefix}/" --recursive 2>/dev/null | grep -q 'last.pth.tar'; then
+        s3_has_ckpt=1
+    fi
+    if (( s3_has_ckpt == 1 )) && [[ -z "$last_ckpt" ]]; then
+        log "FATAL: S3 has last.pth.tar for ${exp} but local copy missing after sync — refusing to restart from scratch"
+        log "  s3_prefix=${s3_prefix}  outdir=${outdir}"
+        log "  outdir contents:"; ls -lR "$outdir" >&2 || true
+        lease_release "$exp"
+        rm -rf "$outdir"
+        return 1
+    fi
 
     local resume_flag=()
-    if [[ -f "${ckptdir}/last.pth.tar" ]]; then
-        resume_flag=(--resume "${ckptdir}/last.pth.tar")
-        log "  resuming from ${ckptdir}/last.pth.tar"
+    local ckptdir=""
+    if [[ -n "$last_ckpt" ]]; then
+        resume_flag=(--resume "$last_ckpt")
+        ckptdir="$(dirname "$last_ckpt")"
+        log "  resuming from ${last_ckpt}"
     fi
 
     local wandb_id_flag=()
-    if [[ -f "${ckptdir}/wandb_run_id.json" ]]; then
+    # W&B sidecar lives alongside the checkpoint (same dir).
+    local sidecar=""
+    if [[ -n "$ckptdir" && -f "${ckptdir}/wandb_run_id.json" ]]; then
+        sidecar="${ckptdir}/wandb_run_id.json"
+    elif [[ -f "${outdir}/wandb_run_id.json" ]]; then
+        sidecar="${outdir}/wandb_run_id.json"
+    else
+        sidecar=$(find "$outdir" -maxdepth 3 -name 'wandb_run_id.json' 2>/dev/null | head -1)
+    fi
+    if [[ -n "$sidecar" ]]; then
         local saved_id
-        saved_id=$(python -c "import json,sys; print(json.load(open('${ckptdir}/wandb_run_id.json')).get('run_id',''))" 2>/dev/null || true)
+        saved_id=$(python -c "import json,sys; print(json.load(open('${sidecar}')).get('run_id',''))" 2>/dev/null || true)
         if [[ -n "$saved_id" ]]; then
             wandb_id_flag=(--wandb-resume-id "$saved_id")
-            log "  resuming W&B run ${saved_id}"
+            log "  resuming W&B run ${saved_id} (sidecar=${sidecar})"
         fi
     fi
 
