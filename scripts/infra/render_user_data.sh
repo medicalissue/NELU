@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Render scripts/infra/user-data.sh with env vars substituted, output to
-# stdout (base64-encoded so `aws ec2 run-instances --user-data` accepts
-# it inline without further escaping).
+# stdout. Python handles the substitution so arbitrary characters in
+# values (slashes, pipes, newlines) pass through safely — unlike sed,
+# whose delimiter rules differ between GNU and BSD.
 #
 # Required env (usually sourced from .env):
-#   REPO_URL, REPO_REF
-#   VENV_S3_URL
-#   CKPT_BUCKET
-#   WANDB_API_KEY, WANDB_PROJECT, WANDB_ENTITY
+#   REPO_URL, REPO_REF, VENV_S3_URL, CKPT_BUCKET,
+#   WANDB_API_KEY, WANDB_PROJECT, WANDB_ENTITY,
 #   AWS_DEFAULT_REGION
-#
 # Optional:
-#   JOB_ORDER   (defaults to orchestrate.sh's built-in list if empty)
+#   JOB_ORDER   (empty → orchestrate.sh uses its built-in default)
 
 set -euo pipefail
 
@@ -28,14 +26,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 template="$SCRIPT_DIR/user-data.sh"
 
-sed \
-  -e "s|@@REPO_URL@@|$REPO_URL|g" \
-  -e "s|@@REPO_REF@@|$REPO_REF|g" \
-  -e "s|@@VENV_S3_URL@@|$VENV_S3_URL|g" \
-  -e "s|@@CKPT_BUCKET@@|$CKPT_BUCKET|g" \
-  -e "s|@@WANDB_API_KEY@@|$WANDB_API_KEY|g" \
-  -e "s|@@WANDB_PROJECT@@|$WANDB_PROJECT|g" \
-  -e "s|@@WANDB_ENTITY@@|$WANDB_ENTITY|g" \
-  -e "s|@@AWS_DEFAULT_REGION@@|$AWS_DEFAULT_REGION|g" \
-  -e "s|@@JOB_ORDER@@|$JOB_ORDER|g" \
-  "$template"
+export REPO_URL REPO_REF VENV_S3_URL CKPT_BUCKET WANDB_API_KEY \
+       WANDB_PROJECT WANDB_ENTITY AWS_DEFAULT_REGION JOB_ORDER
+
+python3 - "$template" <<'PY'
+import os, sys, pathlib
+tpl = pathlib.Path(sys.argv[1]).read_text()
+keys = [
+    "REPO_URL", "REPO_REF", "VENV_S3_URL", "CKPT_BUCKET",
+    "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
+    "AWS_DEFAULT_REGION", "JOB_ORDER",
+]
+for k in keys:
+    tpl = tpl.replace(f"@@{k}@@", os.environ.get(k, ""))
+sys.stdout.write(tpl)
+PY
