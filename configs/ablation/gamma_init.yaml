@@ -3,9 +3,10 @@
 # Tests the curriculum hypothesis: does a near-zero γ init (1e-6) outperform
 # γ = 1 (fully gated from step 0) and γ = 10 (aggressive gate)?
 #
-# The 90-epoch schedule saves compute while still being long enough to
-# surface early divergence. Override --gamma-init on the command line to
-# sweep (suggested values: 1e-6, 1.0, 10.0).
+# Uses the convnext_tiny.yaml recipe (ported from MMPretrain) but with
+# epochs reduced from 300 to 90 to save compute. The pipeline and
+# optimizer match the main recipe so curriculum effects are not confounded
+# with augmentation / schedule changes.
 
 model: convnext_tiny
 num_classes: 1000
@@ -18,7 +19,7 @@ data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
-batch_size: 128            # 128 × 8 = 1024 effective
+batch_size: 128              # 128 × 8 = 1024 effective (smaller than main recipe)
 grad_accum_steps: 1
 workers: 10
 
@@ -29,6 +30,7 @@ lr_base: 4.0e-3
 lr_base_size: 1024
 lr_base_scale: linear
 weight_decay: 0.05
+# filter_bias_and_bn=True (timm default) handles norm/bias wd=0 automatically.
 
 sched: cosine
 epochs: 90
@@ -37,19 +39,18 @@ warmup_lr: 4.0e-6
 min_lr: 1.0e-6
 
 aa: rand-m9-mstd0.5-inc1
-color_jitter: 0.4
+color_jitter: 0.0
 smoothing: 0.1
 mixup: 0.8
 cutmix: 1.0
 mixup_prob: 1.0
 mixup_switch_prob: 0.5
 reprob: 0.25
-remode: pixel
-aug_repeats: 3
+remode: rand
 
 amp: true
 clip_grad: null
-model_ema: false
+model_ema: false             # Abbreviated schedule — EMA only helps late training
 seed: 42
 
 activation: nelu

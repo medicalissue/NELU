@@ -1,12 +1,14 @@
 # Swin-Tiny (Liu et al. 2021), ImageNet-1k from scratch.
 #
-# Recipe ported from MMPretrain's reproduced config
+# Recipe ported verbatim from MMPretrain's reproduced config
 #   https://github.com/open-mmlab/mmpretrain/blob/main/configs/swin_transformer/swin-tiny_16xb64_in1k.py
+#   + _base_/schedules/imagenet_bs1024_adamw_swin.py
 # Reported Top-1 81.18 % (paper: 81.3 %). Effective batch 1024.
 #
-# The paramwise no-wd list (`absolute_pos_embed`, `relative_position_bias_table`)
-# is already declared inside timm's `SwinTransformer.no_weight_decay()`, so
-# no per-key override is needed on the trainer side.
+# timm's Swin model exposes `absolute_pos_embed` and
+# `relative_position_bias_table` in `no_weight_decay()`, so setting
+# `opt_no_weight_decay: true` yields the same parameter-group split as
+# MMPretrain's paramwise_cfg.
 
 model: swin_tiny_patch4_window7_224
 num_classes: 1000
@@ -16,8 +18,8 @@ drop_path: 0.2
 data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
-crop_pct: 0.9             # MMPretrain ResizeEdge 256 → CenterCrop 224
-batch_size: 128           # 128 × 8 GPUs = 1024 effective
+crop_pct: 0.875              # ResizeEdge(256) + CenterCrop(224) ⇒ 224/256
+batch_size: 128              # 128 × 8 GPUs = 1024 effective
 grad_accum_steps: 1
 workers: 10
 
@@ -28,22 +30,25 @@ lr_base: 1.0e-3
 lr_base_size: 1024
 lr_base_scale: linear
 weight_decay: 0.05
+# filter_bias_and_bn=True (timm default) zeros wd on bias + LN params; timm's
+# SwinTransformer.no_weight_decay() additionally excludes absolute_pos_embed
+# and relative_position_bias_table, matching MMPretrain's custom_keys.
 
 sched: cosine
 epochs: 300
 warmup_epochs: 20
-warmup_lr: 1.0e-6         # LinearLR start_factor 1e-3 × base_lr
+warmup_lr: 1.0e-6            # start_factor 1e-3 × base_lr 1e-3
 min_lr: 1.0e-5
 
 aa: rand-m9-mstd0.5-inc1
-color_jitter: 0.4
+color_jitter: 0.0
 smoothing: 0.1
 mixup: 0.8
 cutmix: 1.0
 mixup_prob: 1.0
 mixup_switch_prob: 0.5
 reprob: 0.25
-remode: pixel
+remode: rand
 
 amp: true
 clip_grad: 5.0

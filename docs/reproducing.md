@@ -19,6 +19,40 @@ counterpart (NELU or NiLU). Each configuration is run once.
 paper verifies that the baseline reproductions match the numbers reported
 by the cited source before swapping the activation and re-training.
 
+### Recipe fidelity
+
+The ConvNeXt / DeiT / Swin YAMLs are byte-for-byte translations of the
+MMPretrain reproduced configs (after resolving their ``_base_``
+inheritance). Every recipe parameter matches the upstream value:
+AdamW betas and epsilon, weight decay, learning rate at the declared
+batch size, cosine schedule with 20-epoch linear warmup, RandAugment
+policies (``timm_increasing``, magnitude 9, std 0.5), RandomErasing
+probability 0.25 in ``rand`` mode, Mixup α=0.8 / CutMix α=1.0 with
+switch probability 0.5, label smoothing 0.1, drop_path per model,
+gradient clipping (Swin only, max-norm 5.0), and EMA where the upstream
+config enables it (ConvNeXt decay 0.9999, DeiT-Base decay 0.99996).
+The MMPretrain pipeline contains no ColorJitter so neither do we.
+
+timm's ``create_optimizer_v2`` already exposes ``filter_bias_and_bn=True``
+as its default, which groups all 1-D parameters (biases, LayerNorm
+weights) and the model's own ``no_weight_decay()`` set into a wd-free
+parameter group. This matches MMPretrain's
+``norm_decay_mult=bias_decay_mult=flat_decay_mult=0`` plus the
+``custom_keys`` for ``cls_token``, ``pos_embed``,
+``absolute_pos_embed``, and ``relative_position_bias_table``.
+
+The EfficientNet-B0 and EfficientNet-B2 recipes are taken directly from
+timm's ``hfdocs/source/training_script.mdx``; they produce the
+``efficientnet_b0.ra_in1k`` and ``efficientnet_b2.ra_in1k`` checkpoints
+published on HuggingFace.
+
+The only intentional deviation from MMPretrain is the random seed. The
+upstream default is ``randomness=dict(seed=None)`` — a fresh random
+integer per run. We fix ``seed=42`` in every config so the baseline and
+Gate-Normalization arms of our experiment matrix are directly
+comparable. ``tests/test_configs.py`` guards every parameter mentioned
+above against regressions.
+
 ## Hardware
 
 Every recipe is intended for 8× H100 80 GB. On smaller GPUs, reduce

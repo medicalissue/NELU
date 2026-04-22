@@ -1,9 +1,12 @@
 # DeiT-Base/16 (Touvron et al. 2020), ImageNet-1k from scratch.
 #
-# Recipe ported from MMPretrain's reproduced config
+# Recipe ported verbatim from MMPretrain's reproduced config
 #   https://github.com/open-mmlab/mmpretrain/blob/main/configs/deit/deit-base_16xb64_in1k.py
-# Reported Top-1 81.76 % (paper: 81.8 %). Effective batch 1024. The only
-# deltas from deit_small.yaml are the model name and a deeper `drop_path`.
+#   + _base_/schedules/imagenet_bs1024_adamw_swin.py
+# Reported Top-1 81.76 % (paper: 81.8 %). Effective batch 1024.
+#
+# DeiT-Base reintroduces drop_path=0.1 and adds EMA (momentum=4e-5
+# ⇒ decay ≈ 0.99996) that the Small variant omits.
 
 model: deit_base_patch16_224
 num_classes: 1000
@@ -14,7 +17,7 @@ data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
-batch_size: 128
+batch_size: 128              # 128 × 8 GPUs = 1024 effective
 grad_accum_steps: 1
 workers: 10
 
@@ -25,26 +28,29 @@ lr_base: 1.0e-3
 lr_base_size: 1024
 lr_base_scale: linear
 weight_decay: 0.05
+# filter_bias_and_bn=True (timm default) + no_weight_decay() cover
+# bias, LayerNorm weight, cls_token, and pos_embed.
 
 sched: cosine
 epochs: 300
-warmup_epochs: 5
+warmup_epochs: 20
 warmup_lr: 1.0e-6
 min_lr: 1.0e-5
 
 aa: rand-m9-mstd0.5-inc1
-color_jitter: 0.4
+color_jitter: 0.0
 smoothing: 0.1
 mixup: 0.8
 cutmix: 1.0
 mixup_prob: 1.0
 mixup_switch_prob: 0.5
 reprob: 0.25
-remode: pixel
+remode: rand
 
 amp: true
-clip_grad: null
-model_ema: false
+clip_grad: 5.0
+model_ema: true
+model_ema_decay: 0.99996     # MMPretrain EMAHook momentum=4e-5 ⇒ decay=1−4e-5
 seed: 42
 
 activation: gelu

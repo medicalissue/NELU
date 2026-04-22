@@ -1,9 +1,9 @@
 # ConvNeXt-Small, ImageNet-1k from scratch.
 #
-# Recipe ported from MMPretrain's reproduced config
+# Recipe ported verbatim from MMPretrain's reproduced config
 #   https://github.com/open-mmlab/mmpretrain/blob/main/configs/convnext/convnext-small_32xb128_in1k.py
-# Reported Top-1 83.16 % (paper: 83.1 %). Effective batch 4096. Differs from
-# convnext_tiny only in model name and `drop_path`.
+# Reported Top-1 83.16 % (paper: 83.1 %). Effective batch 4096. Differs
+# from convnext_tiny only in the model name and drop_path.
 
 model: convnext_small
 num_classes: 1000
@@ -27,6 +27,7 @@ lr_base: 4.0e-3
 lr_base_size: 4096
 lr_base_scale: linear
 weight_decay: 0.05
+# filter_bias_and_bn=True (timm default) handles norm/bias wd=0 automatically.
 
 sched: cosine
 epochs: 300
@@ -35,14 +36,14 @@ warmup_lr: 4.0e-6
 min_lr: 1.0e-5
 
 aa: rand-m9-mstd0.5-inc1
-color_jitter: 0.4
+color_jitter: 0.0
 smoothing: 0.1
 mixup: 0.8
 cutmix: 1.0
 mixup_prob: 1.0
 mixup_switch_prob: 0.5
 reprob: 0.25
-remode: pixel
+remode: rand
 
 amp: true
 clip_grad: null
