@@ -10,7 +10,8 @@ num_classes: 1000
 drop: 0.0
 drop_path: 0.4
 model_kwargs:
-  layer_scale_init_value: 1.0e-6
+  ls_init_value: 1.0e-6        # timm uses `ls_init_value` (formerly
+                               # `layer_scale_init_value`) for ConvNeXt.
 
 data_dir: /data/imagenet
 input_size: [3, 224, 224]
