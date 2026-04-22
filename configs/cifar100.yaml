@@ -31,5 +31,8 @@ rms_mode: per_sample
 
 # ── Runtime ─────────────────────────────────────────────────────
 amp: true
+amp_dtype: float16            # `bfloat16` on Hopper removes the need for GradScaler
 compile: true
+compile_mode: null            # null|default|reduce-overhead|max-autotune
+compile_backend: inductor
 seed: 42

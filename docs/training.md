@@ -40,6 +40,21 @@ Useful flags:
   run-id sidecar, this keeps all logs on one run.
 * ``--rms-mode per_sample|per_token`` — override the auto-detected
   reduction axes.
+* ``--torchcompile [backend]`` (alias: ``inductor`` when no arg), plus
+  ``--torchcompile-mode {default,reduce-overhead,max-autotune,…}`` — wrap
+  the training task in ``torch.compile``. Gate-Normalization's fused
+  CUDA kernels are registered via ``torch.library.custom_op`` with
+  ``register_fake`` tensors, so Dynamo traces through them without graph
+  breaks. The baseline (GELU/SiLU) arm compiles unconditionally; the
+  Gate-Normalization arm falls through to the Python path on the first
+  iteration and the CUDA op on the rest.
+* ``--amp`` + ``--amp-dtype {float16,bfloat16}`` — bfloat16 is the
+  preferred choice on Hopper (no GradScaler needed, wider dynamic range).
+  Leave at ``float16`` for bitwise fidelity to MMPretrain/timm baselines.
+
+``torchcompile``/``torchcompile_mode`` are also exposed in every YAML
+(null by default) so ``--config`` alone is enough to turn compile on
+for a production sweep.
 
 ## SkyPilot (managed jobs)
 

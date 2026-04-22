@@ -51,6 +51,14 @@ reprob: 0.25
 remode: rand                 # MMPretrain RandomErasing mode='rand'
 
 amp: true
+# amp_dtype: float16 (default) — override to `bfloat16` on H100/Hopper for
+# better numerical headroom without GradScaler. Not part of the MMPretrain
+# recipe, so leave at default for paper-fidelity runs.
+# torch.compile is opt-in; set to "inductor" to enable. Gate-Normalization
+# registers torch.library.custom_op's for the fused CUDA kernels, so
+# Dynamo traces them without graph breaks.
+torchcompile: null
+torchcompile_mode: null
 clip_grad: null
 model_ema: true
 model_ema_decay: 0.9999      # MMPretrain EMAHook momentum=1e-4 ⇒ decay 1−1e-4

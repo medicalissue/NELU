@@ -1,0 +1,15 @@
+# Files to exclude from dstack workdir sync.
+# Keeps the VM upload small and avoids shipping local caches/artifacts.
+.git/
+.venv/
+__pycache__/
+*.pyc
+*.pth
+*.pth.tar
+wandb/
+runs/
+results/
+backups/
+third_party/
+.claude/
+.DS_Store

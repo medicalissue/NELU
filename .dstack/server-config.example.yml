@@ -1,0 +1,22 @@
+# Example dstack server config. Copy this to ~/.dstack/server/config.yml
+# after installing dstack (`pip install dstack[aws]`). dstack will start a
+# local server on first `dstack apply` and read the config.
+#
+# This file wires in two things:
+#   1. AWS credentials — uses the default provider chain (your aws CLI
+#      config + env vars). No secrets live in the file.
+#   2. The IAM instance profile for every worker VM. The profile has S3
+#      + EC2-volume permissions granted in scripts/infra/worker-policy.json.
+#
+# After editing, launch workers with:
+#       source .env
+#       bash scripts/launch_workers.sh 4
+
+projects:
+  - name: main
+    backends:
+      - type: aws
+        regions: [us-west-2]
+        iam_instance_profile: nelu-worker-profile
+        creds:
+          type: default

@@ -49,6 +49,8 @@ reprob: 0.25
 remode: rand                 # MMPretrain RandomErasing mode='rand'
 
 amp: true
+torchcompile: null              # "inductor" to enable torch.compile
+torchcompile_mode: null
 clip_grad: 5.0               # MMPretrain optim_wrapper.clip_grad.max_norm
 model_ema: false             # DeiT-Small explicitly drops EMA
 seed: 42                     # MMPretrain uses None (random); we pin for comparability

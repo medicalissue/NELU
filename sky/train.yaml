@@ -22,9 +22,20 @@ name: gate-norm-train
 
 resources:
   accelerators: H100:8
-  cloud: aws
   use_spot: true
   disk_size: 512
+  # Seek across us-west-2 AZs a/b/c/d until spot capacity opens up. The
+  # managed-jobs controller retries provisioning indefinitely for capacity
+  # errors, and on preemption during run EAGER_NEXT_REGION jumps to the
+  # next AZ in this allow-list immediately.
+  any_of:
+    - infra: aws/us-west-2/us-west-2a
+    - infra: aws/us-west-2/us-west-2b
+    - infra: aws/us-west-2/us-west-2c
+    - infra: aws/us-west-2/us-west-2d
+  job_recovery:
+    strategy: EAGER_NEXT_REGION
+    max_restarts_on_errors: 0
 
 # Environment variables — override any with `sky launch --env KEY=VAL`.
 envs:
@@ -36,6 +47,10 @@ envs:
   WANDB_API_KEY: ""
   WANDB_PROJECT: gate-normalization
   WANDB_ENTITY: ""
+  # torch.compile — empty to leave off (or rely on YAML defaults). Set to
+  # e.g. "inductor" to override the YAML `torchcompile: null` at launch.
+  TORCHCOMPILE: ""
+  TORCHCOMPILE_MODE: ""
 
 file_mounts:
   /data/imagenet:
@@ -81,4 +96,6 @@ run: |
     --log-wandb \
     --wandb-project "${WANDB_PROJECT}" \
     ${WANDB_ENTITY:+--wandb-entity ${WANDB_ENTITY}} \
+    ${TORCHCOMPILE:+--torchcompile ${TORCHCOMPILE}} \
+    ${TORCHCOMPILE_MODE:+--torchcompile-mode ${TORCHCOMPILE_MODE}} \
     ${RESUME_FLAG}

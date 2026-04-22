@@ -22,6 +22,7 @@ import importlib
 import json
 import logging
 import os
+import signal
 import time
 from collections import OrderedDict
 from contextlib import suppress
@@ -1100,6 +1101,17 @@ def main():
             f'Scheduled epochs: {num_epochs} {sched_explain}. '
             f'LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
 
+    # ── Graceful preempt: SIGTERM/SIGINT flips a flag checked at epoch
+    # boundary. timm's saver writes `last.pth.tar` at each epoch end, so
+    # exiting between epochs is sufficient to resume cleanly.
+    _preempted = {"flag": False}
+    def _on_signal(signum, frame):
+        if utils.is_primary(args):
+            _logger.warning(f"Signal {signum} received — will exit at end of current epoch.")
+        _preempted["flag"] = True
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
     results = []
     try:
         for epoch in range(start_epoch, num_epochs):
@@ -1222,8 +1234,30 @@ def main():
                 latest_results['validation'] = eval_metrics
             results.append(latest_results)
 
+            if _preempted["flag"]:
+                if utils.is_primary(args):
+                    _logger.warning("Exiting loop early (preempt signal). Checkpoint already saved.")
+                break
+
     except KeyboardInterrupt:
         pass
+
+    # ── Completion sentinel. Written only if we reached num_epochs without
+    # a preempt signal. The orchestrator treats the sentinel as proof that
+    # this experiment is done and should not be re-queued.
+    if (not _preempted["flag"]
+        and output_dir is not None
+        and utils.is_primary(args)):
+        try:
+            with open(os.path.join(output_dir, 'complete'), 'w') as f:
+                f.write(json.dumps({
+                    'experiment': args.experiment or '',
+                    'best_metric': best_metric,
+                    'best_epoch': best_epoch,
+                    'num_epochs': num_epochs,
+                }))
+        except OSError as e:
+            _logger.warning(f"Could not write complete sentinel: {e}")
 
     if args.distributed:
         torch.distributed.destroy_process_group()

@@ -46,6 +46,13 @@ def test_imagenet_config_values_are_sane(path: Path) -> None:
     assert 0 <= cfg["gamma_init"] <= 1e-3
     assert cfg["epochs"] > 0
     assert 0 <= cfg["warmup_epochs"] < cfg["epochs"]
+    # torch.compile knobs are opt-in; when present they must be null by default
+    # so paper-fidelity runs match MMPretrain's un-compiled baseline exactly.
+    assert cfg.get("torchcompile") in (None, "inductor", "eager", "aot_eager")
+    assert cfg.get("torchcompile_mode") in (
+        None, "default", "reduce-overhead",
+        "max-autotune", "max-autotune-no-cudagraphs",
+    )
 
 
 def test_every_family_has_both_scales() -> None:

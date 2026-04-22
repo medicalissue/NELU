@@ -371,11 +371,16 @@ def save_checkpoint(state, output_dir, interrupted=False):
         (output_path / "INTERRUPTED").touch()
 
 
+def _orig_module(model):
+    """Return the underlying module, stripping torch.compile's wrapper."""
+    return getattr(model, "_orig_mod", model)
+
+
 def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id,
                            training_log, epoch):
     return {
         "epoch": epoch,
-        "model": model.state_dict(),
+        "model": _orig_module(model).state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "best_acc": best_acc,
@@ -385,7 +390,7 @@ def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id
     }
 
 def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
-                    scaler=None, use_amp=False):
+                    scaler=None, use_amp=False, amp_dtype=torch.float16):
     model.train()
     total_loss = 0.0
     correct = 0
@@ -397,7 +402,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
             )
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             outputs = model(inputs)
             loss = F.cross_entropy(outputs, targets)
         if scaler is not None:
@@ -420,7 +425,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, use_amp=False):
+def evaluate(model, loader, device, use_amp=False, amp_dtype=torch.float16):
     model.eval()
     total_loss = 0.0
     correct = 0
@@ -431,7 +436,7 @@ def evaluate(model, loader, device, use_amp=False):
                 f"Interruption requested during evaluation at step {batch_idx}."
             )
         inputs, targets = inputs.to(device), targets.to(device)
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             outputs = model(inputs)
             loss = F.cross_entropy(outputs, targets)
         total_loss += loss.item() * inputs.size(0)
@@ -516,7 +521,16 @@ def parse_args():
     p.add_argument("--data_dir", type=str, default="/data")
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--amp", action="store_true", help="Use AMP (mixed precision)")
+    p.add_argument("--amp_dtype", type=str, default="float16",
+                   choices=["float16", "bfloat16"],
+                   help="AMP dtype when --amp is set")
     p.add_argument("--compile", action="store_true", help="Use torch.compile")
+    p.add_argument("--compile_mode", type=str, default=None,
+                   choices=[None, "default", "reduce-overhead", "max-autotune",
+                            "max-autotune-no-cudagraphs"],
+                   help="torch.compile mode (see PyTorch docs)")
+    p.add_argument("--compile_backend", type=str, default="inductor",
+                   help="torch.compile backend (default: inductor)")
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     p.add_argument("--wandb_project", type=str, default="nelu-cifar")
     p.add_argument("--config", type=str, default=None, help="YAML config (overrides defaults)")
@@ -566,13 +580,20 @@ def main():
     print(f"Model: {args.model}, activation: {args.activation}, "
           f"params: {param_count:,}, device: {device}")
 
-    # torch.compile
-    if args.compile and hasattr(torch, 'compile'):
-        model = torch.compile(model)
-        print("Model compiled with torch.compile")
+    # torch.compile — wrap the model in-place. State dicts are saved from
+    # the underlying ``._orig_mod`` when compiled so checkpoints remain
+    # portable between --compile and eager runs.
+    if args.compile:
+        assert hasattr(torch, "compile"), "torch.compile requires PyTorch >= 2.0"
+        model = torch.compile(model, backend=args.compile_backend,
+                              mode=args.compile_mode)
+        print(f"Model compiled with torch.compile "
+              f"(backend={args.compile_backend}, mode={args.compile_mode})")
 
-    # AMP scaler
-    scaler = torch.amp.GradScaler('cuda') if args.amp else None
+    # AMP scaler — only needed for fp16; bf16 has the fp32 dynamic range.
+    amp_dtype = torch.bfloat16 if args.amp_dtype == "bfloat16" else torch.float16
+    scaler = (torch.amp.GradScaler("cuda")
+              if args.amp and amp_dtype == torch.float16 else None)
 
     # Optimizer + scheduler (LinearLR warmup → main schedule)
     optimizer = optim.SGD(model.parameters(), lr=args.lr,
@@ -603,7 +624,7 @@ def main():
     if args.resume and os.path.isfile(args.resume):
         print(f"Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
+        _orig_module(model).load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
@@ -625,8 +646,10 @@ def main():
         try:
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer,
                                                      scheduler, device, epoch,
-                                                     scaler=scaler, use_amp=args.amp)
-            test_loss, test_acc = evaluate(model, test_loader, device, use_amp=args.amp)
+                                                     scaler=scaler, use_amp=args.amp,
+                                                     amp_dtype=amp_dtype)
+            test_loss, test_acc = evaluate(model, test_loader, device,
+                                           use_amp=args.amp, amp_dtype=amp_dtype)
         except TrainingInterrupted as e:
             interrupted = True
             print(f"\n{'='*60}")

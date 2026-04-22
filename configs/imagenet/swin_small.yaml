@@ -45,6 +45,8 @@ reprob: 0.25
 remode: rand
 
 amp: true
+torchcompile: null              # "inductor" to enable torch.compile
+torchcompile_mode: null
 clip_grad: 5.0
 model_ema: false
 seed: 42

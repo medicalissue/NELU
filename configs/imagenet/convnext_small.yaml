@@ -46,6 +46,8 @@ reprob: 0.25
 remode: rand
 
 amp: true
+torchcompile: null              # "inductor" to enable torch.compile
+torchcompile_mode: null
 clip_grad: null
 model_ema: true
 model_ema_decay: 0.9999
