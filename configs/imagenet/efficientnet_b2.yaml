@@ -55,5 +55,6 @@ seed: 42
 
 activation: silu
 gamma_init: 1.0e-6
-rms_mode: per_sample
+rms_mode: per_sample         # Initial swap default; overridden per-location
+                             # by rewire_efficientnet_mbconv in train/swap.py.
 log_gate_stats_every: 1

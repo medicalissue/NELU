@@ -125,14 +125,90 @@ def apply_gate_normalization(
     transformers / channels-last CNNs) and ``"per_sample"`` for ``nilu``
     (typically used in NCHW EfficientNet-style CNNs). Either default can be
     overridden.
+
+    After the generic swap, architecture-aware rewiring runs to assign the
+    rms axes that match the mixing axes of the preceding linear operation —
+    most notably, in EfficientNet's InvertedResidual block the two
+    activations sit in different contexts (channel-mixing pointwise vs.
+    spatial-mixing depthwise) and therefore need different axes.
     """
     act = activation.lower()
     if act in {"gelu", "silu", "relu"}:
         return 0
     if act == "nelu":
         mode = rms_mode if rms_mode is not None else "per_token"
-        return gelu_to_nelu(model, rms_mode=mode, eps=eps, gamma_init=gamma_init)
-    if act == "nilu":
+        n = gelu_to_nelu(model, rms_mode=mode, eps=eps, gamma_init=gamma_init)
+    elif act == "nilu":
         mode = rms_mode if rms_mode is not None else "per_sample"
-        return silu_to_nilu(model, rms_mode=mode, eps=eps, gamma_init=gamma_init)
-    raise ValueError(f"Unknown activation {activation!r}")
+        n = silu_to_nilu(model, rms_mode=mode, eps=eps, gamma_init=gamma_init)
+    else:
+        raise ValueError(f"Unknown activation {activation!r}")
+
+    # Post-swap: EfficientNet MBConv two-activation split.
+    rewire_efficientnet_mbconv(model)
+    return n
+
+
+def rewire_efficientnet_mbconv(model: nn.Module) -> int:
+    """Assign per-location rms axes to GateNorm activations inside timm's
+    ``InvertedResidual`` (MBConv) blocks.
+
+    MBConv contains two activation sites in NCHW (N, C, H, W) layout:
+
+    * ``bn1`` — follows the 1×1 pointwise expansion ``conv_pw``. The
+      preceding linear op mixes only the channel axis, so the matching
+      RMS axis is ``(1,)``.
+    * ``bn2`` — follows the k×k depthwise convolution ``conv_dw``, which
+      mixes only the spatial axes (channels remain independent), so the
+      matching RMS axes are ``(2, 3)``.
+
+    ``DepthwiseSeparableConv`` and the fused ``EdgeResidual`` variant are
+    handled analogously when they appear.
+
+    timm's ``norm_act_layer`` packs a BatchNorm and an activation into a
+    single module; the activation lives in an attribute conventionally named
+    ``act`` or ``act1``. We locate the GateNorm module inside the stored
+    ``bn1``/``bn2`` subtree rather than relying on a specific attribute path.
+
+    Returns the number of GateNorm modules whose ``rms_mode`` was updated.
+    """
+    updated = 0
+
+    def _set_mode(submodule: nn.Module, axes: tuple[int, ...]) -> int:
+        count = 0
+        for m in submodule.modules():
+            if isinstance(m, GateNorm):
+                m.rms_mode = axes
+                count += 1
+        return count
+
+    try:
+        from timm.models._efficientnet_blocks import (  # type: ignore[import-untyped]
+            InvertedResidual,
+            DepthwiseSeparableConv,
+            EdgeResidual,
+        )
+    except ImportError:
+        return 0
+
+    for module in model.modules():
+        if isinstance(module, InvertedResidual):
+            # conv_pw → bn1 (channel mixing) ; conv_dw → bn2 (spatial mixing).
+            if hasattr(module, "bn1"):
+                updated += _set_mode(module.bn1, (1,))
+            if hasattr(module, "bn2"):
+                updated += _set_mode(module.bn2, (2, 3))
+        elif isinstance(module, DepthwiseSeparableConv):
+            # conv_dw (spatial) → bn1 ; conv_pw (channel) → bn2.
+            if hasattr(module, "bn1"):
+                updated += _set_mode(module.bn1, (2, 3))
+            if hasattr(module, "bn2"):
+                updated += _set_mode(module.bn2, (1,))
+        elif isinstance(module, EdgeResidual):
+            # conv_exp is k×k over both channel and spatial → bn1 full mixing.
+            # conv_pwl is 1×1 channel-only → bn2 channel mixing.
+            if hasattr(module, "bn1"):
+                updated += _set_mode(module.bn1, (1, 2, 3))
+            if hasattr(module, "bn2"):
+                updated += _set_mode(module.bn2, (1,))
+    return updated
