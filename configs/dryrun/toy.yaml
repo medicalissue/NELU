@@ -9,8 +9,6 @@ model: convnext_tiny
 num_classes: 1000
 drop: 0.0
 drop_path: 0.0
-model_kwargs:
-  layer_scale_init_value: 1.0e-6
 
 data_dir: /data/imagenet
 input_size: [3, 224, 224]

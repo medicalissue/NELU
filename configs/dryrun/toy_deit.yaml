@@ -3,6 +3,8 @@
 # a transformer path (per_token reduction) instead of a CNN.
 
 model: deit_small_patch16_224
+# no model_kwargs — keep minimal so latest timm doesn't complain
+
 num_classes: 1000
 drop: 0.0
 drop_path: 0.0
