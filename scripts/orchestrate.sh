@@ -58,20 +58,18 @@ log() { printf '[orchestrate %s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
 : "${MAX_IDLE_PASSES:=1}"
 export AWS_DEFAULT_REGION
 
-# Default job order — longest wall-clock first to keep tail latency small.
-: "${JOB_ORDER:=\
-configs/imagenet/swin_small.yaml:gelu \
-configs/imagenet/swin_small.yaml:nelu \
-configs/imagenet/convnext_small.yaml:gelu \
-configs/imagenet/convnext_small.yaml:nelu \
-configs/imagenet/deit_base.yaml:gelu \
-configs/imagenet/deit_base.yaml:nelu \
-configs/imagenet/swin_tiny.yaml:gelu \
-configs/imagenet/swin_tiny.yaml:nelu \
-configs/imagenet/convnext_tiny.yaml:gelu \
-configs/imagenet/convnext_tiny.yaml:nelu \
-configs/imagenet/deit_small.yaml:gelu \
-configs/imagenet/deit_small.yaml:nelu}"
+# Default job order lives in scripts/infra/default_job_order.txt — one
+# "<config>:<activation>" pair per line, '#' comments ignored. Making it
+# a standalone file keeps the launcher's awk parsing trivial (grep out
+# comments/blanks and flatten) and lets users edit the queue without
+# touching shell quoting.
+if [[ -z "${JOB_ORDER:-}" ]]; then
+    _job_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/infra/default_job_order.txt"
+    if [[ -f "$_job_file" ]]; then
+        JOB_ORDER=$(grep -v '^\s*#' "$_job_file" | grep -v '^\s*$' | tr '\n' ' ')
+    fi
+fi
+: "${JOB_ORDER:?JOB_ORDER is empty and default_job_order.txt not found}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

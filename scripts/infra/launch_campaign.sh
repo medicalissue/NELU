@@ -25,12 +25,11 @@ fi
 : "${CAMPAIGN_AZS:?CAMPAIGN_AZS missing from .env (e.g. \"us-west-2d us-west-2c\")}"
 : "${TARGET_WORKERS:=2}"
 
-# Derive JOB_ORDER from orchestrate.sh default unless the caller set it.
+# Derive JOB_ORDER from the flat-file default unless the caller set it.
 if [[ -z "${JOB_ORDER:-}" ]]; then
-    JOB_ORDER=$(awk '/^: "\$\{JOB_ORDER:=\\$/{flag=1;next}/^\}"/{flag=0} flag' \
-        "$REPO_ROOT/scripts/orchestrate.sh" \
-        | sed 's/ \\$//' | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')
-    echo "JOB_ORDER not set — parsed default from orchestrate.sh"
+    JOB_ORDER=$(grep -v '^\s*#' "$SCRIPT_DIR/default_job_order.txt" \
+        | grep -v '^\s*$' | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')
+    echo "JOB_ORDER not set — parsed default_job_order.txt"
 fi
 export JOB_ORDER
 

@@ -1,0 +1,12 @@
+configs/imagenet/swin_small.yaml:gelu
+configs/imagenet/swin_small.yaml:nelu
+configs/imagenet/convnext_small.yaml:gelu
+configs/imagenet/convnext_small.yaml:nelu
+configs/imagenet/deit_base.yaml:gelu
+configs/imagenet/deit_base.yaml:nelu
+configs/imagenet/swin_tiny.yaml:gelu
+configs/imagenet/swin_tiny.yaml:nelu
+configs/imagenet/convnext_tiny.yaml:gelu
+configs/imagenet/convnext_tiny.yaml:nelu
+configs/imagenet/deit_small.yaml:gelu
+configs/imagenet/deit_small.yaml:nelu
