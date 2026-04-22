@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Main-campaign entry point.
+#
+#   1. Loads .env (AWS, W&B, bucket names, AZ allow-list, worker pool size).
+#   2. Exec's scripts/infra/watchdog.sh, which keeps TARGET_WORKERS alive
+#      until every experiment has a `complete` sentinel.
+#
+# Stop with Ctrl-C. Watchdog will exit on its own when the queue drains.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+else
+    echo "FATAL: $ENV_FILE not found. Copy .env.example → .env and fill it in." >&2
+    exit 2
+fi
+
+: "${CAMPAIGN_AZS:?CAMPAIGN_AZS missing from .env (e.g. \"us-west-2d us-west-2c\")}"
+: "${TARGET_WORKERS:=2}"
+
+# Derive JOB_ORDER from orchestrate.sh default unless the caller set it.
+if [[ -z "${JOB_ORDER:-}" ]]; then
+    JOB_ORDER=$(awk '/^: "\$\{JOB_ORDER:=\\$/{flag=1;next}/^\}"/{flag=0} flag' \
+        "$REPO_ROOT/scripts/orchestrate.sh" \
+        | sed 's/ \\$//' | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')
+    echo "JOB_ORDER not set — parsed default from orchestrate.sh"
+fi
+export JOB_ORDER
+
+echo "Campaign starting:"
+echo "  TARGET_WORKERS = $TARGET_WORKERS"
+echo "  INSTANCE_TYPE  = ${INSTANCE_TYPE:-p5.48xlarge}"
+echo "  CAMPAIGN_AZS   = $CAMPAIGN_AZS"
+echo "  CKPT_BUCKET    = $CKPT_BUCKET"
+echo "  JOB_ORDER      = $JOB_ORDER"
+echo
+
+exec bash "$SCRIPT_DIR/watchdog.sh"

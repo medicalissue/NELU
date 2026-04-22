@@ -1,48 +1,46 @@
 #!/usr/bin/env bash
-# Spot-fleet watchdog. Keeps N workers alive across the us-west-2 AZs
-# until every experiment in the queue has a completion sentinel in S3.
+# Spot-fleet watchdog. Keeps TARGET_WORKERS live in the AZs listed in
+# CAMPAIGN_AZS until every experiment has a completion sentinel in S3.
 #
 # Behavior:
-#   * Maintain up to `TARGET_WORKERS` running spot instances tagged
-#     Project=gate-norm,Role=worker. If fewer are running, launch more
-#     via scripts/infra/run_worker.sh, rotating through AZ_LIST.
-#   * Detect completion: if every experiment key in JOB_ORDER has a
-#     `complete` object under $CKPT_BUCKET/<exp>/, stop the watchdog.
-#   * Retry capacity errors: if run-instances fails (most common: no
-#     spot capacity in the chosen AZ), move to the next AZ and keep
-#     trying. Sleep POLL_INTERVAL_SEC between full passes.
+#   * Maintain TARGET_WORKERS spot instances tagged Project=gate-norm,
+#     Role=worker. If fewer are live, launch one by rotating through
+#     CAMPAIGN_AZS in user-specified order.
+#   * Completion: when every experiment key in JOB_ORDER has a `complete`
+#     object under $CKPT_BUCKET/<exp>/, exit 0.
+#   * Capacity retry: if run-instances fails in all CAMPAIGN_AZS, sleep
+#     POLL_INTERVAL_SEC and try again — forever. Never escalates to
+#     on-demand, never gives up.
 #
-# Required env (loaded from .env by the caller):
-#   CKPT_BUCKET           e.g. s3://nelu-checkpoints or s3://…/_dryrun
-#   WANDB_API_KEY         passed through to every worker
-#   WANDB_PROJECT, WANDB_ENTITY (optional)
-#   JOB_ORDER             space-separated <config>:<activation>; used to
-#                         know when "all done"
+# Required env (usually from .env):
+#   CKPT_BUCKET         s3://nelu-checkpoints[/prefix]
+#   WANDB_API_KEY
+#   JOB_ORDER           space-separated <cfg>:<act> pairs
+#   CAMPAIGN_AZS        space-separated AZs, e.g. "us-west-2d us-west-2c"
+#                       — you pick the order. Launch tries each in turn;
+#                       after the last AZ fails it sleeps and starts
+#                       over from the first.
 #
 # Optional env:
-#   TARGET_WORKERS=2      desired live-worker count
+#   TARGET_WORKERS=2
 #   INSTANCE_TYPE=p5.48xlarge
-#   AZ_LIST="us-west-2d us-west-2a us-west-2b us-west-2c"
-#   POLL_INTERVAL_SEC=60  seconds between watchdog passes
-#   MAX_LAUNCH_RETRIES=8  max capacity-retry loops across the AZ list
-#                         before giving up on a single launch attempt
+#   POLL_INTERVAL_SEC=60  idle sleep between full passes
+#   CAPACITY_SLEEP_SEC=60 sleep between AZ-cycle retries on capacity fails
+#   WANDB_PROJECT, WANDB_ENTITY   passed through to workers
 #
 # Usage:
 #   source .env
-#   CKPT_BUCKET=s3://nelu-checkpoints \
-#   JOB_ORDER="..." \
-#   TARGET_WORKERS=2 \
 #   bash scripts/infra/watchdog.sh
 set -euo pipefail
 
 : "${CKPT_BUCKET:?CKPT_BUCKET required}"
 : "${WANDB_API_KEY:?WANDB_API_KEY required}"
 : "${JOB_ORDER:?JOB_ORDER required (space-separated cfg:act pairs)}"
+: "${CAMPAIGN_AZS:?CAMPAIGN_AZS required (e.g. \"us-west-2d us-west-2c\")}"
 : "${TARGET_WORKERS:=2}"
 : "${INSTANCE_TYPE:=p5.48xlarge}"
-: "${AZ_LIST:=us-west-2d us-west-2a us-west-2b us-west-2c}"
 : "${POLL_INTERVAL_SEC:=60}"
-: "${MAX_LAUNCH_RETRIES:=8}"
+: "${CAPACITY_SLEEP_SEC:=60}"
 export CKPT_BUCKET WANDB_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,10 +83,12 @@ count_live_workers() {
 }
 
 launch_one() {
-    # Try each AZ until one accepts us. MAX_LAUNCH_RETRIES caps the
-    # outer loop so we don't spin forever on a totally-dead region.
-    local attempt=0 az_cycle=($AZ_LIST)
-    while (( attempt < MAX_LAUNCH_RETRIES )); do
+    # Try each AZ in user-specified order. If all of them reject us
+    # (capacity / price / throttle), sleep CAPACITY_SLEEP_SEC and loop
+    # forever — never escalates to on-demand, never gives up.
+    local az_cycle=($CAMPAIGN_AZS)
+    local cycle=0
+    while :; do
         for az in "${az_cycle[@]}"; do
             local suffix
             suffix="$(date -u +%Y%m%dT%H%M%S)-${az##*-}"
@@ -104,15 +104,13 @@ launch_one() {
             err=$(tail -5 /tmp/launch-$$.log | tr '\n' ' ')
             log "launch in $az failed: $err"
         done
-        attempt=$((attempt + 1))
-        log "AZ cycle exhausted (attempt $attempt/$MAX_LAUNCH_RETRIES) — sleeping 30s"
-        sleep 30
+        cycle=$((cycle + 1))
+        log "AZ cycle $cycle exhausted — sleeping ${CAPACITY_SLEEP_SEC}s and retrying"
+        sleep "$CAPACITY_SLEEP_SEC"
     done
-    log "give-up: $MAX_LAUNCH_RETRIES AZ-cycles all failed"
-    return 1
 }
 
-log "starting. target=$TARGET_WORKERS type=$INSTANCE_TYPE AZs=($AZ_LIST)"
+log "starting. target=$TARGET_WORKERS type=$INSTANCE_TYPE AZs=($CAMPAIGN_AZS)"
 while :; do
     if all_done; then
         log "queue drained — every experiment has a complete sentinel. exiting."
@@ -123,10 +121,8 @@ while :; do
     log "live workers: $live / $TARGET_WORKERS"
 
     while (( live < TARGET_WORKERS )); do
-        if ! launch_one; then
-            log "skipping this pass, will retry in ${POLL_INTERVAL_SEC}s"
-            break
-        fi
+        # launch_one retries indefinitely; no fall-through path needed.
+        launch_one
         live=$(count_live_workers)
     done
 
