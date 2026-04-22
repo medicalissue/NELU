@@ -1,9 +1,13 @@
-# Toy ImageNet config for pipeline dry-run. Designed to finish in <2 min
-# on a T4: 1 epoch over a 256-sample subset, batch 4, no validation,
-# no AMP, no wandb image sync. Used by scripts/orchestrate.sh during
-# infrastructure validation — NOT a training recipe.
+# Ultra-fast toy config for pipeline dry-run on a T4. Finishes in <1 min:
+#   - resnet18 (11M params, small enough that full ImageFolder init fits
+#     in under 30 s)
+#   - batch 32, 2 epochs, no AMP, no EMA, no mixup
+# The trainer sees the real 1.28M-image train set, but the cosine LR
+# + tiny batch means 1 epoch is only a few thousand steps. That's
+# plenty to verify: model build, optimizer, saver, complete sentinel,
+# S3 sync heartbeat, W&B run id plumbing. NOT a recipe.
 
-model: convnext_tiny
+model: resnet18
 num_classes: 1000
 drop: 0.0
 drop_path: 0.0
@@ -12,23 +16,20 @@ data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
-batch_size: 4
+batch_size: 32
 grad_accum_steps: 1
-workers: 2
-
-train_num_samples: 256
-val_num_samples: 64
+workers: 4
 
 opt: adamw
 opt_eps: 1.0e-8
 opt_betas: [0.9, 0.999]
 lr_base: 1.0e-4
-lr_base_size: 4
+lr_base_size: 32
 lr_base_scale: none
 weight_decay: 0.0
 
 sched: cosine
-epochs: 1
+epochs: 2
 warmup_epochs: 0
 warmup_lr: 1.0e-6
 min_lr: 1.0e-6
@@ -51,4 +52,4 @@ seed: 42
 activation: nelu
 gamma_init: 1.0e-6
 rms_mode: per_sample
-log_gate_stats_every: 1000      # effectively disable gate-stats probe in toy
+log_gate_stats_every: 1000
