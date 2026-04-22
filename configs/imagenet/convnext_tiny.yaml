@@ -66,5 +66,7 @@ seed: 42
 
 activation: gelu
 gamma_init: 1.0e-6
-rms_mode: per_sample
+rms_mode: [-1]               # ConvNeXt block = ViT-style FFN; activation
+                             # follows a channel-mixing Linear at channels-last
+                             # layout (N,H,W,C), so RMS axis is the channel dim.
 log_gate_stats_every: 1

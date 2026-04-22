@@ -61,13 +61,16 @@ from train.diagnostics import gamma_stats, gate_stats, weight_norms  # noqa: E40
 def _default_rms_mode(model_name: str, activation: str) -> str:
     """Architecture-aware default for the RMS reduction axes.
 
-    EfficientNet and ConvNeXt feed the activation NCHW tensors where the
-    gate's natural reduction axes are (C, H, W) — ``per_sample``. All
-    transformer and channels-last models use the trailing feature axis —
-    ``per_token``. Override with ``--rms-mode`` if a custom axis set is
-    needed.
+    The RMS axes are taken to match the mixing axes of the preceding linear
+    operation. For Transformer FFNs (ViT, DeiT, Swin) and ConvNeXt blocks —
+    whose activation follows a channel-mixing Linear at channels-last layout
+    — the last axis alone is the natural reduction. EfficientNet's MBConv
+    mixes spatial and channel in different sub-blocks; we keep the legacy
+    ``per_sample`` default here so existing configs keep working, but the
+    recommended practice is to set ``rms_mode`` explicitly per architecture
+    in the YAML config. Override with ``--rms-mode`` on the CLI.
     """
-    if model_name.startswith(("efficientnet_", "tf_efficientnet_", "convnext")):
+    if model_name.startswith(("efficientnet_", "tf_efficientnet_")):
         return "per_sample"
     return "per_token"
 
@@ -136,10 +139,11 @@ group.add_argument('--activation', default='gelu', type=str,
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
 group.add_argument('--gamma-init', type=float, default=1e-6,
                    help='Initial value of the learnable γ scalar in NELU/NiLU.')
-group.add_argument('--rms-mode', type=str, default=None,
-                   choices=[None, 'per_token', 'per_sample'],
-                   help='Reduction axes for RMS. Defaults: per_sample for '
-                        'EfficientNet/ConvNeXt, per_token for transformers.')
+group.add_argument('--rms-mode', default=None,
+                   help='Reduction axes for RMS. Accepts a legacy alias '
+                        '("per_token" / "per_sample") or an explicit axis list '
+                        'such as [-1] or [2,3]. Defaults are architecture-'
+                        'aware; see _default_rms_mode in this file.')
 group.add_argument('--log-gate-stats-every', type=int, default=1,
                    help='Epochs between γ / gate-entropy logging (0 disables).')
 group.add_argument('--log-gate-probe-size', type=int, default=16,

@@ -7,17 +7,22 @@ Gate Normalization (GN) generalizes self-gated activations of the form
 
 where `g` is a pointwise squashing function (sigmoid, Gaussian CDF, …),
 `rms(x)` is the root-mean-square of `x` computed over architecture-specific
-axes, and `γ` is a single learnable scalar initialized near zero so that at
+axes matching the mixing axes of the preceding linear operation, and `γ`
+is a single learnable scalar initialized near zero so that at
 initialization the module recovers the near-linear behavior of `x · g(0)`.
 
-Subclasses define a concrete `g` and optionally a fused CUDA backend by
-implementing `_gate_python` and `_fused_backend`.
+The forward pass is pure PyTorch so it composes cleanly with torch.compile,
+AMP autocast, and arbitrary rms reduction axes (including non-contiguous
+subsets such as (2, 3) used after depthwise convolutions). Statistics are
+upcast to float32 internally to avoid fp16/bf16 underflow.
+
+Subclasses implement `_gate_python` for their concrete squashing function.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Callable, Optional
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -67,14 +72,6 @@ class GateNorm(nn.Module):
         """Pointwise squashing function applied to γ · x / rms(x)."""
         raise NotImplementedError
 
-    def _fused_backend(
-        self,
-    ) -> Optional[
-        Callable[..., torch.Tensor]
-    ]:
-        """Return a CUDA kernel callable, or None for the Python path."""
-        return None
-
     # Forward ───────────────────────────────────────────────────────
 
     def _axes(self, z: torch.Tensor) -> tuple[int, ...]:
@@ -82,16 +79,10 @@ class GateNorm(nn.Module):
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         axes = self._axes(z)
-        if z.is_cuda:
-            fused = self._fused_backend()
-            if fused is not None:
-                # The fused kernels already upcast statistics to float32
-                # internally (see gate_norm/csrc/*.cu); safe under AMP.
-                return fused(z, self.gamma, axes=axes, eps=self.eps)
-        # Python fallback: upcast the gate-input statistics to float32 so
-        # RMS, γ·z/ρ and the squashing function do not suffer fp16/bf16
-        # underflow. The outer multiplication by z keeps the model's
-        # activation dtype so the AMP autocast contract is preserved.
+        # Upcast the gate-input statistics to float32 so RMS, γ·z/ρ and
+        # the squashing function do not suffer fp16/bf16 underflow under
+        # AMP. The outer multiplication by z keeps the model's activation
+        # dtype so the AMP autocast contract is preserved.
         z_fp32 = z.float()
         rho = rms(z_fp32, axes, self.eps)
         t = self.gamma * z_fp32 / rho
