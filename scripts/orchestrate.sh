@@ -86,64 +86,22 @@ imds() {
          "http://169.254.169.254/latest/meta-data/$1"
 }
 
-AZ=$(imds placement/availability-zone)
-INSTANCE_ID=$(imds instance-id)
+AZ=$(imds placement/availability-zone 2>/dev/null || echo "unknown")
+INSTANCE_ID=$(imds instance-id 2>/dev/null || echo "unknown")
 log "AZ=$AZ instance=$INSTANCE_ID"
 
-# ── Volume create + attach + mount ─────────────────────────────────
-VOLUME_ID=""
+# ── Data volume sanity check ───────────────────────────────────────
+# The dataset volume is mounted by dstack itself (see `volumes:` in the
+# task YAML). We only verify it looks right before the job loop starts.
 DATA_MOUNT=/data
 
-cleanup_volume() {
-    if [[ -n "$VOLUME_ID" ]]; then
-        log "tearing down volume $VOLUME_ID"
-        sudo umount "$DATA_MOUNT" 2>/dev/null || true
-        aws ec2 detach-volume --volume-id "$VOLUME_ID" --force >/dev/null 2>&1 || true
-        # detach-volume is async — wait before delete.
-        for _ in {1..60}; do
-            state=$(aws ec2 describe-volumes --volume-ids "$VOLUME_ID" \
-                    --query 'Volumes[0].State' --output text 2>/dev/null || echo "gone")
-            [[ "$state" == "available" || "$state" == "gone" ]] && break
-            sleep 2
-        done
-        aws ec2 delete-volume --volume-id "$VOLUME_ID" >/dev/null 2>&1 || true
-    fi
-}
-trap 'cleanup_volume' EXIT
-
-setup_volume() {
-    log "creating volume from $DATA_SNAPSHOT in $AZ"
-    VOLUME_ID=$(aws ec2 create-volume \
-        --availability-zone "$AZ" \
-        --snapshot-id "$DATA_SNAPSHOT" \
-        --volume-type gp3 \
-        --tag-specifications "ResourceType=volume,Tags=[{Key=Project,Value=gate-norm},{Key=Role,Value=worker-data},{Key=Instance,Value=$INSTANCE_ID}]" \
-        --query VolumeId --output text)
-    log "volume=$VOLUME_ID — waiting for available"
-    aws ec2 wait volume-available --volume-ids "$VOLUME_ID"
-
-    log "attaching"
-    aws ec2 attach-volume --volume-id "$VOLUME_ID" \
-        --instance-id "$INSTANCE_ID" --device /dev/sdg >/dev/null
-    aws ec2 wait volume-in-use --volume-ids "$VOLUME_ID"
-
-    # NVMe remaps /dev/sdg → /dev/nvme?n1; resolve via serial (volume-id with dashes stripped).
-    sleep 5
-    local serial dev
-    serial=$(echo "$VOLUME_ID" | tr -d '-')
-    for _ in {1..20}; do
-        dev=$(lsblk -dno NAME,SERIAL | awk -v s="$serial" '$2==s {print "/dev/"$1; exit}')
-        [[ -n "$dev" ]] && break
-        sleep 1
-    done
-    if [[ -z "$dev" ]]; then
-        log "FATAL: could not resolve device for volume $VOLUME_ID"
+check_data_mount() {
+    if [[ ! -d "$DATA_MOUNT/imagenet/val" ]]; then
+        log "FATAL: expected $DATA_MOUNT/imagenet/val — dstack volume misconfigured?"
+        log "contents of $DATA_MOUNT:"; ls "$DATA_MOUNT" 2>&1 | head -20 >&2 || true
         exit 1
     fi
-    log "mounting $dev read-only at $DATA_MOUNT"
-    sudo mkdir -p "$DATA_MOUNT"
-    sudo mount -o ro "$dev" "$DATA_MOUNT"
-    df -h "$DATA_MOUNT" >&2
+    log "data volume OK: $(df -h "$DATA_MOUNT" | tail -1)"
 }
 
 # ── Preempt watcher ────────────────────────────────────────────────
@@ -267,20 +225,16 @@ run_job() {
     local wandb_id_flag=()
     if [[ -f "${outdir}/wandb_run_id.json" ]]; then
         local saved_id
-        saved_id=$(python - <<'PY'
-import json, sys
-with open("${OUTDIR}/wandb_run_id.json") as f:
-    print(json.load(f).get("run_id", ""))
-PY
-        )
-        # Re-run with shell substitution — the heredoc above is in a subshell
-        # where $OUTDIR isn't set. Use sed approach instead:
-        saved_id=$(grep -o '"run_id"[^,}]*' "${outdir}/wandb_run_id.json" \
-                   | sed 's/.*: *"\([^"]*\)".*/\1/')
+        saved_id=$(python -c "import json,sys; print(json.load(open('${outdir}/wandb_run_id.json')).get('run_id',''))" 2>/dev/null || true)
         if [[ -n "$saved_id" ]]; then
             wandb_id_flag=(--wandb-resume-id "$saved_id")
             log "  resuming W&B run ${saved_id}"
         fi
+    fi
+
+    local entity_flag=()
+    if [[ -n "$WANDB_ENTITY" ]]; then
+        entity_flag=(--wandb-entity "$WANDB_ENTITY")
     fi
 
     # Heartbeat loop: refresh lease + sync checkpoint every HEARTBEAT_EVERY s.
@@ -294,21 +248,25 @@ PY
     ) &
     local heartbeat_pid=$!
 
-    # Run torchrun in its own process group so the preempt watcher can
-    # SIGTERM the whole tree in one kill -TERM -pgid.
-    setsid bash -c "echo \$\$ > /tmp/trainer.pgid; exec torchrun \
-        --nproc_per_node=\$(nvidia-smi -L | wc -l) \
+    # Launch torchrun in its own session so the preempt watcher can
+    # SIGTERM the whole tree by pgid (= pid of the setsid leader).
+    local gpus
+    gpus=$(nvidia-smi -L | wc -l)
+    setsid torchrun \
+        --nproc_per_node="$gpus" \
         -m train.imagenet \
-        --config '$cfg' \
-        --activation '$act' \
-        --experiment '$exp' \
-        --output '$outdir' \
+        --config "$cfg" \
+        --activation "$act" \
+        --experiment "$exp" \
+        --output "$outdir" \
         --log-wandb \
-        --wandb-project '$WANDB_PROJECT' \
-        ${WANDB_ENTITY:+--wandb-entity '$WANDB_ENTITY'} \
-        ${resume_flag[*]:-} \
-        ${wandb_id_flag[*]:-}" &
+        --wandb-project "$WANDB_PROJECT" \
+        "${entity_flag[@]}" \
+        "${resume_flag[@]}" \
+        "${wandb_id_flag[@]}" &
     local trainer_pid=$!
+    # setsid makes the child a session/group leader — its pgid == its pid.
+    echo "$trainer_pid" > /tmp/trainer.pgid
     local trainer_rc=0
     wait "$trainer_pid" || trainer_rc=$?
 
@@ -335,7 +293,7 @@ PY
 }
 
 # ── Main ───────────────────────────────────────────────────────────
-setup_volume
+check_data_mount
 start_preempt_watcher
 
 # Stage the repo onto the worker (dstack runs commands in the synced

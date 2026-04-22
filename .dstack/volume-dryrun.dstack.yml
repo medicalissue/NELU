@@ -1,0 +1,13 @@
+# Register the pre-created EBS volume (seeded from our dataset snapshot)
+# as a dstack network volume. After `dstack apply -f` this, tasks can
+# mount it via `volumes: [- name: nelu-dryrun-data, path: /data]`.
+#
+# This volume is AZ-local (us-west-2c) so any task that mounts it is
+# forced to that AZ. If a second worker is needed, create another volume
+# (different AZ OK, new volume name) from the same snapshot.
+
+type: volume
+name: nelu-dryrun-data
+backend: aws
+region: us-west-2
+volume_id: vol-0069f93477e33e49e

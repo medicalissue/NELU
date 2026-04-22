@@ -20,6 +20,7 @@ for i in $(seq 1 "$N"); do
     name="worker-${i}"
     echo "▶ submitting ${name}"
     dstack apply -f .dstack/worker.dstack.yml \
+        -P . \
         -n "${name}" \
         -e WANDB_API_KEY="${WANDB_API_KEY}" \
         -e WANDB_ENTITY="${WANDB_ENTITY}" \

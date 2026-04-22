@@ -1,0 +1,80 @@
+# Cheap multi-worker dry-run of the full campaign pipeline.
+#
+# Simulates the real run with a miniature queue (4 toy jobs) and 2
+# parallel workers. Verifies:
+#   1. Two spot VMs come up in parallel under our profile (us-west-2d).
+#   2. Privileged containers can create + attach + mount an EBS volume
+#      from the dataset snapshot — each worker gets its own volume.
+#   3. orchestrate.sh resolves the NVMe device correctly despite local
+#      instance-store NVMes competing for low numbers.
+#   4. S3 lease claim is race-free: two workers must never train the
+#      same experiment simultaneously.
+#   5. One worker finishes a job while the other steals the next one
+#      without conflict (lease release + re-claim by the next pass).
+#   6. Interrupt one worker mid-train → the other worker (or a dstack
+#      retry relaunch) picks up the checkpoint and resumes the SAME
+#      W&B run id.
+#   7. The completion sentinel is honored — a restarted worker should
+#      skip finished jobs rather than re-run them.
+#
+# Launch:
+#   source .env
+#   bash scripts/launch_dryrun.sh      # submits worker-dryrun-1 and -2
+#   dstack ps
+#   dstack logs worker-dryrun-1 -f
+#
+# Expected wall time: 15–25 min total. Cost: <$0.20 at g4dn spot prices.
+
+type: task
+name: nelu-dryrun
+# Default dstack image already ships CUDA drivers + python + pip + uv.
+# PyTorch + CUDA kernels get installed via pip in commands: below. This
+# is ~4× faster to pull than nvcr.io/nvidia/pytorch (20GB → ~5GB).
+python: "3.10"
+nvcc: true                    # build CUDA extensions in-container
+privileged: true              # required to mount the EBS volume
+
+repos:
+  - .:/workspace
+working_dir: /workspace
+
+resources:
+  gpu: T4:1                     # g4dn.xlarge carries a single T4 — spot ~$0.15/h
+  shm_size: 16GB
+  disk: 128GB
+
+# Pin to us-west-2c because that's where the dstack volume lives (AWS
+# EBS is single-AZ and single-attach).
+backends: [aws]
+regions: [us-west-2]
+availability_zones: [us-west-2c]
+spot_policy: spot
+retry:
+  on_events: [no-capacity, interruption, error]
+  duration: 1h
+
+volumes:
+  - name: nelu-dryrun-data
+    path: /data
+
+env:
+  - DATA_SNAPSHOT=snap-0adfaa42ce378623c
+  - CKPT_BUCKET=s3://nelu-checkpoints/_dryrun
+  - AWS_DEFAULT_REGION=us-west-2
+  - VENV_S3_URL=s3://nelu-datasets/env/nelu-venv-py310-cu130.tar.gz
+  - WANDB_PROJECT=gate-normalization-dryrun
+  - WANDB_ENTITY
+  - WANDB_API_KEY
+  # 4-job toy queue: 2 models × 2 activations. Two workers running in
+  # parallel must each grab 2 of these without colliding.
+  - JOB_ORDER=configs/dryrun/toy.yaml:gelu configs/dryrun/toy.yaml:nelu configs/dryrun/toy_deit.yaml:gelu configs/dryrun/toy_deit.yaml:nelu
+  - MAX_IDLE_PASSES=1
+  - LEASE_TTL=300
+  - HEARTBEAT_EVERY=30
+  # On failure, keep the container alive (sleep 1d) so we can SSH in and
+  # inspect /workspace/logs/. Dry-run only — production worker should not
+  # do this because dstack retry is the correct recovery for real runs.
+  - HALT_ON_FAIL=1
+
+commands:
+  - bash scripts/bootstrap.sh

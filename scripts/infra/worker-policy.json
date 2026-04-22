@@ -11,6 +11,16 @@
       ]
     },
     {
+      "Sid": "EnvWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": ["arn:aws:s3:::nelu-datasets/env/*"]
+    },
+    {
       "Sid": "CheckpointsReadWrite",
       "Effect": "Allow",
       "Action": [

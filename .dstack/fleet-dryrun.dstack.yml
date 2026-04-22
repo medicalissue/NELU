@@ -1,0 +1,21 @@
+# Ephemeral fleet for the dry-run: up to 2 T4 spot VMs in us-west-2d.
+# Fleet scales 0..2 — dstack provisions on demand when tasks request
+# T4:1 and tears instances down after `idle_duration` expires.
+
+type: fleet
+name: nelu-dryrun-fleet
+nodes: 0..2
+placement: any
+
+backends: [aws]
+regions: [us-west-2]
+availability_zones: [us-west-2c]
+spot_policy: spot
+
+resources:
+  gpu:
+    name: [T4]
+    count: 1
+  disk: 128GB..
+
+idle_duration: 2m
