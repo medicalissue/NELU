@@ -1,0 +1,57 @@
+# EfficientNet-B2 (Tan & Le 2019), ImageNet-1k from scratch.
+#
+# Recipe taken from timm's own authoritative training script
+#   https://github.com/huggingface/pytorch-image-models/blob/main/hfdocs/source/training_script.mdx
+# section "EfficientNet-B2 with RandAugment". Matches the `efficientnet_b2.ra_in1k`
+# checkpoint on HuggingFace (Top-1 79.32 % @ 256, 80.61 % @ 288, paper: 80.3 %).
+#
+# Only deltas from efficientnet_b0.yaml are the model name, input size,
+# base LR, and a larger dropout to match the paper's B2 spec.
+
+model: efficientnet_b2
+num_classes: 1000
+drop: 0.3
+drop_path: 0.2
+
+data_dir: /data/imagenet
+input_size: [3, 260, 260]
+train_interpolation: bicubic
+crop_pct: 0.875
+batch_size: 128
+grad_accum_steps: 1
+workers: 10
+
+opt: rmsproptf
+opt_eps: 1.0e-3
+lr_base: 0.016            # timm cmd: --lr 0.016 at effective batch 256 (2 × 128)
+lr_base_size: 256
+lr_base_scale: linear
+weight_decay: 1.0e-5
+momentum: 0.9
+
+sched: step
+epochs: 450
+decay_epochs: 2.4
+decay_rate: 0.97
+warmup_epochs: 3
+warmup_lr: 1.0e-6
+min_lr: 1.0e-6
+
+aa: rand-m9-mstd0.5
+color_jitter: 0.4
+smoothing: 0.1
+mixup: 0.0
+cutmix: 0.0
+reprob: 0.2
+remode: pixel
+
+amp: true
+clip_grad: null
+model_ema: true
+model_ema_decay: 0.9999
+seed: 42
+
+activation: silu
+gamma_init: 1.0e-6
+rms_mode: per_sample
+log_gate_stats_every: 1

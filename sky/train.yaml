@@ -1,0 +1,84 @@
+# SkyPilot task for a single ImageNet-1k training run.
+#
+# Launch with:
+#
+#   sky launch -c gn-train sky/train.yaml \
+#       --env CONFIG=configs/imagenet/convnext_tiny.yaml \
+#       --env ACTIVATION=nelu \
+#       --env EXP_NAME=convnext_tiny-nelu
+#
+# Or as a managed (auto-recovering) spot job:
+#
+#   sky jobs launch -n convnext-tiny-nelu sky/train.yaml \
+#       --env CONFIG=configs/imagenet/convnext_tiny.yaml \
+#       --env ACTIVATION=nelu
+#
+# Managed jobs automatically recover from spot preemption. Checkpoints are
+# written to the output bucket configured below; on resume the trainer
+# discovers the latest checkpoint and picks up its W&B run ID from the
+# sidecar file so logging stays on the same run.
+
+name: gate-norm-train
+
+resources:
+  accelerators: H100:8
+  cloud: aws
+  use_spot: true
+  disk_size: 512
+
+# Environment variables — override any with `sky launch --env KEY=VAL`.
+envs:
+  CONFIG: configs/imagenet/convnext_tiny.yaml
+  ACTIVATION: nelu
+  EXP_NAME: ""                 # Defaults to <model>-<activation> if empty.
+  DATA_BUCKET: s3://imagenet-1k  # Mounted read-only at /data/imagenet.
+  CKPT_BUCKET: ""              # Persistent checkpoint store (set per project).
+  WANDB_API_KEY: ""
+  WANDB_PROJECT: gate-normalization
+  WANDB_ENTITY: ""
+
+file_mounts:
+  /data/imagenet:
+    source: ${DATA_BUCKET}
+    mode: MOUNT                # read-only, cached locally on first access
+
+  # Checkpoints are copied to a dedicated bucket so a preempted task can
+  # resume from the same state on a fresh VM.
+  /output:
+    name: ${CKPT_BUCKET}
+    mode: MOUNT
+
+# Synced from the repo root. Excludes are handled by .gitignore + .skyignore.
+workdir: .
+
+setup: |
+  set -euxo pipefail
+  bash sky/setup.sh
+
+run: |
+  set -euo pipefail
+  cd ~/sky_workdir
+  export EXP_NAME="${EXP_NAME:-$(basename "${CONFIG%.yaml}")-${ACTIVATION}}"
+  export OUTPUT_DIR="/output/${EXP_NAME}"
+  mkdir -p "${OUTPUT_DIR}"
+
+  # W&B non-interactive login (no-op if key is empty).
+  if [ -n "${WANDB_API_KEY}" ]; then
+    wandb login --relogin "${WANDB_API_KEY}"
+  fi
+
+  # Resume from the last checkpoint if one was saved by an earlier attempt.
+  RESUME_FLAG=""
+  if [ -f "${OUTPUT_DIR}/last.pth.tar" ]; then
+    RESUME_FLAG="--resume ${OUTPUT_DIR}/last.pth.tar"
+  fi
+
+  torchrun --nproc_per_node=8 -m train.imagenet \
+    --config "${CONFIG}" \
+    --activation "${ACTIVATION}" \
+    --experiment "${EXP_NAME}" \
+    --output "${OUTPUT_DIR}" \
+    --log-wandb \
+    --wandb-project "${WANDB_PROJECT}" \
+    ${WANDB_ENTITY:+--wandb-entity ${WANDB_ENTITY}} \
+    ${RESUME_FLAG}

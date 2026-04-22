@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: "Gate Normalization: Scale-Invariant Self-Gated Activations"
+message: "If you use this code, please cite the paper."
+type: software
+authors:
+  - family-names: "Anonymous"
+    given-names: "Author"
+repository-code: "https://github.com/anonymous/gate-normalization"
+license: Apache-2.0
+version: 0.1.0
+preferred-citation:
+  type: article
+  title: "Gate Normalization: Scale-Invariant Self-Gated Activations"
+  authors:
+    - family-names: "Anonymous"
+      given-names: "Author"
+  year: 2026

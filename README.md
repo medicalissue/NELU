@@ -1,0 +1,121 @@
+# Gate Normalization
+
+*Scale-Invariant Self-Gated Activations.*
+
+Gate Normalization replaces the standard self-gated activation
+`x · g(x)` with a scale-normalized variant
+
+    y = x · g(γ · x / rms(x)),
+
+where `g` is a pointwise squashing function (Gaussian CDF or sigmoid),
+`rms(x)` is computed over architecture-specific axes, and `γ` is a single
+learnable scalar initialized near zero. Applied to GELU and SiLU this
+yields two drop-in replacements we call **NELU** and **NiLU**.
+
+| Instance | Base activation | Gate function      |
+|----------|-----------------|--------------------|
+| `NELU`   | GELU            | `Φ(·)` (Gaussian)  |
+| `NiLU`   | SiLU            | `σ(·)` (sigmoid)   |
+
+## Install
+
+```bash
+git clone https://github.com/anonymous/gate-normalization.git
+cd gate-normalization
+pip install -e '.[train]'
+```
+
+Python ≥ 3.10 and PyTorch ≥ 2.1. A CUDA toolchain is needed to compile the
+fused kernels the first time the CUDA path is exercised; the pure-Python
+implementation is always available as a fallback.
+
+## Usage
+
+Gate Normalization layers are plain `nn.Module`s and can be constructed in
+place of `nn.GELU()` / `nn.SiLU()`:
+
+```python
+import torch.nn as nn
+from gate_norm import NELU, NiLU
+
+# Drop-in for channels-last or transformer inputs (default).
+act = NELU()
+
+# For NCHW conv feature maps, reduce RMS over (C, H, W).
+act_conv = NiLU(rms_mode="per_sample")
+```
+
+For an existing timm / torchvision / HuggingFace model, the
+`train.swap` helper replaces every instance on the module tree:
+
+```python
+import timm
+from train.swap import apply_gate_normalization
+
+model = timm.create_model("convnext_tiny", pretrained=False)
+apply_gate_normalization(model, "nelu")  # swaps every GELU -> NELU
+```
+
+## Reproducing the paper
+
+Eight ImageNet-1k recipes and one CIFAR-100 recipe are provided under
+`configs/`. Each ImageNet config is ported verbatim from a reproduced
+reference (MMPretrain for ConvNeXt / DeiT / Swin; timm's
+`training_script.mdx` for EfficientNet) — see the header comment in each
+file for the source URL and the reproduced Top-1 number.
+
+### Single run (locally)
+
+```bash
+torchrun --nproc_per_node=8 -m train.imagenet \
+    --config configs/imagenet/convnext_tiny.yaml \
+    --activation nelu \
+    --data-dir /data/imagenet \
+    --output ./runs/convnext_tiny-nelu
+```
+
+Set `--activation gelu` (the default) to train the baseline, or `silu` /
+`nilu` for the SiLU/NiLU pair.
+
+### Single run (SkyPilot)
+
+```bash
+sky jobs launch -n convnext-tiny-nelu sky/train.yaml \
+    --env CONFIG=configs/imagenet/convnext_tiny.yaml \
+    --env ACTIVATION=nelu
+```
+
+Managed jobs recover automatically from spot preemption; see
+[`sky/README.md`](sky/README.md).
+
+### CIFAR-100
+
+```bash
+python -m train.cifar --config configs/cifar100.yaml --activation nelu
+```
+
+## Repository layout
+
+```
+gate_norm/        Library: GateNorm, NELU, NiLU, fused CUDA backend.
+train/            Trainers: imagenet.py (timm-based), cifar.py.
+configs/          Recipe YAMLs, one per model.
+sky/              SkyPilot task specs.
+tests/            Unit tests.
+docs/             Method derivation and reproduction notes.
+```
+
+## Citation
+
+```bibtex
+@article{gate_normalization_2026,
+  title   = {Gate Normalization: Scale-Invariant Self-Gated Activations},
+  author  = {Anonymous},
+  journal = {arXiv preprint},
+  year    = {2026}
+}
+```
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

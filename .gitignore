@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Experiment artefacts (should live on object storage, not in-repo)
+checkpoints/
+logs/
+results/
+wandb/
+outputs/
+
+# Local secrets
+.env
+.env.local
+
+# OS cruft
+.DS_Store
+Thumbs.db
