@@ -48,7 +48,6 @@ set -euo pipefail
 
 log() { printf '[orchestrate %s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 
-: "${DATA_SNAPSHOT:?DATA_SNAPSHOT not set}"
 : "${CKPT_BUCKET:?CKPT_BUCKET not set (e.g. s3://nelu-checkpoints)}"
 : "${WANDB_API_KEY:?WANDB_API_KEY not set}"
 : "${WANDB_PROJECT:=gate-normalization}"
