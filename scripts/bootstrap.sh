@@ -141,4 +141,36 @@ cd "$WORKSPACE"
 bash scripts/orchestrate.sh
 ORC_RC=$?
 echo "[bootstrap] orchestrate.sh exited rc=$ORC_RC"
+
+# ── 6. Self-terminate ───────────────────────────────────────────
+# orchestrate.sh returns when the queue is drained or the worker has
+# nothing left to do. Without this step the spot VM would sit idle,
+# billing us $14–21/h and confusing the watchdog's live-worker count.
+# Primary path: ec2:TerminateInstances via IAM. Fallback: OS-level halt
+# (scheduled in 2 min so logs flush first) — AWS reaps halted spot VMs
+# shortly after. If both fail, the watchdog's effective_target cap
+# prevents launch/terminate storms, but the idle VM still bills until
+# the campaign ends.
+echo "[bootstrap] self-terminating spot instance"
+TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+IID=$(curl -sSH "X-aws-ec2-metadata-token: $TOKEN" \
+    http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+terminated=0
+if [[ -n "$IID" ]]; then
+    if aws ec2 terminate-instances --instance-ids "$IID" \
+            --region "${AWS_DEFAULT_REGION:-us-west-2}" \
+            >>"$LOG" 2>&1; then
+        echo "[bootstrap] terminate-instances OK for $IID"
+        terminated=1
+    else
+        echo "[bootstrap] terminate-instances FAILED — scheduling OS halt"
+    fi
+fi
+if (( terminated == 0 )); then
+    # Last-resort: halt in 2 min so bootstrap log + final S3 sync finish.
+    # `shutdown -h +2` schedules halt; AWS then cleans up the spot VM.
+    shutdown -h +2 "nelu worker self-terminate fallback" >/dev/null 2>&1 || \
+        (sleep 120 && halt -p) &
+fi
 exit $ORC_RC

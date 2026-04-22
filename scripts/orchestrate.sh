@@ -195,7 +195,7 @@ run_job() {
     # Skip already-complete.
     if s3_exists "${s3_prefix}/complete"; then
         log "skip ${exp} (complete)"
-        return 0
+        return 3
     fi
 
     # Try to claim.
@@ -209,20 +209,29 @@ run_job() {
     local outdir="/tmp/runs/${exp}"
     mkdir -p "$outdir"
 
-    # Pull prior state (resume point + W&B id), if any.
-    aws s3 sync "${s3_prefix}/" "${outdir}/" --exclude "lease" --exclude "complete" \
+    # Pull prior state (resume point + W&B id), if any. Skip the rolling
+    # checkpoint-*.pth.tar history — resume only needs last.pth.tar, and
+    # S3 accumulates these without a --delete mirror policy.
+    aws s3 sync "${s3_prefix}/" "${outdir}/" \
+        --exclude "lease" --exclude "complete" --exclude "checkpoint-*.pth.tar" \
         --exact-timestamps --only-show-errors || true
 
+    # timm's CheckpointSaver writes into "${args.output}/${args.experiment}/"
+    # — i.e. /tmp/runs/<exp>/<exp>/last.pth.tar. S3 mirrors this nested
+    # layout. So the resume point and W&B sidecar live under the nested
+    # subdir, not under $outdir directly.
+    local ckptdir="${outdir}/${exp}"
+
     local resume_flag=()
-    if [[ -f "${outdir}/last.pth.tar" ]]; then
-        resume_flag=(--resume "${outdir}/last.pth.tar")
-        log "  resuming from ${outdir}/last.pth.tar"
+    if [[ -f "${ckptdir}/last.pth.tar" ]]; then
+        resume_flag=(--resume "${ckptdir}/last.pth.tar")
+        log "  resuming from ${ckptdir}/last.pth.tar"
     fi
 
     local wandb_id_flag=()
-    if [[ -f "${outdir}/wandb_run_id.json" ]]; then
+    if [[ -f "${ckptdir}/wandb_run_id.json" ]]; then
         local saved_id
-        saved_id=$(python -c "import json,sys; print(json.load(open('${outdir}/wandb_run_id.json')).get('run_id',''))" 2>/dev/null || true)
+        saved_id=$(python -c "import json,sys; print(json.load(open('${ckptdir}/wandb_run_id.json')).get('run_id',''))" 2>/dev/null || true)
         if [[ -n "$saved_id" ]]; then
             wandb_id_flag=(--wandb-resume-id "$saved_id")
             log "  resuming W&B run ${saved_id}"
@@ -306,6 +315,11 @@ while (( idle_passes < MAX_IDLE_PASSES )); do
         IFS=: read -r cfg act <<<"$pair"
         rc=0
         run_job "$cfg" "$act" || rc=$?
+        # rc=0 means this worker actually ran training (trainer executed).
+        # rc=2 = lease held by another worker, rc=3 = already complete.
+        # Only rc=0 counts as "real work" — skip-paths must not reset the
+        # idle counter, otherwise a worker finding a drained queue loops
+        # forever burning spot $.
         if [[ $rc -eq 0 ]]; then
             ran_any=1
         fi

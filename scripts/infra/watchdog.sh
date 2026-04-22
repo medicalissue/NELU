@@ -70,6 +70,27 @@ all_done() {
     return 0
 }
 
+count_incomplete() {
+    # Number of JOB_ORDER entries that don't yet have a `complete` sentinel.
+    # Used as an upper bound on how many workers are actually useful — there
+    # is no point keeping TARGET_WORKERS alive if only 1 experiment is left
+    # in the queue, or we end up with idle workers thrashing launch/terminate.
+    local n=0
+    for pair in $JOB_ORDER; do
+        local cfg act exp key
+        IFS=: read -r cfg act <<<"$pair"
+        local base
+        base=$(basename "${cfg%.yaml}")
+        exp="${base}-${act}"
+        key="${bucket_prefix}${exp}/complete"
+        if ! aws s3api head-object --bucket "$bucket_name" --key "$key" \
+                >/dev/null 2>&1; then
+            n=$((n + 1))
+        fi
+    done
+    echo "$n"
+}
+
 count_live_workers() {
     # Running/pending spot instances tagged as our workers.
     aws ec2 describe-instances \
@@ -118,9 +139,19 @@ while :; do
     fi
 
     live=$(count_live_workers)
-    log "live workers: $live / $TARGET_WORKERS"
+    remaining=$(count_incomplete)
+    # Cap effective target by the number of incomplete experiments.
+    # Without this cap, if TARGET_WORKERS=3 but only 1 exp is left in the
+    # queue, a freshly-launched extra worker finds nothing to do, self-
+    # terminates, and the watchdog re-launches → launch/terminate loop
+    # burning spot $.
+    effective_target=$TARGET_WORKERS
+    if (( remaining < effective_target )); then
+        effective_target=$remaining
+    fi
+    log "live workers: $live / $effective_target  (TARGET=$TARGET_WORKERS, remaining_jobs=$remaining)"
 
-    while (( live < TARGET_WORKERS )); do
+    while (( live < effective_target )); do
         # launch_one retries indefinitely; no fall-through path needed.
         launch_one
         live=$(count_live_workers)

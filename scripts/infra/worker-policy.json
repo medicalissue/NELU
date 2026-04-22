@@ -50,6 +50,15 @@
         "ec2:CreateTags"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "SelfTerminate",
+      "Effect": "Allow",
+      "Action": ["ec2:TerminateInstances"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"ec2:ResourceTag/Project": "gate-norm"}
+      }
     }
   ]
 }
