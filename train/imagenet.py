@@ -1158,7 +1158,14 @@ def main():
                 continue
 
             if loader_eval is not None:
-                eval_metrics = validate(
+                # Always compute non-EMA eval. When EMA is enabled (DeiT-B,
+                # ConvNeXt-T/S) MMPretrain/timm use the EMA weights for the
+                # "official" eval_top1 used for best-checkpoint tracking, but
+                # during the first ~50 epochs that number is dominated by the
+                # random-init tail in the EMA buffer (decay 0.99996 → half-life
+                # ~13 epochs). Keeping both lets us actually see the model's
+                # training-side generalization during that window.
+                eval_metrics_raw = validate(
                     model,
                     loader_eval,
                     validate_loss_fn,
@@ -1181,7 +1188,16 @@ def main():
                         amp_autocast=amp_autocast,
                         log_suffix=' (EMA)',
                     )
-                    eval_metrics = ema_eval_metrics
+                    # Preserve original schema (eval_top1 = EMA, matching
+                    # paper-fidelity / best-ckpt tracking) and expose non-EMA
+                    # under raw_<key>. For EMA-less runs (Swin*, DeiT-S) the
+                    # schema is unchanged — existing W&B runs stay consistent.
+                    eval_metrics = {
+                        **{f'raw_{k}': v for k, v in eval_metrics_raw.items()},
+                        **ema_eval_metrics,
+                    }
+                else:
+                    eval_metrics = eval_metrics_raw
             else:
                 eval_metrics = None
 
