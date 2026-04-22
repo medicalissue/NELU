@@ -43,6 +43,36 @@ CIFAR-100 (``configs/cifar100.yaml``) is a separate ablation and is
 documented alongside the γ-initialization sweep in
 ``configs/ablation/gamma_init.yaml``.
 
+## Robustness
+
+Robustness numbers in the paper are produced by ``eval/imagenet_robustness.py``
+(ImageNet-C / A / R / O) and ``eval/cifar_robustness.py`` (CIFAR-100-C).
+Download the evaluation datasets with
+
+```bash
+bash scripts/prepare_data.sh /data
+```
+
+which populates ``/data`` with the Hendrycks public tarballs
+(`CIFAR-100-C`, `ImageNet-C`, `imagenet-a`, `imagenet-r`, `imagenet-o`)
+and `cifar-100-python`. ImageNet-1k train/val itself must be obtained
+from image-net.org separately.
+
+Each checkpoint is then evaluated with::
+
+    python -m eval.imagenet_robustness \
+        --model ${MODEL} --activation ${ACT} \
+        --checkpoint ${CKPT} --data-root /data \
+        --output results/robustness/${MODEL}-${ACT}.json
+
+    python -m eval.cifar_robustness \
+        --model ${CIFAR_MODEL} --activation ${ACT} \
+        --checkpoint ${CIFAR_CKPT} --data-root /data \
+        --output results/robustness/cifar-${CIFAR_MODEL}-${ACT}.json
+
+The JSON outputs are the source of truth for the robustness tables in
+the paper.
+
 ## Expected deltas
 
 See the paper's Table 1 for the complete set of deltas. Reproductions

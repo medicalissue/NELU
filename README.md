@@ -94,13 +94,36 @@ Managed jobs recover automatically from spot preemption; see
 python -m train.cifar --config configs/cifar100.yaml --activation nelu
 ```
 
+### Robustness evaluation
+
+Once a checkpoint is trained, evaluate it on the standard robustness
+benchmarks. `bash scripts/prepare_data.sh /data` fetches every dataset
+except ImageNet-1k itself (which has to be downloaded manually from
+image-net.org).
+
+```bash
+# ImageNet-C / A / R / O for an ImageNet checkpoint
+python -m eval.imagenet_robustness \
+    --model convnext_tiny --activation nelu \
+    --checkpoint runs/convnext_tiny-nelu/last.pth.tar \
+    --data-root /data
+
+# CIFAR-100-C for a CIFAR-100 checkpoint
+python -m eval.cifar_robustness \
+    --model resnet20 --activation nelu \
+    --checkpoint runs/resnet20-nelu/best.pt \
+    --data-root /data
+```
+
 ## Repository layout
 
 ```
 gate_norm/        Library: GateNorm, NELU, NiLU, fused CUDA backend.
 train/            Trainers: imagenet.py (timm-based), cifar.py.
+eval/             Robustness eval: imagenet_robustness.py, cifar_robustness.py.
 configs/          Recipe YAMLs, one per model.
 sky/              SkyPilot task specs.
+scripts/          Helper scripts (prepare_data.sh).
 tests/            Unit tests.
 docs/             Method derivation and reproduction notes.
 ```
