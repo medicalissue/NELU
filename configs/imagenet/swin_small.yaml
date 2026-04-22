@@ -53,5 +53,7 @@ seed: 42
 
 activation: gelu
 gamma_init: 1.0e-6
-rms_mode: per_token
+rms_mode: [-1]               # Swin FFN activation follows a channel-mixing
+                             # Linear (fc1) on (N, L, D); RMS axis is the
+                             # channel dim = last axis.
 log_gate_stats_every: 1
