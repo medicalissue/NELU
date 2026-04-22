@@ -54,7 +54,8 @@ aws ec2 run-instances \
         {"DeviceName":"/dev/sda1",
          "Ebs":{"VolumeSize":200,"VolumeType":"gp3","DeleteOnTermination":true}},
         {"DeviceName":"/dev/sdg",
-         "Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3","DeleteOnTermination":true}}
+         "Ebs":{"SnapshotId":"'"$DATA_SNAPSHOT"'","VolumeSize":500,"VolumeType":"gp3",
+                "Iops":16000,"Throughput":1000,"DeleteOnTermination":true}}
     ]' \
     --user-data "$USER_DATA_B64" \
     --tag-specifications "ResourceType=instance,Tags=[
