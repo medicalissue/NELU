@@ -19,8 +19,8 @@ data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
-batch_size: 256              # 256 × 8 GPUs × grad_accum 2 = 4096 effective
-grad_accum_steps: 2          # H100-80GB handles per-GPU 256 easily in bf16
+batch_size: 512              # 512 × 8 GPUs = 4096 effective, no grad accum
+grad_accum_steps: 1          # H100-80GB + bf16 holds the full micro-batch
 workers: 10
 
 opt: adamw
