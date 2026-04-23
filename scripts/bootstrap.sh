@@ -136,11 +136,15 @@ step editable-install python -m pip install -e "$WORKSPACE" --no-deps -q \
     || die "editable-install failed" 7
 
 # ── 5. Orchestrate.sh ────────────────────────────────────────────
-echo "[bootstrap] handing off to orchestrate.sh"
+# ENTRY_SCRIPT selects which orchestrator runs after bootstrap. Default
+# is the training worker; eval VMs set ENTRY_SCRIPT=scripts/eval_orchestrate.sh
+# via user-data to reuse this same bootstrap machinery for robustness eval.
+: "${ENTRY_SCRIPT:=scripts/orchestrate.sh}"
+echo "[bootstrap] handing off to ${ENTRY_SCRIPT}"
 cd "$WORKSPACE"
-bash scripts/orchestrate.sh
+bash "$ENTRY_SCRIPT"
 ORC_RC=$?
-echo "[bootstrap] orchestrate.sh exited rc=$ORC_RC"
+echo "[bootstrap] ${ENTRY_SCRIPT} exited rc=$ORC_RC"
 
 # ── 6. Self-terminate ───────────────────────────────────────────
 # orchestrate.sh returns when the queue is drained or the worker has

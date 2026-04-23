@@ -22,12 +22,17 @@ set -euo pipefail
 : "${WANDB_ENTITY:=}"
 : "${AWS_DEFAULT_REGION:=us-west-2}"
 : "${JOB_ORDER:=}"
+: "${ENTRY_SCRIPT:=}"
+: "${EVAL_EPOCH:=}"
+: "${EVAL_MODELS:=}"
+: "${EVAL_RESULT_PREFIX:=}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 template="$SCRIPT_DIR/user-data.sh"
 
 export REPO_URL REPO_REF VENV_S3_URL CKPT_BUCKET WANDB_API_KEY \
-       WANDB_PROJECT WANDB_ENTITY AWS_DEFAULT_REGION JOB_ORDER
+       WANDB_PROJECT WANDB_ENTITY AWS_DEFAULT_REGION JOB_ORDER \
+       ENTRY_SCRIPT EVAL_EPOCH EVAL_MODELS EVAL_RESULT_PREFIX
 
 python3 - "$template" <<'PY'
 import os, sys, pathlib
@@ -36,6 +41,7 @@ keys = [
     "REPO_URL", "REPO_REF", "VENV_S3_URL", "CKPT_BUCKET",
     "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
     "AWS_DEFAULT_REGION", "JOB_ORDER",
+    "ENTRY_SCRIPT", "EVAL_EPOCH", "EVAL_MODELS", "EVAL_RESULT_PREFIX",
 ]
 for k in keys:
     tpl = tpl.replace(f"@@{k}@@", os.environ.get(k, ""))

@@ -18,6 +18,11 @@ export WANDB_ENTITY="@@WANDB_ENTITY@@"
 export WANDB_API_KEY="@@WANDB_API_KEY@@"
 export AWS_DEFAULT_REGION="@@AWS_DEFAULT_REGION@@"
 export JOB_ORDER="@@JOB_ORDER@@"
+# Eval-mode overrides (empty for training workers).
+export ENTRY_SCRIPT="@@ENTRY_SCRIPT@@"
+export EVAL_EPOCH="@@EVAL_EPOCH@@"
+export EVAL_MODELS="@@EVAL_MODELS@@"
+export EVAL_RESULT_PREFIX="@@EVAL_RESULT_PREFIX@@"
 
 # Minimal repo clone just to access scripts/bootstrap.sh.
 # The real workspace at /workspace is set up by bootstrap.sh itself,
