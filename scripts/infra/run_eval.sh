@@ -36,12 +36,15 @@ IAM_PROFILE=nelu-worker-profile
 DATA_SNAPSHOT=snap-0adfaa42ce378623c
 REGION=us-west-2
 
-declare -A SUBNET_MAP=(
-    ["us-west-2a"]="subnet-02611feabb32d468c"
-    ["us-west-2b"]="subnet-0db9bbaeac9d76567"
-    ["us-west-2c"]="subnet-059b8cc477a51f6d7"
-    ["us-west-2d"]="subnet-086f01bf8cbb32315"
-)
+subnet_for_az() {
+    case "$1" in
+        us-west-2a) echo "subnet-02611feabb32d468c" ;;
+        us-west-2b) echo "subnet-0db9bbaeac9d76567" ;;
+        us-west-2c) echo "subnet-059b8cc477a51f6d7" ;;
+        us-west-2d) echo "subnet-086f01bf8cbb32315" ;;
+        *) return 2 ;;
+    esac
+}
 
 : "${CKPT_BUCKET:?CKPT_BUCKET required (e.g. from .env)}"
 : "${WANDB_API_KEY:?WANDB_API_KEY required}"  # render_user_data requires this; eval doesn't log to W&B
@@ -65,8 +68,8 @@ echo
 
 launch_in_az() {
     local az="$1"
-    local subnet="${SUBNET_MAP[$az]:-}"
-    [[ -z "$subnet" ]] && { echo "unknown az $az" >&2; return 2; }
+    local subnet
+    subnet=$(subnet_for_az "$az") || { echo "unknown az $az" >&2; return 2; }
 
     echo "▶ launching ${NAME} in ${az} (${INSTANCE_TYPE}, spot)"
     aws ec2 run-instances \
