@@ -1,0 +1,7 @@
+# EfficientNet add-on queue. Append to default_job_order.txt (or use as
+# JOB_ORDER directly) to include EfficientNet in the ImageNet campaign.
+# Uses SiLU ↔ NiLU because EfficientNet's native activation is SiLU.
+configs/imagenet/efficientnet_b0.yaml:silu
+configs/imagenet/efficientnet_b0.yaml:nilu
+configs/imagenet/efficientnet_b2.yaml:silu
+configs/imagenet/efficientnet_b2.yaml:nilu

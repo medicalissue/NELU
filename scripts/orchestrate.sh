@@ -192,8 +192,10 @@ run_job() {
     exp=$(exp_key "$cfg" "$act")
     local s3_prefix="${CKPT_BUCKET}/${exp}"
 
-    # Skip already-complete.
-    if s3_exists "${s3_prefix}/complete"; then
+    # Skip already-complete. The sentinel lands at one of two S3 paths
+    # depending on timm's output layout (nested under $exp/, or flat at
+    # the prefix root). Check both to stay robust.
+    if s3_exists "${s3_prefix}/${exp}/complete" || s3_exists "${s3_prefix}/complete"; then
         log "skip ${exp} (complete)"
         return 3
     fi
@@ -321,8 +323,18 @@ run_job() {
     aws s3 sync "${outdir}/" "${s3_prefix}/" --exclude "lease" \
         --only-show-errors || true
 
-    if [[ $trainer_rc -eq 0 && -f "${outdir}/complete" ]]; then
-        log "✓ ${exp} complete (rc=$trainer_rc)"
+    # timm writes into ``<outdir>/<experiment>/`` because ``--experiment
+    # $exp`` is forwarded to ``utils.get_outdir``. The completion sentinel
+    # lives there, not at the top of $outdir. Probe both so a future timm
+    # layout change doesn't silently regress us to "every run is paused".
+    local complete_path=""
+    if [[ -f "${outdir}/${exp}/complete" ]]; then
+        complete_path="${outdir}/${exp}/complete"
+    elif [[ -f "${outdir}/complete" ]]; then
+        complete_path="${outdir}/complete"
+    fi
+    if [[ $trainer_rc -eq 0 && -n "$complete_path" ]]; then
+        log "✓ ${exp} complete (rc=$trainer_rc)  sentinel=${complete_path}"
     elif [[ $trainer_rc -eq 0 ]]; then
         # Exited clean but no sentinel — likely SIGTERM at an epoch boundary.
         log "⏸ ${exp} paused (clean exit, no sentinel)"

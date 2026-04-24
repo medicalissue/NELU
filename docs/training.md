@@ -38,8 +38,9 @@ Useful flags:
   ``WANDB_API_KEY`` in the environment (or ``.env``).
 * ``--resume PATH`` — resume from a checkpoint. Paired with the W&B
   run-id sidecar, this keeps all logs on one run.
-* ``--rms-mode per_sample|per_token`` — override the auto-detected
-  reduction axes.
+* ``--norm-axes sample|channel|[<ints>]`` — override the auto-detected
+  reduction axes. Accepts the ``"channel"`` / ``"sample"`` aliases or an
+  explicit axis list such as ``[-1]`` or ``[2, 3]``.
 * ``--torchcompile [backend]`` (alias: ``inductor`` when no arg), plus
   ``--torchcompile-mode {default,reduce-overhead,max-autotune,…}`` — wrap
   the training task in ``torch.compile``. Gate-Normalization's fused

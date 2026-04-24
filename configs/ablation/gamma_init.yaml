@@ -57,5 +57,5 @@ seed: 42
 
 activation: nelu
 gamma_init: 1.0e-6
-rms_mode: per_sample
+norm_axes: sample
 log_gate_stats_every: 1

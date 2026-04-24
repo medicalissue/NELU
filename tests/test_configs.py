@@ -15,8 +15,13 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IMAGENET_CONFIGS = sorted((REPO_ROOT / "configs" / "imagenet").glob("*.yaml"))
+CIFAR_DIR = REPO_ROOT / "configs" / "cifar100"
+CIFAR_BASE = CIFAR_DIR / "_base.yaml"
+# Model-specific stubs under configs/cifar100/ inherit from _base.yaml via
+# the ``include:`` directive resolved by train/cifar.py::_load_config_with_includes.
+CIFAR_STUBS = sorted(p for p in CIFAR_DIR.glob("*.yaml") if p.name != "_base.yaml")
 OTHER_CONFIGS = [
-    REPO_ROOT / "configs" / "cifar100.yaml",
+    CIFAR_BASE,
     REPO_ROOT / "configs" / "ablation" / "gamma_init.yaml",
 ]
 
@@ -24,9 +29,21 @@ _REQUIRED_IMAGENET_KEYS = {
     "model", "num_classes", "data_dir",
     "batch_size", "opt", "weight_decay",
     "sched", "epochs", "warmup_epochs",
-    "activation", "gamma_init", "rms_mode",
+    "activation", "gamma_init", "norm_axes",
     "seed",
 }
+
+
+def _norm_axes_token(cfg: dict) -> object:
+    """Return a hashable view of norm_axes for schema checks.
+
+    YAML lists (e.g. ``[-1]``) are unhashable so we can't put them straight
+    into a ``set``; convert to tuple when necessary.
+    """
+    axes = cfg["norm_axes"]
+    if isinstance(axes, list):
+        return tuple(axes)
+    return axes
 
 
 @pytest.mark.parametrize("path", IMAGENET_CONFIGS, ids=lambda p: p.name)
@@ -41,7 +58,12 @@ def test_imagenet_config_values_are_sane(path: Path) -> None:
     cfg = yaml.safe_load(path.read_text())
     assert cfg["num_classes"] == 1000
     assert cfg["activation"] in {"relu", "gelu", "silu", "nelu", "nilu"}
-    assert cfg["rms_mode"] in {"per_token", "per_sample"}
+    axes = _norm_axes_token(cfg)
+    valid_aliases = {"channel", "sample"}
+    # Either an alias or an explicit axis tuple
+    assert axes in valid_aliases or isinstance(axes, tuple), (
+        f"{path.name}: norm_axes={axes!r} is neither an alias nor an axis tuple"
+    )
     assert cfg["seed"] == 42, "All shipped configs pin seed=42 for comparability."
     assert 0 <= cfg["gamma_init"] <= 1e-3
     assert cfg["epochs"] > 0
@@ -67,13 +89,22 @@ def test_every_family_has_both_scales() -> None:
     assert names == expected, f"Config set changed: {names ^ expected}"
 
 
-def test_transformer_configs_use_per_token() -> None:
+def test_axis_policy_matches_architecture_family() -> None:
+    """Transformers and ConvNeXt normalize per channel; EfficientNet per sample."""
     for path in IMAGENET_CONFIGS:
         cfg = yaml.safe_load(path.read_text())
-        is_transformer = cfg["model"].startswith(("deit_", "swin_", "vit_"))
-        assert cfg["rms_mode"] == ("per_token" if is_transformer else "per_sample"), (
-            f"{path.name}: rms_mode does not match architecture family"
-        )
+        axes = _norm_axes_token(cfg)
+        model = cfg["model"]
+        if model.startswith(("deit_", "swin_", "vit_", "convnext_")):
+            # Either the "channel" alias or an explicit last-axis tuple.
+            assert axes in {"channel", (-1,)}, (
+                f"{path.name}: expected channel-axis gate stats, got {axes!r}"
+            )
+        elif model.startswith("efficientnet_"):
+            assert axes == "sample", (
+                f"{path.name}: EfficientNet should default to 'sample' "
+                f"(per-site overrides apply via train.swap); got {axes!r}"
+            )
 
 
 def test_convnext_deit_swin_share_mmpretrain_defaults() -> None:
@@ -118,3 +149,37 @@ def test_other_configs_parse(path: Path) -> None:
     cfg = yaml.safe_load(path.read_text())
     assert "seed" in cfg
     assert cfg["seed"] == 42
+
+
+@pytest.mark.parametrize("path", CIFAR_STUBS, ids=lambda p: p.name)
+def test_cifar_stubs_inherit_from_base(path: Path) -> None:
+    """Every model stub declares include: _base.yaml and picks a model."""
+    cfg = yaml.safe_load(path.read_text())
+    assert cfg.get("include") == "_base.yaml", (
+        f"{path.name}: expected 'include: _base.yaml' to inherit the unified recipe"
+    )
+    assert "model" in cfg, f"{path.name}: missing 'model' field"
+
+
+def test_cifar_base_has_unified_recipe() -> None:
+    """The CIFAR-100 base config fixes the shared recipe fields we care about."""
+    cfg = yaml.safe_load(CIFAR_BASE.read_text())
+    # chenyaofo official recipe hallmarks (protocol, not execution backend)
+    assert cfg["optimizer"] == "sgd"
+    assert cfg["lr"] == 0.1
+    assert cfg["momentum"] == 0.9
+    assert cfg["weight_decay"] == 5.0e-4
+    assert cfg["nesterov"] is True
+    assert cfg["scheduler"] == "cosine"
+    assert cfg["epochs"] == 200
+    assert cfg["warmup_epochs"] == 0
+    assert cfg["batch_size"] == 256
+    assert cfg["gamma_init"] == 0.0
+    assert cfg["beta_init"] == 0.0
+    # Execution backend: bf16 AMP + inductor. Applied uniformly across
+    # activations so the comparison stays controlled; not part of the
+    # protocol per se, but must be the same for every run.
+    assert cfg["amp"] is True
+    assert cfg["amp_dtype"] == "bfloat16"
+    assert cfg["compile"] is True
+    assert cfg["compile_backend"] == "inductor"

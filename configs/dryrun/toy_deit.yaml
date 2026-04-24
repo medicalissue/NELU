@@ -1,4 +1,4 @@
-# Toy DeiT-Small companion for dry-run (transformer per_token path).
+# Toy DeiT-Small companion for dry-run (transformer channel-axis path).
 model: deit_small_patch16_224
 num_classes: 1000
 drop: 0.0
@@ -45,6 +45,6 @@ model_ema: false
 seed: 42
 
 activation: gelu
-gamma_init: 1.0e-6
-rms_mode: per_token
+gamma_init: 0.0
+norm_axes: channel
 log_gate_stats_every: 1000

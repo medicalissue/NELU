@@ -15,7 +15,8 @@ data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
-batch_size: 128
+batch_size: 256              # 256 × 8 GPUs = 2048 effective (2× MMPretrain base;
+                             # lr_base_scale=linear scales lr 1e-3 → 2e-3 automatically)
 grad_accum_steps: 1
 workers: 10
 
@@ -45,6 +46,7 @@ reprob: 0.25
 remode: rand
 
 amp: true
+amp-dtype: bfloat16
 torchcompile: null              # "inductor" to enable torch.compile
 torchcompile_mode: null
 clip_grad: 5.0
@@ -52,8 +54,8 @@ model_ema: false
 seed: 42
 
 activation: gelu
-gamma_init: 1.0e-6
-rms_mode: [-1]               # Swin FFN activation follows a channel-mixing
+gamma_init: 0.0
+norm_axes: [-1]               # Swin FFN activation follows a channel-mixing
                              # Linear (fc1) on (N, L, D); RMS axis is the
                              # channel dim = last axis.
 log_gate_stats_every: 1

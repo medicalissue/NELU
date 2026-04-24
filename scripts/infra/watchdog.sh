@@ -53,17 +53,46 @@ bucket_name=$(echo "$bucket_root" | sed -E 's|^s3://([^/]+).*|\1|')
 bucket_prefix=$(echo "$bucket_root" | sed -E 's|^s3://[^/]+/?||')
 [[ -n "$bucket_prefix" ]] && bucket_prefix="${bucket_prefix}/"
 
+exp_complete() {
+    # True iff $1 (an experiment basename) has a ``complete`` sentinel on S3.
+    # timm writes ``<output>/<experiment>/complete`` — so the sync from
+    # ``<outdir>`` to ``<CKPT_BUCKET>/<exp>`` mirrors that nested structure.
+    # Older / flat layouts would land at ``<exp>/complete``; we tolerate both.
+    local exp="$1"
+    local key_nested="${bucket_prefix}${exp}/${exp}/complete"
+    local key_flat="${bucket_prefix}${exp}/complete"
+    if aws s3api head-object --bucket "$bucket_name" --key "$key_nested" \
+            >/dev/null 2>&1; then
+        return 0
+    fi
+    if aws s3api head-object --bucket "$bucket_name" --key "$key_flat" \
+            >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Parse a queue entry into its experiment basename. Accepts either the
+# ImageNet "<cfg>:<act>" pair or the CIFAR "<cfg>:<act>:<seed>" triple;
+# the resulting exp mirrors what the orchestrators compute for S3 prefixes.
+_exp_from_entry() {
+    local entry="$1"
+    local cfg act seed
+    IFS=: read -r cfg act seed <<<"$entry"
+    local base
+    base=$(basename "${cfg%.yaml}")
+    if [[ -n "$seed" ]]; then
+        echo "${base}-${act}-s${seed}"
+    else
+        echo "${base}-${act}"
+    fi
+}
+
 all_done() {
-    # Every experiment in JOB_ORDER must have a `complete` object.
-    for pair in $JOB_ORDER; do
-        local cfg act exp key
-        IFS=: read -r cfg act <<<"$pair"
-        local base
-        base=$(basename "${cfg%.yaml}")
-        exp="${base}-${act}"
-        key="${bucket_prefix}${exp}/complete"
-        if ! aws s3api head-object --bucket "$bucket_name" --key "$key" \
-                >/dev/null 2>&1; then
+    for entry in $JOB_ORDER; do
+        local exp
+        exp=$(_exp_from_entry "$entry")
+        if ! exp_complete "$exp"; then
             return 1
         fi
     done
@@ -71,20 +100,11 @@ all_done() {
 }
 
 count_incomplete() {
-    # Number of JOB_ORDER entries that don't yet have a `complete` sentinel.
-    # Used as an upper bound on how many workers are actually useful — there
-    # is no point keeping TARGET_WORKERS alive if only 1 experiment is left
-    # in the queue, or we end up with idle workers thrashing launch/terminate.
     local n=0
-    for pair in $JOB_ORDER; do
-        local cfg act exp key
-        IFS=: read -r cfg act <<<"$pair"
-        local base
-        base=$(basename "${cfg%.yaml}")
-        exp="${base}-${act}"
-        key="${bucket_prefix}${exp}/complete"
-        if ! aws s3api head-object --bucket "$bucket_name" --key "$key" \
-                >/dev/null 2>&1; then
+    for entry in $JOB_ORDER; do
+        local exp
+        exp=$(_exp_from_entry "$entry")
+        if ! exp_complete "$exp"; then
             n=$((n + 1))
         fi
     done

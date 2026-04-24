@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import sys
 import signal
 import time
 from pathlib import Path
@@ -28,282 +29,152 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from gate_norm import NELU, NiLU, collect_gamma_stats
-from train.swap import gelu_to_nelu, silu_to_nilu, replace_activation  # noqa: F401
-
-
-# ---------------------------------------------------------------------------
-#  CIFAR ResNet (He et al., 2015 -- proper CIFAR variant)
-# ---------------------------------------------------------------------------
-
-class BasicBlock(nn.Module):
-    def __init__(self, in_planes, planes, stride=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_planes, planes, 3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, 3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.act = nn.ReLU(inplace=True)
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, planes, 1, stride=stride, bias=False),
-                nn.BatchNorm2d(planes),
-            )
-
-    def forward(self, x):
-        out = self.act(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = self.act(out)
-        return out
-
-
-class CIFARResNet(nn.Module):
-    """ResNet for CIFAR (32x32). Depth must satisfy (depth-2) % 6 == 0."""
-    def __init__(self, depth, num_classes=100, widen_factor=1):
-        super().__init__()
-        assert (depth - 2) % 6 == 0, f"Depth must be 6n+2, got {depth}"
-        n = (depth - 2) // 6
-        channels = [16 * widen_factor, 32 * widen_factor, 64 * widen_factor]
-
-        self.conv1 = nn.Conv2d(3, 16, 3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.act = nn.ReLU(inplace=True)
-        self.layer1 = self._make_layer(16, channels[0], n, stride=1)
-        self.layer2 = self._make_layer(channels[0], channels[1], n, stride=2)
-        self.layer3 = self._make_layer(channels[1], channels[2], n, stride=2)
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(channels[2], num_classes)
-
-        # Kaiming initialization
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def _make_layer(self, in_planes, planes, num_blocks, stride):
-        layers = [BasicBlock(in_planes, planes, stride)]
-        for _ in range(1, num_blocks):
-            layers.append(BasicBlock(planes, planes, 1))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.act(self.bn1(self.conv1(x)))
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.avgpool(out)
-        out = out.view(out.size(0), -1)
-        return self.fc(out)
-
-
-# ---------------------------------------------------------------------------
-#  Wide ResNet (Zagoruyko & Komodakis, 2016)
-# ---------------------------------------------------------------------------
-
-class WideBlock(nn.Module):
-    def __init__(self, in_planes, planes, dropout_rate, stride=1):
-        super().__init__()
-        self.bn1 = nn.BatchNorm2d(in_planes)
-        self.conv1 = nn.Conv2d(in_planes, planes, 3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, 3, stride=stride, padding=1, bias=False)
-        self.act = nn.ReLU(inplace=True)
-        self.dropout = nn.Dropout(p=dropout_rate) if dropout_rate > 0 else nn.Identity()
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, planes, 1, stride=stride, bias=False),
-            )
-
-    def forward(self, x):
-        out = self.act(self.bn1(x))
-        shortcut = self.shortcut(out)
-        out = self.conv1(out)
-        out = self.dropout(self.act(self.bn2(out)))
-        out = self.conv2(out)
-        return out + shortcut
-
-
-class WideResNet(nn.Module):
-    def __init__(self, depth=28, widen_factor=10, dropout_rate=0.3, num_classes=100):
-        super().__init__()
-        assert (depth - 4) % 6 == 0
-        n = (depth - 4) // 6
-        k = widen_factor
-        channels = [16, 16 * k, 32 * k, 64 * k]
-
-        self.conv1 = nn.Conv2d(3, channels[0], 3, padding=1, bias=False)
-        self.layer1 = self._make_layer(channels[0], channels[1], n, dropout_rate, stride=1)
-        self.layer2 = self._make_layer(channels[1], channels[2], n, dropout_rate, stride=2)
-        self.layer3 = self._make_layer(channels[2], channels[3], n, dropout_rate, stride=2)
-        self.bn = nn.BatchNorm2d(channels[3])
-        self.act = nn.ReLU(inplace=True)
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(channels[3], num_classes)
-
-    def _make_layer(self, in_planes, planes, num_blocks, dropout_rate, stride):
-        layers = [WideBlock(in_planes, planes, dropout_rate, stride)]
-        for _ in range(1, num_blocks):
-            layers.append(WideBlock(planes, planes, dropout_rate, 1))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.act(self.bn(out))
-        out = self.avgpool(out)
-        out = out.view(out.size(0), -1)
-        return self.fc(out)
-
-
-# ---------------------------------------------------------------------------
-#  DenseNet-BC (Huang et al., 2017) -- growth rate 12
-# ---------------------------------------------------------------------------
-
-class Bottleneck(nn.Module):
-    def __init__(self, in_planes, growth_rate):
-        super().__init__()
-        inter = 4 * growth_rate
-        self.bn1 = nn.BatchNorm2d(in_planes)
-        self.conv1 = nn.Conv2d(in_planes, inter, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(inter)
-        self.conv2 = nn.Conv2d(inter, growth_rate, 3, padding=1, bias=False)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        out = self.conv1(self.act(self.bn1(x)))
-        out = self.conv2(self.act(self.bn2(out)))
-        return torch.cat([x, out], 1)
-
-
-class Transition(nn.Module):
-    def __init__(self, in_planes, out_planes):
-        super().__init__()
-        self.bn = nn.BatchNorm2d(in_planes)
-        self.conv = nn.Conv2d(in_planes, out_planes, 1, bias=False)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        return F.avg_pool2d(self.conv(self.act(self.bn(x))), 2)
-
-
-class DenseNet(nn.Module):
-    def __init__(self, depth=100, growth_rate=12, reduction=0.5, num_classes=100):
-        super().__init__()
-        n_blocks = (depth - 4) // 6  # BC variant: 2 convs per block
-        n_channels = 2 * growth_rate
-        self.conv1 = nn.Conv2d(3, n_channels, 3, padding=1, bias=False)
-        self.dense1, n_channels = self._make_dense(n_channels, growth_rate, n_blocks)
-        out_ch = int(math.floor(n_channels * reduction))
-        self.trans1 = Transition(n_channels, out_ch); n_channels = out_ch
-        self.dense2, n_channels = self._make_dense(n_channels, growth_rate, n_blocks)
-        out_ch = int(math.floor(n_channels * reduction))
-        self.trans2 = Transition(n_channels, out_ch); n_channels = out_ch
-        self.dense3, n_channels = self._make_dense(n_channels, growth_rate, n_blocks)
-        self.bn = nn.BatchNorm2d(n_channels)
-        self.act = nn.ReLU(inplace=True)
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(n_channels, num_classes)
-
-    def _make_dense(self, in_channels, growth_rate, n_blocks):
-        layers = []
-        ch = in_channels
-        for _ in range(n_blocks):
-            layers.append(Bottleneck(ch, growth_rate))
-            ch += growth_rate
-        return nn.Sequential(*layers), ch
-
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.trans1(self.dense1(out))
-        out = self.trans2(self.dense2(out))
-        out = self.dense3(out)
-        out = self.act(self.bn(out))
-        out = self.avgpool(out)
-        out = out.view(out.size(0), -1)
-        return self.fc(out)
-
-
-# ---------------------------------------------------------------------------
-#  MobileNetV2 adapted for CIFAR (32x32)
-# ---------------------------------------------------------------------------
-
-def _make_mobilenetv2_cifar(num_classes=100):
-    """MobileNetV2 with stride=1 in first conv for 32x32 inputs."""
-    from torchvision.models import mobilenet_v2
-    model = mobilenet_v2(num_classes=num_classes)
-    # Original first conv: stride=2, 3->32, for 224x224
-    # For 32x32: use stride=1 so feature maps stay large enough
-    model.features[0][0] = nn.Conv2d(3, 32, 3, stride=1, padding=1, bias=False)
-    return model
-
-
-# ---------------------------------------------------------------------------
-#  ShuffleNet V1 (minimal CIFAR variant)
-# ---------------------------------------------------------------------------
-
-def _make_shufflenetv1_cifar(num_classes=100):
-    """Minimal ShuffleNet V1 for CIFAR-100."""
-    from torchvision.models import shufflenet_v2_x1_0
-    model = shufflenet_v2_x1_0(num_classes=num_classes)
-    # Adapt first conv for 32x32
-    model.conv1[0] = nn.Conv2d(3, 24, 3, stride=1, padding=1, bias=False)
-    # Remove the initial maxpool (too aggressive for 32x32)
-    model.maxpool = nn.Identity()
-    return model
+from train.swap import (  # noqa: F401
+    replace_activation,
+    replace_activation_auto_axes,
+)
 
 
 # ---------------------------------------------------------------------------
 #  Model factory
 # ---------------------------------------------------------------------------
+#
+# Seven CIFAR-100 architectures loaded from public reference implementations:
+#
+#   * ResNet-20 / 56 / 110        — chenyaofo/pytorch-cifar-models hub entry
+#   * VGG-16-BN                   — same hub
+#   * MobileNetV2 x1.0            — same hub
+#   * ShuffleNetV2 x1.0           — same hub
+#   * DenseNet-BC-100-12          — bearpaw/pytorch-classification vendored
+#                                   in ``third_party/bearpaw_cifar/``
+#
+# All architectures enter the activation swap through
+# :func:`train.swap.replace_activation_auto_axes`, which picks per-site
+# ``norm_axes`` from the adjacent Conv2d's kernel shape + groups. Pre- vs.
+# post-activation ordering is a per-architecture property listed in
+# :data:`_ACTIVATION_ORDER`.
 
-# The reference CIFAR architectures in this file all start life with
-# ``nn.ReLU``; we swap into whichever activation was requested. "gelu"/"silu"
-# swap to their plain torch counterparts (activation comparison baselines);
-# "nelu"/"nilu" swap to Gate-Normalization instances with per-sample RMS
-# reduction to match the NCHW feature-map layout.
-_RELU_TARGETS = {
-    "gelu": lambda: nn.GELU(),
-    "silu": lambda: nn.SiLU(),
-    "nelu": lambda: NELU(rms_mode="per_sample"),
-    "nilu": lambda: NiLU(rms_mode="per_sample"),
+_SUPPORTED_MODELS = (
+    "resnet20", "resnet56", "resnet110",
+    "vgg16_bn",
+    "densenet_bc_100_12",
+    "mobilenetv2", "shufflenetv2",
+)
+
+
+# Pre-activation architectures feed each ReLU into the *next* conv, not out of
+# the previous one. DenseNet's Bottleneck is the only pre-activation model in
+# our lineup; everything else uses post-activation (Conv → BN → ReLU).
+_ACTIVATION_ORDER = {
+    "resnet20":           "post",
+    "resnet56":           "post",
+    "resnet110":          "post",
+    "vgg16_bn":           "post",
+    "densenet_bc_100_12": "pre",
+    "mobilenetv2":        "post",
+    "shufflenetv2":       "post",
 }
 
 
-def build_model(name, activation="relu", num_classes=100):
-    """Create a CIFAR model and apply the requested activation swap."""
+def _from_chenyaofo_hub(hub_name: str, num_classes: int) -> nn.Module:
+    """Load a model from the chenyaofo/pytorch-cifar-models torch.hub repo."""
+    import torch
+    model = torch.hub.load(
+        "chenyaofo/pytorch-cifar-models",
+        hub_name,
+        pretrained=False,
+        num_classes=num_classes,
+        trust_repo=True,
+    )
+    return model
+
+
+def _build_backbone(name: str, num_classes: int) -> nn.Module:
+    """Instantiate the raw ReLU-based backbone for ``name``."""
     if name == "resnet20":
-        model = CIFARResNet(20, num_classes=num_classes)
-    elif name == "resnet56":
-        model = CIFARResNet(56, num_classes=num_classes)
-    elif name == "resnet110":
-        model = CIFARResNet(110, num_classes=num_classes)
-    elif name == "wrn28_10":
-        model = WideResNet(28, 10, num_classes=num_classes)
-    elif name == "densenet100":
-        model = DenseNet(100, 12, num_classes=num_classes)
-    elif name == "mobilenetv2":
-        model = _make_mobilenetv2_cifar(num_classes)
-    elif name == "shufflenetv1":
-        model = _make_shufflenetv1_cifar(num_classes)
-    else:
+        return _from_chenyaofo_hub("cifar100_resnet20", num_classes)
+    if name == "resnet56":
+        return _from_chenyaofo_hub("cifar100_resnet56", num_classes)
+    if name == "resnet110":
+        # chenyaofo stops at depth 56; depth 110 comes from the bearpaw
+        # vendored copy, which is the classical He-2015 CIFAR ResNet at
+        # arbitrary depth via ``(depth-2)/6`` basic blocks per stage.
+        from third_party.bearpaw_cifar import resnet as _bp_resnet
+        return _bp_resnet.resnet(
+            depth=110, num_classes=num_classes, block_name="BasicBlock",
+        )
+    if name == "vgg16_bn":
+        return _from_chenyaofo_hub("cifar100_vgg16_bn", num_classes)
+    if name == "mobilenetv2":
+        return _from_chenyaofo_hub("cifar100_mobilenetv2_x1_0", num_classes)
+    if name == "shufflenetv2":
+        return _from_chenyaofo_hub("cifar100_shufflenetv2_x1_0", num_classes)
+    if name == "densenet_bc_100_12":
+        from third_party.bearpaw_cifar import densenet as _bp_densenet
+        return _bp_densenet.densenet(
+            depth=100, growthRate=12, num_classes=num_classes, dropRate=0.0,
+        )
+    raise ValueError(
+        f"Unknown model: {name!r}. Supported: {_SUPPORTED_MODELS}"
+    )
+def build_model(
+    name: str,
+    activation: str = "relu",
+    num_classes: int = 100,
+    *,
+    gamma_init: float = 0.0,
+    beta_init: float = 0.0,
+):
+    """Create a CIFAR-100 model and apply the requested activation swap.
+
+    ``name`` must be one of :data:`_SUPPORTED_MODELS`. Five of the seven come
+    from the chenyaofo/pytorch-cifar-models hub; ResNet-110 and
+    DenseNet-BC-100-12 come from the bearpaw copy vendored in
+    ``third_party/``.
+
+    Activation handling:
+      * ``relu``                 — leaves the model untouched.
+      * ``gelu`` / ``silu``      — unconditional drop-in replacement.
+      * ``nelu`` / ``nilu``      — swap via ``replace_activation_auto_axes``,
+                                   which picks per-site ``norm_axes`` from
+                                   the adjacent Conv2d's kernel shape.
+    """
+    if name not in _SUPPORTED_MODELS:
         raise ValueError(
-            f"Unknown model: {name}. Supported: resnet20, resnet56, "
-            "resnet110, wrn28_10, densenet100, mobilenetv2, shufflenetv1"
+            f"Unknown model: {name!r}. Supported: {_SUPPORTED_MODELS}"
         )
 
-    if activation in _RELU_TARGETS:
-        n = replace_activation(model, nn.ReLU, _RELU_TARGETS[activation])
+    model = _build_backbone(name, num_classes)
+
+    if activation == "relu":
+        return model
+
+    # torchvision MobileNetV2 uses nn.ReLU6; custom CIFAR blocks use
+    # plain nn.ReLU. Match both so every family swaps uniformly.
+    relu_types: tuple[type, ...] = (nn.ReLU, nn.ReLU6)
+    order = _ACTIVATION_ORDER[name]
+
+    if activation in {"gelu", "silu"}:
+        factory = (lambda: nn.GELU()) if activation == "gelu" else (lambda: nn.SiLU())
+        n = replace_activation(model, relu_types, factory)
         print(f"Swapped {n} ReLU -> {activation}")
-    elif activation != "relu":
+    elif activation == "nelu":
+        n = replace_activation_auto_axes(
+            model, relu_types, NELU, activation_order=order,
+            gamma_init=gamma_init, beta_init=beta_init,
+        )
+        print(f"Swapped {n} ReLU -> NELU ({order}-activation axes)")
+    elif activation == "nilu":
+        n = replace_activation_auto_axes(
+            model, relu_types, NiLU, activation_order=order,
+            gamma_init=gamma_init, beta_init=beta_init,
+        )
+        print(f"Swapped {n} ReLU -> NiLU ({order}-activation axes)")
+    else:
         raise ValueError(f"Unknown activation: {activation}")
 
     return model
+
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +199,14 @@ def get_dataloaders(data_dir, train_batch_size, val_batch_size=None, num_workers
         transforms.ToTensor(),
         transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
     ])
-    train_ds = datasets.CIFAR100(data_dir, train=True, download=True,
+    # Expect the CIFAR-100 archive already extracted to
+    # ``<data_dir>/cifar-100-python/`` by scripts/prepare_data.sh and baked
+    # into the worker's data snapshot. The snapshot mount is read-only, so
+    # ``download=True`` would crash on the first worker trying to populate
+    # it. Fail loud and early instead.
+    train_ds = datasets.CIFAR100(data_dir, train=True, download=False,
                                   transform=train_transform)
-    test_ds = datasets.CIFAR100(data_dir, train=False, download=True,
+    test_ds = datasets.CIFAR100(data_dir, train=False, download=False,
                                  transform=test_transform)
     train_loader = DataLoader(train_ds, batch_size=train_batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True,
@@ -488,33 +364,60 @@ def init_wandb_run(args, saved_wandb_id=None):
 #  Main
 # ---------------------------------------------------------------------------
 
+def _load_config_with_includes(path: str) -> dict:
+    """Load a YAML config, resolving a single ``include: <path>`` directive.
+
+    ``include`` is interpreted relative to the current config's directory.
+    Fields declared in the outer file override fields inherited through
+    ``include`` — exactly the mental model of YAML-with-defaults configs.
+    No recursion limit beyond a single base file is needed: our layout is
+    ``_base.yaml`` + model-specific leaf, never deeper.
+    """
+    import yaml
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    inc = cfg.pop("include", None)
+    if inc is None:
+        return cfg
+    base_path = os.path.join(os.path.dirname(os.path.abspath(path)), inc)
+    with open(base_path) as f:
+        base = yaml.safe_load(f) or {}
+    base.update(cfg)
+    return base
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="CIFAR-100 training with activation comparison")
     p.add_argument("--model", type=str, default="resnet20",
-                    choices=["resnet20", "resnet56", "resnet110", "wrn28_10",
-                             "densenet100", "mobilenetv2", "shufflenetv1"])
+                    choices=list(_SUPPORTED_MODELS))
     p.add_argument("--activation", type=str, default="relu",
                     choices=["relu", "gelu", "silu", "nelu", "nilu"])
     p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--val_batch_size", type=int, default=None,
                    help="Validation batch size; defaults to 2x train batch size")
     p.add_argument("--lr", type=float, default=0.1)
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight_decay", type=float, default=5e-4)
+    p.add_argument("--nesterov", action="store_true", default=True,
+                   help="Use Nesterov momentum (chenyaofo default; True)")
     p.add_argument("--optimizer", type=str, default="sgd", choices=["sgd"])
-    p.add_argument("--scheduler", type=str, default="multistep",
+    p.add_argument("--scheduler", type=str, default="cosine",
                    choices=["multistep", "cosine"])
     p.add_argument("--milestones", type=int, nargs="+", default=[60, 120, 160],
                    help="MultiStepLR milestones (epoch indices)")
     p.add_argument("--lr_gamma", type=float, default=0.2,
                    help="MultiStepLR decay factor")
-    p.add_argument("--warmup_epochs", type=int, default=1,
-                   help="Linear warmup epochs from start_factor*lr to lr")
+    p.add_argument("--warmup_epochs", type=int, default=0,
+                   help="Linear warmup epochs from start_factor*lr to lr (0 disables)")
     p.add_argument("--warmup_start_factor", type=float, default=1e-3,
-                   help="Initial multiplier on lr for the first batch of warmup")
+                   help="Initial multiplier on lr when warmup is enabled")
     p.add_argument("--min_lr", type=float, default=0.0,
                    help="Cosine schedule floor (ignored for multistep)")
+    p.add_argument("--gamma_init", type=float, default=0.0,
+                   help="Initial value of the learnable γ scalar in NELU/NiLU.")
+    p.add_argument("--beta_init", type=float, default=0.0,
+                   help="Initial value of the learnable β scalar in NELU/NiLU.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output_dir", type=str, default="results/cifar")
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
@@ -542,14 +445,25 @@ def main():
     signal.signal(signal.SIGTERM, _request_interruption)
     signal.signal(signal.SIGINT, _request_interruption)
 
-    # Load YAML config if provided (overrides CLI defaults)
+    # Load YAML config if provided. Configs declare ``include: <path>`` to
+    # inherit from a base config; model-specific stubs use this to pull
+    # the unified recipe from ``configs/cifar100/_base.yaml`` without
+    # repeating every field.
+    #
+    # Precedence: CLI > YAML > argparse defaults. We detect which flags
+    # the user passed explicitly by scanning ``sys.argv`` so YAML entries
+    # only fill in defaults, never overwrite explicit CLI values.
     if args.config and os.path.exists(args.config):
-        import yaml
-        with open(args.config) as f:
-            cfg = yaml.safe_load(f)
+        cfg = _load_config_with_includes(args.config)
+        cli_tokens = set(sys.argv[1:])
         for k, v in cfg.items():
-            if hasattr(args, k) and k != "config":
-                setattr(args, k, v)
+            if not hasattr(args, k) or k == "config":
+                continue
+            # Match on the argparse flag form for this attribute.
+            cli_flags = {f"--{k}", f"--{k.replace('_', '-')}"}
+            if cli_flags & cli_tokens:
+                continue
+            setattr(args, k, v)
 
     # Seed everything
     random.seed(args.seed)
@@ -574,7 +488,10 @@ def main():
         args.num_workers,
     )
     # Model
-    model = build_model(args.model, args.activation, num_classes=100)
+    model = build_model(
+        args.model, args.activation, num_classes=100,
+        gamma_init=args.gamma_init, beta_init=args.beta_init,
+    )
     model = model.to(device)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model}, activation: {args.activation}, "
@@ -595,11 +512,16 @@ def main():
     scaler = (torch.amp.GradScaler("cuda")
               if args.amp and amp_dtype == torch.float16 else None)
 
-    # Optimizer + scheduler (LinearLR warmup → main schedule)
-    optimizer = optim.SGD(model.parameters(), lr=args.lr,
-                          momentum=args.momentum, weight_decay=args.weight_decay)
+    # Optimizer + scheduler. Warmup is optional — the unified CIFAR-100
+    # recipe skips it (warmup_epochs=0), but the plumbing still supports
+    # LinearLR → main-schedule chains for experimentation.
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=args.lr, momentum=args.momentum,
+        weight_decay=args.weight_decay, nesterov=args.nesterov,
+    )
 
-    warmup_epochs = max(1, int(args.warmup_epochs))
+    warmup_epochs = max(0, int(args.warmup_epochs))
     if args.scheduler == "multistep":
         main_scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=list(args.milestones), gamma=args.lr_gamma)
@@ -610,11 +532,15 @@ def main():
     else:
         raise ValueError(f"Unknown scheduler: {args.scheduler}")
 
-    warmup_scheduler = optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=args.warmup_start_factor, total_iters=warmup_epochs)
-    scheduler = optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup_scheduler, main_scheduler],
-        milestones=[warmup_epochs])
+    if warmup_epochs > 0:
+        warmup_scheduler = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=args.warmup_start_factor,
+            total_iters=warmup_epochs)
+        scheduler = optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup_scheduler, main_scheduler],
+            milestones=[warmup_epochs])
+    else:
+        scheduler = main_scheduler
 
     # Resume
     start_epoch = 0
@@ -769,6 +695,14 @@ def main():
         json.dump(result, f, indent=2)
     print(f"\nResults saved to {result_path}")
     print(f"Best test accuracy: {best_acc:.2f}%")
+
+    # Sentinel for the S3-backed job queue: presence of ``complete`` tells
+    # the orchestrator this experiment is done and should not be re-run.
+    # Must be written only after every other artifact is on disk so a worker
+    # crashing mid-finalize does not falsely mark the job finished.
+    Path(args.output_dir, "complete").write_text(
+        f"{args.model}-{args.activation}-s{args.seed} @ {best_acc:.4f}\n"
+    )
 
     if wandb_run:
         import wandb

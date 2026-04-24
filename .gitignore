@@ -34,3 +34,9 @@ outputs/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Paper manuscript (separate repo)
+Scale-Invariant-Self-Gated-Activations/
+
+# Claude agent scratch
+.claude/

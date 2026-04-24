@@ -1,0 +1,43 @@
+# CIFAR-100 unified training recipe.
+#
+# Identical across every architecture in our lineup — the activation
+# (and seed) is the only controlled variable. The numbers follow the
+# chenyaofo/pytorch-cifar-models official recipe: SGD with Nesterov
+# momentum, cosine schedule for 200 epochs, no warmup.
+#
+# Model-specific YAML stubs include this file and set ``model:`` only.
+
+# ── Data ──────────────────────────────────────────────────────────
+data_dir: /data
+batch_size: 256
+val_batch_size: 256
+num_workers: 4
+
+# ── Optimizer ────────────────────────────────────────────────────
+optimizer: sgd
+lr: 0.1
+momentum: 0.9
+weight_decay: 5.0e-4
+nesterov: true
+
+# ── Scheduler ────────────────────────────────────────────────────
+scheduler: cosine
+epochs: 200
+warmup_epochs: 0
+min_lr: 0.0
+
+# ── Gate Normalization ────────────────────────────────────────────
+gamma_init: 0.0
+beta_init: 0.0
+
+# ── Runtime ──────────────────────────────────────────────────────
+# bf16 AMP keeps underflow out of the picture (fp16 would need a
+# GradScaler dance and is pointless on modern tensor cores). inductor
+# torch.compile adds 20-40% throughput on top; both are applied uniformly
+# across activations so the controlled-comparison logic is unaffected.
+amp: true
+amp_dtype: bfloat16
+compile: true
+compile_backend: inductor
+compile_mode: null            # default mode; max-autotune doubles compile time
+seed: 42

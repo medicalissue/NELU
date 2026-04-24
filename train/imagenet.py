@@ -4,9 +4,9 @@
 Forked from timm's reference ``train.py`` (Ross Wightman, Apache-2.0). The
 only project-specific additions over upstream are:
 
-1. ``--activation`` / ``--gamma-init`` / ``--rms-mode`` CLI arguments
-   plumbed into a :func:`train.swap.apply_gate_normalization` call after
-   the model is built.
+1. ``--activation`` / ``--gamma-init`` / ``--beta-init`` / ``--norm-axes``
+   CLI arguments plumbed into a :func:`train.swap.apply_gate_normalization`
+   call after the model is built.
 2. Gate-normalization diagnostics (γ trajectories, gate entropy, weight
    norms) logged alongside the standard loss/accuracy metrics.
 3. W&B run-id persistence across preemption resumes: the run ID is stored
@@ -56,23 +56,6 @@ from timm.task import (
 # (BCE loss, head-init-bias, aug-repeats, mixup-prob, LAMB, etc.) natively.
 from train.swap import apply_gate_normalization  # noqa: E402
 from train.diagnostics import gamma_stats, gate_stats, weight_norms  # noqa: E402
-
-
-def _default_rms_mode(model_name: str, activation: str) -> str:
-    """Architecture-aware default for the RMS reduction axes.
-
-    The RMS axes are taken to match the mixing axes of the preceding linear
-    operation. For Transformer FFNs (ViT, DeiT, Swin) and ConvNeXt blocks —
-    whose activation follows a channel-mixing Linear at channels-last layout
-    — the last axis alone is the natural reduction. EfficientNet's MBConv
-    mixes spatial and channel in different sub-blocks; we keep the legacy
-    ``per_sample`` default here so existing configs keep working, but the
-    recommended practice is to set ``rms_mode`` explicitly per architecture
-    in the YAML config. Override with ``--rms-mode`` on the CLI.
-    """
-    if model_name.startswith(("efficientnet_", "tf_efficientnet_")):
-        return "per_sample"
-    return "per_token"
 
 
 try:
@@ -137,13 +120,17 @@ group.add_argument('--activation', default='gelu', type=str,
                    choices=['relu', 'gelu', 'silu', 'nelu', 'nilu'],
                    help='gelu/silu/relu leave the model unchanged; nelu swaps every '
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
-group.add_argument('--gamma-init', type=float, default=1e-6,
+group.add_argument('--gamma-init', type=float, default=0.0,
                    help='Initial value of the learnable γ scalar in NELU/NiLU.')
-group.add_argument('--rms-mode', default=None,
-                   help='Reduction axes for RMS. Accepts a legacy alias '
-                        '("per_token" / "per_sample") or an explicit axis list '
-                        'such as [-1] or [2,3]. Defaults are architecture-'
-                        'aware; see _default_rms_mode in this file.')
+group.add_argument('--beta-init', type=float, default=0.0,
+                   help='Initial value of the learnable β scalar in NELU/NiLU.')
+group.add_argument('--norm-axes', default=None,
+                   help='Axes over which the gate statistics are computed. '
+                        'Accepts an alias ("channel" / "sample") or an '
+                        'explicit axis list such as [-1] or [2,3]. If omitted, '
+                        'train.swap.default_norm_axes picks a default from the '
+                        'activation + model name, and the EfficientNet MBConv '
+                        'policy overrides per site.')
 group.add_argument('--log-gate-stats-every', type=int, default=1,
                    help='Epochs between γ / gate-entropy logging (0 disables).')
 group.add_argument('--log-gate-probe-size', type=int, default=16,
@@ -579,17 +566,19 @@ def main():
         nn.init.constant_(model.get_classifier().bias, args.head_init_bias)
 
     # ── Gate Normalization activation swap ──
-    rms_mode = args.rms_mode or _default_rms_mode(args.model, args.activation)
     n_swapped = apply_gate_normalization(
         model,
         args.activation,
-        rms_mode=rms_mode,
+        norm_axes=args.norm_axes,
         gamma_init=args.gamma_init,
+        beta_init=args.beta_init,
+        model_name=args.model,
     )
     if utils.is_primary(args):
         _logger.info(
             f'[activation] {args.activation}: swapped {n_swapped} modules '
-            f'(rms_mode={rms_mode!r}, gamma_init={args.gamma_init})'
+            f'(norm_axes={args.norm_axes!r}, gamma_init={args.gamma_init}, '
+            f'beta_init={args.beta_init})'
         )
 
     if args.num_classes is None:

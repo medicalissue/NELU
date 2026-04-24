@@ -1,7 +1,7 @@
 """Smoke tests — verify forward + backward on a real CIFAR-scale model.
 
 These do not train to accuracy; they only check that the library composes
-with a realistic training-style graph (conv + BN + activation swap + AMP).
+with a realistic training-style graph (conv + BN + activation swap).
 """
 
 from __future__ import annotations
@@ -10,13 +10,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-from train.cifar import CIFARResNet, build_model
-from train.swap import apply_gate_normalization
+from train.cifar import build_model
+from train.swap import apply_gate_normalization, replace_activation
 
 
 @pytest.mark.parametrize("activation", ["relu", "gelu", "silu", "nelu", "nilu"])
 def test_cifar_resnet_single_step(activation: str) -> None:
-    """Build a CIFARResNet, swap its activation, do one optimizer step."""
+    """Build ResNet-20 via the CIFAR factory, swap its activation, do one step."""
     torch.manual_seed(0)
     model = build_model("resnet20", activation=activation, num_classes=100)
     optim = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
@@ -35,21 +35,16 @@ def test_cifar_resnet_single_step(activation: str) -> None:
     assert torch.isfinite(loss)
 
 
-def test_apply_gate_normalization_on_cifar_resnet() -> None:
-    """Swap onto a timm-free CIFAR ResNet — the module tree has no timm
-    subclasses, so the union of GELU_TYPES reduces to just ``nn.GELU``."""
+def test_apply_gate_normalization_on_timm_free_backbone() -> None:
+    """``apply_gate_normalization`` works even when the model tree contains
+    no timm-specific subclasses. CIFAR ResNet-20 from chenyaofo is pure
+    ``nn.Module`` + ``nn.ReLU``, which is the edge case where the
+    timm-subclass union reduces to just ``nn.GELU``.
+    """
     torch.manual_seed(1)
-    model = CIFARResNet(20, num_classes=100)
-
-    # Swap ReLU -> GELU first (so apply_gate_normalization has something to
-    # rewrite on the second pass).
-    n_relu = sum(1 for m in model.modules() if isinstance(m, nn.ReLU))
-    assert n_relu > 0
-    for name, child in list(model.named_modules()):
-        pass
+    model = build_model("resnet20", activation="relu", num_classes=100)
 
     # Replace every ReLU with a plain nn.GELU to set up the test.
-    from train.swap import replace_activation
     replace_activation(model, nn.ReLU, lambda: nn.GELU())
     assert all(not isinstance(m, nn.ReLU) for m in model.modules())
 

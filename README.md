@@ -1,16 +1,17 @@
 # Gate Normalization
 
-*Scale-Invariant Self-Gated Activations.*
+*Shift- and Scale-Invariant Self-Gated Activations.*
 
 Gate Normalization replaces the standard self-gated activation
-`x · g(x)` with a scale-normalized variant
+`x · g(x)` with a centered, rescaled variant
 
-    y = x · g(γ · x / rms(x)),
+    y = x · g(γ · (x - μ(x)) / σ(x) + β),
 
 where `g` is a pointwise squashing function (Gaussian CDF or sigmoid),
-`rms(x)` is computed over architecture-specific axes, and `γ` is a single
-learnable scalar initialized near zero. Applied to GELU and SiLU this
-yields two drop-in replacements we call **NELU** and **NiLU**.
+`μ, σ` are computed over architecture-specific axes, and `γ`, `β` are
+learnable scalars, both initialized to zero, so the module starts at
+an exact `x · g(0)` identity. Applied to GELU and SiLU this yields two
+drop-in replacements we call **NELU** and **NiLU**.
 
 | Instance | Base activation | Gate function      |
 |----------|-----------------|--------------------|
@@ -41,8 +42,8 @@ from gate_norm import NELU, NiLU
 # Drop-in for channels-last or transformer inputs (default).
 act = NELU()
 
-# For NCHW conv feature maps, reduce RMS over (C, H, W).
-act_conv = NiLU(rms_mode="per_sample")
+# For NCHW conv feature maps, reduce over (C, H, W).
+act_conv = NiLU(norm_axes="sample")
 ```
 
 For an existing timm / torchvision / HuggingFace model, the

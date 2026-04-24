@@ -23,8 +23,9 @@ import torch
 import torch.nn as nn
 
 from gate_norm.core import GateNorm
+from gate_norm.layout import resolve_axes
 from gate_norm.logging import collect_gamma_stats
-from gate_norm.reduction import rms, rms_axes
+from gate_norm.stats import layer_stats
 
 from .swap import GELU_TYPES, SILU_TYPES
 
@@ -59,8 +60,13 @@ def _gated_hook(idx: int, stats: Dict[str, float]):
     def fn(module: GateNorm, inp, _out):
         with torch.no_grad():
             z = inp[0]
-            axes = rms_axes(z.ndim, module.rms_mode)
-            t = module.gamma * z / rms(z, axes, module.eps)
+            axes = resolve_axes(z.ndim, module.norm_axes)
+            mu, rsigma = layer_stats(z, axes, module.eps)
+            z32 = z.float() if z.dtype != torch.float32 else z
+            beta = getattr(module, "beta", None)
+            t = module.gamma * (z32 - mu) * rsigma
+            if beta is not None:
+                t = t + beta
             gate = type(module)._gate_python(t)
             _record(stats, gate, idx)
     return fn

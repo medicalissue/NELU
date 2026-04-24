@@ -1,22 +1,28 @@
-"""Reduction-axis utilities for Gate Normalization.
+"""Normalization-axis canonicalization and permute/flatten utilities.
 
-The fused CUDA kernels reduce over the trailing dimension only. This module
-provides two services:
+Fused kernels reduce over the trailing dimension only. This module does the
+bookkeeping that lets us present an architecture-friendly API (``"channel"``,
+``"sample"``, or any tuple of axes) on top of that kernel contract.
 
-1. `rms_axes` — translate a human-facing spec (string alias or explicit tuple)
-   into a canonical, sorted tuple of non-negative axes for a given tensor rank.
-2. `flatten_for_reduction` / `restore` — permute and reshape a tensor so that
+Two services:
+
+1. :func:`resolve_axes` — translate a human-facing spec (string alias or
+   explicit tuple) into a canonical, sorted tuple of non-negative axes.
+2. :func:`flatten_for_reduction` / :func:`restore` — permute and reshape so
    the chosen reduction axes collapse into a single trailing axis, with an
-   inverse op to restore the original layout.
+   inverse that recovers the original layout.
 
-Two string aliases cover every architecture we care about:
+Aliases:
 
-* `"per_token"`  → last axis only. Valid for `(B, D)`, `(B, L, D)`,
-  channels-last `(B, H, W, D)`.
-* `"per_sample"` → last three axes. Valid for NCHW convolutions
-  `(B, C, H, W)`.
+* ``"channel"`` — last axis only. Matches channel-mixing linear operations
+  (transformer FFNs, ConvNeXt depthwise→pointwise, channels-last activations
+  at ``(B, D)`` / ``(B, L, D)`` / ``(B, H, W, D)``).
+* ``"sample"``  — last three axes. Matches operations that mix across both
+  channel and spatial axes before the activation; valid for NCHW tensors
+  ``(B, C, H, W)``.
 
-Any tuple of axes may also be passed explicitly.
+For anything in between (e.g. ``(2, 3)`` after a depthwise convolution that
+mixes only the spatial axes) pass the axis tuple directly.
 """
 
 from __future__ import annotations
@@ -29,30 +35,30 @@ import torch
 
 
 DimsLike = int | Iterable[int]
-RmsMode = Literal["per_token", "per_sample"]
+NormAxes = Literal["channel", "sample"]
 
-_RMS_ALIASES: dict[str, tuple[int, ...]] = {
-    "per_token": (-1,),
-    "per_sample": (-3, -2, -1),
+_ALIASES: dict[str, tuple[int, ...]] = {
+    "channel": (-1,),
+    "sample":  (-3, -2, -1),
 }
 
 
-def rms_axes(ndim: int, spec: RmsMode | DimsLike) -> tuple[int, ...]:
-    """Canonicalize a reduction-axis spec for a tensor of rank `ndim`.
+def resolve_axes(ndim: int, spec: NormAxes | DimsLike) -> tuple[int, ...]:
+    """Canonicalize an axis spec for a tensor of rank ``ndim``.
 
     Returns a sorted tuple of non-negative axes. Raises on empty, duplicate,
-    or out-of-range axes and when a string alias is incompatible with `ndim`.
+    or out-of-range axes and on string aliases incompatible with ``ndim``.
     """
     if isinstance(spec, str):
-        if spec not in _RMS_ALIASES:
+        if spec not in _ALIASES:
             raise ValueError(
-                f"Unknown rms mode {spec!r}. Valid: {sorted(_RMS_ALIASES)} "
-                "or an explicit axis tuple."
+                f"unknown norm-axes alias {spec!r}; valid: {sorted(_ALIASES)} "
+                "or an explicit axis tuple"
             )
-        raw = _RMS_ALIASES[spec]
+        raw = _ALIASES[spec]
         if ndim < len(raw):
             raise ValueError(
-                f"rms mode {spec!r} needs ndim >= {len(raw)}, got ndim={ndim}"
+                f"alias {spec!r} needs ndim >= {len(raw)}, got ndim={ndim}"
             )
     elif isinstance(spec, int):
         raw = (spec,)
@@ -82,12 +88,7 @@ def reduction_numel(shape: tuple[int, ...], axes: tuple[int, ...]) -> int:
 
 @dataclass(frozen=True)
 class ReductionLayout:
-    """Bookkeeping for a permute + flatten pair.
-
-    `permute`/`inverse_permute` are the axis orderings used to move the
-    reduction axes to the trailing position; `permuted_shape` is the shape of
-    the permuted tensor before flattening.
-    """
+    """Bookkeeping for a permute + flatten pair."""
 
     permute: tuple[int, ...]
     inverse_permute: tuple[int, ...]
@@ -97,7 +98,7 @@ class ReductionLayout:
 def flatten_for_reduction(
     z: torch.Tensor, axes: tuple[int, ...]
 ) -> tuple[torch.Tensor, ReductionLayout]:
-    """Permute `axes` to the end and flatten them into a single trailing axis."""
+    """Permute ``axes`` to the end and flatten them into a single trailing axis."""
     keep = tuple(a for a in range(z.ndim) if a not in axes)
     permute = keep + axes
 
@@ -121,15 +122,8 @@ def flatten_for_reduction(
 
 
 def restore(z_flat: torch.Tensor, layout: ReductionLayout) -> torch.Tensor:
-    """Inverse of `flatten_for_reduction`."""
+    """Inverse of :func:`flatten_for_reduction`."""
     z_perm = z_flat.reshape(layout.permuted_shape)
     if layout.permute == tuple(range(len(layout.permute))):
         return z_perm
     return z_perm.permute(layout.inverse_permute)
-
-
-def rms(
-    z: torch.Tensor, axes: tuple[int, ...], eps: float = 1e-6
-) -> torch.Tensor:
-    """Root-mean-square over `axes`, keeping dims for broadcast."""
-    return z.pow(2).mean(dim=axes, keepdim=True).add(eps).sqrt()

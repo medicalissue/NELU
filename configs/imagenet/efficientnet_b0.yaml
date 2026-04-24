@@ -17,15 +17,26 @@ data_dir: /data/imagenet
 input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
-batch_size: 128           # 128 × 8 GPUs = 1024 effective
+batch_size: 256           # 256 × 8 GPUs = 2048 effective.
+                          # Wightman's reference recipe trains at eff 768 on
+                          # 2×A100; we scale up to 2048 (~2.67×) to match the
+                          # other ImageNet models in this repo and fully use
+                          # 8×A100-80GB. Linear LR scaling (below) keeps the
+                          # effective-SGD step size aligned with the reference.
 grad_accum_steps: 1
 workers: 10
 
 opt: rmsproptf
 opt_eps: 1.0e-3
-lr_base: 0.048            # timm cmd: --lr 0.048 at effective batch 768 (2 × 384)
+lr_base: 0.048            # reference: 0.048 at eff batch 768 (timm script).
 lr_base_size: 768
-lr_base_scale: linear
+lr_base_scale: linear     # auto-scales to 0.128 at eff 2048.
+                          # Google's own TPU recipe trains EfficientNet at
+                          # batch 4096 / lr 0.256 (350 epochs, decay 0.97/2.4)
+                          # — arxiv:2011.00071, tensorflow/tpu#509. Our 0.128
+                          # at eff 2048 is exactly half that, squarely within
+                          # the linearly-scaled regime RMSProp is known to
+                          # tolerate on this architecture.
 weight_decay: 1.0e-5
 momentum: 0.9
 
@@ -33,9 +44,20 @@ sched: step
 epochs: 450
 decay_epochs: 2.4
 decay_rate: 0.97
-warmup_epochs: 3
+warmup_epochs: 5          # Matches Google's official TPU EfficientNet recipe
+                          # (tensorflow/tpu/models/official/efficientnet/main.py
+                          # lr_warmup_epochs default = 5). Wightman's 2-GPU
+                          # timm command uses 3ep, which is itself a minor
+                          # deviation from the original TF training. We stay
+                          # with the upstream Google default, which is more
+                          # appropriate at the larger linearly-scaled LR.
 warmup_lr: 1.0e-6
 min_lr: 1.0e-6
+clip_grad: 1.0            # Safety net at the larger effective LR. Wightman's
+                          # 2-GPU recipe runs without clipping; at 0.128 we
+                          # occasionally see RMSProp gradient spikes in the
+                          # first epoch — clip protects the run from diverging
+                          # without materially changing converged weights.
 
 aa: rand-m9-mstd0.5
 color_jitter: 0.4
@@ -46,16 +68,16 @@ reprob: 0.2
 remode: pixel
 
 amp: true
+amp-dtype: bfloat16
 torchcompile: null              # "inductor" to enable torch.compile
 torchcompile_mode: null
-clip_grad: null
 model_ema: true
 model_ema_decay: 0.9999
 seed: 42
 
 activation: silu
-gamma_init: 1.0e-6
-rms_mode: per_sample         # Initial swap default; overridden per-location
+gamma_init: 0.0
+norm_axes: sample         # Initial swap default; overridden per-location
                              # by rewire_efficientnet_mbconv in train/swap.py:
                              # MBConv conv_pw-adjacent activation uses (1,)
                              # (channel mixing), conv_dw-adjacent uses (2, 3)
