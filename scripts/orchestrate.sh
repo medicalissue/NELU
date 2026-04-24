@@ -148,10 +148,13 @@ exp_key() {
 s3_exists() { aws s3 ls "$1" >/dev/null 2>&1; }
 
 lease_claim() {
-    # Atomic-ish claim: download current lease, check age, overwrite with
-    # our own identity. Two workers could still race in the gap, but the
-    # worst case is one wasted VM-minute before the loser detects a newer
-    # lease in its next heartbeat and bails. (See lease_refresh.)
+    # Optimistic claim with read-back confirmation:
+    #   1. Skip if a fresh lease exists.
+    #   2. PUT our own (owner, ts).
+    #   3. Sleep a small jitter, GET the lease. If another worker PUT
+    #      after us that worker wins; we lose and skip. Catches the
+    #      concurrent-claim race S3 read-after-write cannot prevent
+    #      (both workers see "no lease" before either PUTs).
     local exp="$1"
     local key="${CKPT_BUCKET}/${exp}/lease"
     local now owner ts age
@@ -165,6 +168,13 @@ lease_claim() {
         log "stealing stale lease on $exp (age=${age}s, owner=$owner)"
     fi
     echo "$INSTANCE_ID $now" | aws s3 cp - "$key" >/dev/null
+    sleep "$(awk "BEGIN{print 0.5+rand()}")"
+    local winner
+    read -r winner _ts < <(aws s3 cp "$key" - 2>/dev/null || echo "- 0")
+    if [[ "$winner" != "$INSTANCE_ID" ]]; then
+        log "lost lease race on $exp (winner=$winner, we=$INSTANCE_ID)"
+        return 1
+    fi
     return 0
 }
 

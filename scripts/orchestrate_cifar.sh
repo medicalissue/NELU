@@ -37,9 +37,31 @@ if (( ngpus < 1 )); then ngpus=1; fi
 
 log "spawning $ngpus slot runner(s)"
 
+# Pre-warm the torch.hub cache for chenyaofo CIFAR models ONCE from the
+# fanout parent, before spawning slots. Otherwise N concurrent slots all
+# try to populate the same cache directory and race each other into
+# FileNotFoundError ("repvgg.py", ".gitignore", …). Once the cache is
+# populated the slot-level torch.hub.load() calls are cache-hits and do
+# no filesystem writes.
+log "pre-warming torch.hub cache for chenyaofo/pytorch-cifar-models"
+python3 -c "
+import torch
+# Any one model triggers the full repo clone/extract into the hub cache.
+torch.hub.load('chenyaofo/pytorch-cifar-models', 'cifar100_resnet20',
+               pretrained=False, trust_repo=True, force_reload=False)
+print('hub cache ready')
+" >/dev/null 2>&1 || log "  hub pre-warm skipped (offline or cache already populated)"
+
 pids=()
 for (( gpu=0; gpu<ngpus; gpu++ )); do
+    # Stagger slot starts by ``gpu`` seconds. Four slots firing their
+    # S3 lease claim at the same wall-clock millisecond is the root
+    # cause of the concurrent-claim race we hit in the first smoke
+    # test (all four slots ended up running the same experiment).
+    # A few seconds of jitter gives each slot enough separation to
+    # observe the previous slot's PUT before its own check.
     (
+        sleep "$gpu"
         export CUDA_VISIBLE_DEVICES="$gpu"
         export GATE_NORM_GPU_SLOT="$gpu"
         exec bash "$SLOT_RUNNER"

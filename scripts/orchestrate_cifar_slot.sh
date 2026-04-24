@@ -122,6 +122,15 @@ exp_key() {
 s3_exists() { aws s3 ls "$1" >/dev/null 2>&1; }
 
 lease_claim() {
+    # Optimistic claim with a read-back confirmation step:
+    #   1. Reject if a fresh lease already exists.
+    #   2. PUT our own (owner, ts).
+    #   3. Sleep a small jitter, then GET the lease back. If another slot
+    #      PUT after us, that slot's owner wins; we lose and must skip.
+    # This catches the common N-slot-at-boot concurrent-claim race that S3
+    # strong read-after-write alone does not prevent (both slots see
+    # "no lease" before either PUTs), without requiring conditional-write
+    # support from the bucket.
     local exp="$1"
     local key="${CKPT_BUCKET}/${exp}/lease"
     local now owner ts age
@@ -135,6 +144,14 @@ lease_claim() {
         log "stealing stale lease on $exp (age=${age}s, owner=$owner)"
     fi
     echo "$OWNER $now" | aws s3 cp - "$key" >/dev/null
+    # Jitter [0.5s, 1.5s) so concurrent PUTs from sibling slots settle.
+    sleep "$(awk "BEGIN{print 0.5+rand()}")"
+    local winner
+    read -r winner _ts < <(aws s3 cp "$key" - 2>/dev/null || echo "- 0")
+    if [[ "$winner" != "$OWNER" ]]; then
+        log "lost lease race on $exp (winner=$winner, we=$OWNER)"
+        return 1
+    fi
     return 0
 }
 
