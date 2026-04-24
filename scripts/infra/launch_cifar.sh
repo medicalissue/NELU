@@ -19,10 +19,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 if [[ -f "$ENV_FILE" ]]; then
+    # Load .env but give *caller-exported* values precedence, so
+    # ``TARGET_WORKERS=1 INSTANCE_TYPE=g5.12xlarge bash launch_cifar.sh``
+    # isn't silently clobbered by whatever the .env file contains.
+    _caller_TARGET_WORKERS="${TARGET_WORKERS-}"
+    _caller_INSTANCE_TYPE="${INSTANCE_TYPE-}"
+    _caller_JOB_ORDER="${JOB_ORDER-}"
+    _caller_WANDB_PROJECT="${WANDB_PROJECT-}"
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+    [[ -n "$_caller_TARGET_WORKERS" ]] && TARGET_WORKERS="$_caller_TARGET_WORKERS"
+    [[ -n "$_caller_INSTANCE_TYPE"  ]] && INSTANCE_TYPE="$_caller_INSTANCE_TYPE"
+    [[ -n "$_caller_JOB_ORDER"      ]] && JOB_ORDER="$_caller_JOB_ORDER"
+    [[ -n "$_caller_WANDB_PROJECT"  ]] && WANDB_PROJECT="$_caller_WANDB_PROJECT"
 else
     echo "FATAL: $ENV_FILE not found. Copy .env.example → .env and fill it in." >&2
     exit 2

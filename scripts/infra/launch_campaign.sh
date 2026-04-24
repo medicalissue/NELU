@@ -13,10 +13,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 if [[ -f "$ENV_FILE" ]]; then
+    # Preserve caller-provided overrides so CLI-like invocation
+    #   TARGET_WORKERS=1 INSTANCE_TYPE=g5.12xlarge bash launch_campaign.sh
+    # isn't silently clobbered by the .env file.
+    _caller_TARGET_WORKERS="${TARGET_WORKERS-}"
+    _caller_INSTANCE_TYPE="${INSTANCE_TYPE-}"
+    _caller_JOB_ORDER="${JOB_ORDER-}"
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+    [[ -n "$_caller_TARGET_WORKERS" ]] && TARGET_WORKERS="$_caller_TARGET_WORKERS"
+    [[ -n "$_caller_INSTANCE_TYPE"  ]] && INSTANCE_TYPE="$_caller_INSTANCE_TYPE"
+    [[ -n "$_caller_JOB_ORDER"      ]] && JOB_ORDER="$_caller_JOB_ORDER"
 else
     echo "FATAL: $ENV_FILE not found. Copy .env.example → .env and fill it in." >&2
     exit 2
