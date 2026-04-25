@@ -351,25 +351,33 @@ def init_wandb_run(args, saved_wandb_id=None):
         "name": f"{args.model}_{args.activation}_s{args.seed}",
         "config": vars(args),
     }
+    # If the saved id is gone from the server (deleted by an operator), the
+    # wandb backend silently creates a "phantom" run that never uploads. We
+    # have to detect this via the API before init and fall back to a fresh
+    # id ourselves.
+    use_id = saved_wandb_id
     if saved_wandb_id:
-        # resume="allow" so a deleted/expired remote run falls back to creating
-        # a fresh run with a new id, instead of crashing the trainer (which
-        # then loses the in-progress checkpoint to spot-preempt corruption).
-        init_kwargs["id"] = saved_wandb_id
-        init_kwargs["resume"] = "allow"
+        try:
+            api_run = wandb.Api().run(
+                f"{wandb.api.default_entity or ''}/{args.wandb_project}/{saved_wandb_id}"
+            )
+            _ = api_run.state  # touch — raises if not found
+            init_kwargs["id"] = saved_wandb_id
+            init_kwargs["resume"] = "must"
+        except Exception as e:
+            print(
+                f"WARNING: saved wandb id {saved_wandb_id} is gone from the "
+                f"server ({type(e).__name__}); starting a fresh run."
+            )
+            use_id = wandb.util.generate_id()
+            init_kwargs["id"] = use_id
+            init_kwargs["resume"] = "never"
     else:
-        init_kwargs["id"] = wandb.util.generate_id()
+        use_id = wandb.util.generate_id()
+        init_kwargs["id"] = use_id
         init_kwargs["resume"] = "never"
 
     wandb_run = wandb.init(**init_kwargs)
-    if saved_wandb_id and wandb_run.id != saved_wandb_id:
-        # Server returned a different id (e.g. the saved one was deleted).
-        # Continue with the new id so the next checkpoint write picks it up.
-        print(
-            f"WARNING: wandb returned new id {wandb_run.id} (saved {saved_wandb_id} "
-            f"likely deleted); continuing with new run."
-        )
-
     wandb.define_metric("epoch")
     wandb.define_metric("*", step_metric="epoch")
     return wandb_run, wandb_run.id
