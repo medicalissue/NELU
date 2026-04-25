@@ -214,8 +214,19 @@ run_job() {
 
     local resume_flag=()
     if [[ -f "${outdir}/checkpoint.pt" ]]; then
-        resume_flag=(--resume "${outdir}/checkpoint.pt")
-        log "  resuming from ${outdir}/checkpoint.pt"
+        # Spot preempts can leave a partial checkpoint.pt in S3 (sync
+        # interrupted mid-transfer). A real CIFAR ckpt is 2-15 MB; anything
+        # below 1 MB is partial, so wipe it locally + on S3 and start fresh.
+        local sz
+        sz=$(stat -c %s "${outdir}/checkpoint.pt" 2>/dev/null || echo 0)
+        if (( sz < 1000000 )); then
+            log "  WARN: ${outdir}/checkpoint.pt is only ${sz} bytes (corrupted partial); discarding + restarting from scratch"
+            rm -f "${outdir}/checkpoint.pt"
+            aws s3 rm "${s3_prefix}/checkpoint.pt" --only-show-errors || true
+        else
+            resume_flag=(--resume "${outdir}/checkpoint.pt")
+            log "  resuming from ${outdir}/checkpoint.pt (${sz} bytes)"
+        fi
     fi
 
     local entity_env=()
