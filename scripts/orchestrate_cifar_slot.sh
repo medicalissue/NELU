@@ -245,7 +245,11 @@ run_job() {
 
     # setsid → trainer becomes its own session leader, so the preempt
     # watcher can SIGTERM the whole process tree by pgid (== pid).
-    setsid env "${entity_env[@]}" python -m train.cifar \
+    # GATE_NORM_FORCE_PYTHON=1: bench on A10G shows the native PyTorch path
+    # under torch.compile is faster than the fused CUDA kernel for CIFAR's
+    # large reduction axis (sample axes, N=CHW=16384), where the kernel falls
+    # to its Tier-3 global-atomicAdd fallback. ImageNet keeps the fused path.
+    setsid env "${entity_env[@]}" GATE_NORM_FORCE_PYTHON=1 python -m train.cifar \
         --config "$cfg" \
         --activation "$act" \
         --seed "$seed" \
