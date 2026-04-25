@@ -49,6 +49,10 @@ export TARGET_WORKERS INSTANCE_TYPE
 # the worker's bootstrap.
 export ENTRY_SCRIPT="scripts/orchestrate_cifar.sh"
 
+# Tag our workers with this campaign so the watchdog and the ImageNet
+# campaign don't see each other's instances when counting "live workers".
+export CAMPAIGN="cifar"
+
 # CIFAR jobs are <cfg>:<act>:<seed> triples; the ImageNet default_job_order
 # file is <cfg>:<act> pairs. Parse the CIFAR-specific file instead.
 if [[ -z "${JOB_ORDER:-}" ]]; then

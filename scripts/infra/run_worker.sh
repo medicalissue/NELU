@@ -61,7 +61,8 @@ aws ec2 run-instances \
     --tag-specifications "ResourceType=instance,Tags=[
         {Key=Name,Value=$NAME},
         {Key=Project,Value=gate-norm},
-        {Key=Role,Value=worker}
+        {Key=Role,Value=worker},
+        {Key=Campaign,Value=${CAMPAIGN:-default}}
     ]" \
     --query 'Instances[0].{InstanceId:InstanceId,AZ:Placement.AvailabilityZone,State:State.Name}' \
     --output json

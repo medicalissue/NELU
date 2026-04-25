@@ -112,12 +112,16 @@ count_incomplete() {
 }
 
 count_live_workers() {
-    # Running/pending spot instances tagged as our workers.
+    # Count only THIS campaign's workers. Without the Campaign filter
+    # the CIFAR watchdog (TARGET=1) would see ImageNet's p5 fleet as
+    # already-live workers and never relaunch the CIFAR g5 if it dies,
+    # and vice versa.
     aws ec2 describe-instances \
         --region us-west-2 \
         --filters \
             "Name=tag:Project,Values=gate-norm" \
             "Name=tag:Role,Values=worker" \
+            "Name=tag:Campaign,Values=${CAMPAIGN:-default}" \
             "Name=instance-state-name,Values=pending,running" \
         --query 'length(Reservations[].Instances[])' \
         --output text

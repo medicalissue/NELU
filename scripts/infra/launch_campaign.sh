@@ -34,6 +34,11 @@ fi
 : "${CAMPAIGN_AZS:?CAMPAIGN_AZS missing from .env (e.g. \"us-west-2d us-west-2c\")}"
 : "${TARGET_WORKERS:=2}"
 
+# Tag our workers with this campaign so the watchdog only counts THIS
+# campaign's fleet (not, e.g., the CIFAR fleet running concurrently).
+: "${CAMPAIGN:=imagenet}"
+export CAMPAIGN
+
 # Derive JOB_ORDER from the flat-file default unless the caller set it.
 if [[ -z "${JOB_ORDER:-}" ]]; then
     JOB_ORDER=$(grep -v '^\s*#' "$SCRIPT_DIR/default_job_order.txt" \
