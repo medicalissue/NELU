@@ -157,7 +157,6 @@ def _replace_with_policy(
     *,
     eps: float,
     gamma_init: float,
-    beta_init: float,
 ) -> int:
     """Walk the module tree; substitute baseline activations for GateNorm.
 
@@ -207,7 +206,7 @@ def _replace_with_policy(
                 axes = default_axes
         setattr(parent, name, gate_cls(
             norm_axes=axes, eps=eps,
-            gamma_init=gamma_init, beta_init=beta_init,
+            gamma_init=gamma_init,
         ))
     return len(sites)
 
@@ -221,12 +220,11 @@ def gelu_to_nelu(
     norm_axes: NormAxes | DimsLike = "channel",
     eps: float = 1e-6,
     gamma_init: float = 0.0,
-    beta_init: float = 0.0,
 ) -> int:
     """Swap every GELU instance for :class:`gate_norm.NELU`."""
     return _replace_with_policy(
         model, GELU_TYPES, NELU, norm_axes,
-        eps=eps, gamma_init=gamma_init, beta_init=beta_init,
+        eps=eps, gamma_init=gamma_init,
     )
 
 
@@ -236,12 +234,11 @@ def silu_to_nilu(
     norm_axes: NormAxes | DimsLike = "channel",
     eps: float = 1e-6,
     gamma_init: float = 0.0,
-    beta_init: float = 0.0,
 ) -> int:
     """Swap every SiLU instance for :class:`gate_norm.NiLU`."""
     return _replace_with_policy(
         model, SILU_TYPES, NiLU, norm_axes,
-        eps=eps, gamma_init=gamma_init, beta_init=beta_init,
+        eps=eps, gamma_init=gamma_init,
     )
 
 
@@ -252,7 +249,6 @@ def apply_gate_normalization(
     norm_axes: NormAxes | DimsLike | None = None,
     eps: float = 1e-6,
     gamma_init: float = 0.0,
-    beta_init: float = 0.0,
     model_name: str = "",
 ) -> int:
     """Dispatch based on a string activation name.
@@ -275,12 +271,12 @@ def apply_gate_normalization(
     if act == "nelu":
         return gelu_to_nelu(
             model, norm_axes=default_axes, eps=eps,
-            gamma_init=gamma_init, beta_init=beta_init,
+            gamma_init=gamma_init,
         )
     if act == "nilu":
         return silu_to_nilu(
             model, norm_axes=default_axes, eps=eps,
-            gamma_init=gamma_init, beta_init=beta_init,
+            gamma_init=gamma_init,
         )
     raise ValueError(f"unknown activation {activation!r}")
 
@@ -362,7 +358,6 @@ def replace_activation_auto_axes(
     default_axes: NormAxes | DimsLike = "sample",
     eps: float = 1e-6,
     gamma_init: float = 0.0,
-    beta_init: float = 0.0,
 ) -> int:
     """Replace baseline activations with ``gate_cls``, picking axes from a
     nearby :class:`nn.Conv2d` in the module tree.
@@ -426,6 +421,6 @@ def replace_activation_auto_axes(
 
         setattr(parent, name, gate_cls(
             norm_axes=axes, eps=eps,
-            gamma_init=gamma_init, beta_init=beta_init,
+            gamma_init=gamma_init,
         ))
     return len(sites)

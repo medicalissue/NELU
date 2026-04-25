@@ -29,7 +29,7 @@ _REQUIRED_IMAGENET_KEYS = {
     "model", "num_classes", "data_dir",
     "batch_size", "opt", "weight_decay",
     "sched", "epochs", "warmup_epochs",
-    "activation", "gamma_init", "norm_axes",
+    "activation", "norm_axes",
     "seed",
 }
 
@@ -65,7 +65,6 @@ def test_imagenet_config_values_are_sane(path: Path) -> None:
         f"{path.name}: norm_axes={axes!r} is neither an alias nor an axis tuple"
     )
     assert cfg["seed"] == 42, "All shipped configs pin seed=42 for comparability."
-    assert 0 <= cfg["gamma_init"] <= 1e-3
     assert cfg["epochs"] > 0
     assert 0 <= cfg["warmup_epochs"] < cfg["epochs"]
     # torch.compile knobs are opt-in; when present they must be null by default
@@ -198,8 +197,6 @@ def test_cifar_base_has_unified_recipe() -> None:
     assert cfg["epochs"] == 200
     assert cfg["warmup_epochs"] == 0
     assert cfg["batch_size"] == 256
-    assert cfg["gamma_init"] == 0.0
-    assert cfg["beta_init"] == 0.0
     # Execution backend: bf16 AMP + inductor. Applied uniformly across
     # activations so the comparison stays controlled; not part of the
     # protocol per se, but must be the same for every run.

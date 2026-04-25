@@ -59,7 +59,6 @@ model_ema_decay: 0.9999      # MMPretrain's swin recipe omits EMAHook, but we en
 seed: 42
 
 activation: gelu
-gamma_init: 0.0
 norm_axes: [-1]               # Swin FFN activation follows a channel-mixing
                              # Linear (fc1) on (N, L, D); RMS axis is the
                              # channel dim = last axis.

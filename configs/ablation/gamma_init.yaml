@@ -56,6 +56,5 @@ model_ema: false             # Abbreviated schedule — EMA only helps late trai
 seed: 42
 
 activation: nelu
-gamma_init: 1.0e-6
 norm_axes: sample
 log_gate_stats_every: 1

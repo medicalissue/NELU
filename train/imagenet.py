@@ -54,8 +54,34 @@ from timm.task import (
 # All project-specific additions on top of upstream timm train.py live in
 # gate_norm/ and train/{swap,diagnostics}.py. Upstream handles the recipes
 # (BCE loss, head-init-bias, aug-repeats, mixup-prob, LAMB, etc.) natively.
+from gate_norm import GammaWarmup  # noqa: E402
 from train.swap import apply_gate_normalization  # noqa: E402
 from train.diagnostics import gamma_stats, gate_stats, weight_norms  # noqa: E402
+
+
+def _sync_gamma_to_ema(model_ema, model):
+    """Copy the live γ buffer from every NELU/NiLU module into the EMA model.
+
+    γ is driven externally by ``GammaWarmup`` and isn't a gradient-tracked
+    parameter, so the standard EMA lerp would just lag it. We force-sync
+    after every EMA update.
+    """
+    src_modules = []
+    for m in model.modules():
+        if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma"):
+            src_modules.append(m)
+    if not src_modules:
+        return
+    ema_target = getattr(model_ema, "module", model_ema)
+    dst_modules = [
+        m for m in ema_target.modules()
+        if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma")
+    ]
+    if len(dst_modules) != len(src_modules):
+        return  # structure mismatch (compiled wrapper etc.); skip silently.
+    with torch.no_grad():
+        for src, dst in zip(src_modules, dst_modules):
+            dst.gamma.copy_(src.gamma)
 
 
 try:
@@ -121,9 +147,13 @@ group.add_argument('--activation', default='gelu', type=str,
                    help='gelu/silu/relu leave the model unchanged; nelu swaps every '
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
 group.add_argument('--gamma-init', type=float, default=0.0,
-                   help='Initial value of the learnable γ scalar in NELU/NiLU.')
-group.add_argument('--beta-init', type=float, default=0.0,
-                   help='Initial value of the learnable β scalar in NELU/NiLU.')
+                   help='Initial value of the (non-learnable) γ buffer before '
+                        'the warmup scheduler ramps it to gamma-final.')
+group.add_argument('--gamma-final', type=float, default=1.0,
+                   help='Final γ value held for the rest of training.')
+group.add_argument('--gamma-warmup-schedule', type=str, default='linear',
+                   choices=['linear', 'cosine', 'constant'],
+                   help='Shape of the γ ramp 0 → final.')
 group.add_argument('--norm-axes', default=None,
                    help='Axes over which the gate statistics are computed. '
                         'Accepts an alias ("channel" / "sample") or an '
@@ -571,14 +601,13 @@ def main():
         args.activation,
         norm_axes=args.norm_axes,
         gamma_init=args.gamma_init,
-        beta_init=args.beta_init,
         model_name=args.model,
     )
     if utils.is_primary(args):
         _logger.info(
             f'[activation] {args.activation}: swapped {n_swapped} modules '
             f'(norm_axes={args.norm_axes!r}, gamma_init={args.gamma_init}, '
-            f'beta_init={args.beta_init})'
+            f'gamma_final={args.gamma_final}, schedule={args.gamma_warmup_schedule})'
         )
 
     if args.num_classes is None:
@@ -1085,6 +1114,24 @@ def main():
         else:
             lr_scheduler.step(start_epoch)
 
+    # ── γ warmup scheduler ──
+    # Ramps the (non-learnable) γ buffer in every NELU/NiLU module from
+    # gamma_init → gamma_final over the same number of optimizer steps as
+    # the LR warmup. For NELU/NiLU we tie γ to the LR warmup so the gate
+    # nonlinearity ramps in lockstep with the learning rate.
+    gamma_warmup_steps = int(args.warmup_epochs) * updates_per_epoch
+    gamma_scheduler = GammaWarmup(
+        model,
+        warmup_steps=gamma_warmup_steps,
+        init=args.gamma_init,
+        final=args.gamma_final,
+        schedule=args.gamma_warmup_schedule,
+    )
+    if start_epoch > 0:
+        gamma_scheduler.step(start_epoch * updates_per_epoch)
+    if utils.is_primary(args):
+        _logger.info(f'γ scheduler: {gamma_scheduler}')
+
     if utils.is_primary(args):
         if args.warmup_prefix:
             sched_explain = '(warmup_epochs + epochs + cooldown_epochs). Warmup added to total when warmup_prefix=True'
@@ -1131,6 +1178,7 @@ def main():
                 mixup_fn=mixup_fn,
                 num_updates_total=num_epochs * updates_per_epoch,
                 naflex_mode=naflex_mode,
+                gamma_scheduler=gamma_scheduler,
             )
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
@@ -1303,6 +1351,7 @@ def train_one_epoch(
         mixup_fn=None,
         num_updates_total=None,
         naflex_mode=False,
+        gamma_scheduler=None,
 ):
     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
         if args.prefetcher and loader.mixup_enabled:
@@ -1435,8 +1484,16 @@ def train_one_epoch(
 
         num_updates += 1
         optimizer.zero_grad()
+        if gamma_scheduler is not None:
+            gamma_scheduler.step(num_updates)
         if model_ema is not None:
             model_ema.update(model, step=num_updates)
+            # γ is deterministic (driven by GammaWarmup, not by gradients);
+            # the EMA-lagged buffer would only delay convergence at eval
+            # time. Force-sync after every EMA step so model_ema sees the
+            # same γ as the live model.
+            if gamma_scheduler is not None:
+                _sync_gamma_to_ema(model_ema, model)
 
         if args.synchronize_step:
             if device.type == 'cuda':

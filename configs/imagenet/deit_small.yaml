@@ -63,7 +63,6 @@ model_ema_decay: 0.9999      # MMPretrain's DeiT-S recipe omits EMA, but we enab
 seed: 42                     # MMPretrain uses None (random); we pin for comparability
 
 activation: gelu
-gamma_init: 0.0
 norm_axes: [-1]               # DeiT FFN activation follows a channel-mixing
                              # Linear (fc1) on (N, L, D); RMS axis is the
                              # channel dim = last axis.

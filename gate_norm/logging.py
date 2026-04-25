@@ -1,14 +1,18 @@
 """Runtime statistics for Gate Normalization layers.
 
-Walks an ``nn.Module`` tree, collects the γ and β scalars from every Gate
+Walks an ``nn.Module`` tree, collects the γ scalar from every Gate
 Normalization instance, and returns a flat dict of scalars suitable for
 ``wandb.log``. The caller decides when to log (typically once per epoch).
 
-Key shape: ``<prefix>/<param>/layer_<i>`` for per-module values and
-``<prefix>/<param>/<agg>`` for aggregates, where ``param ∈ {gamma, beta}``
-and ``agg ∈ {mean, min, max, std, abs_mean, n_negative, n_modules}``. The
-historical top-level prefix ``gate_norm/gamma/*`` is preserved so existing
-W&B dashboards keep working.
+Since γ is now a non-learnable buffer driven by :class:`GammaWarmup`, the
+per-layer values are typically all equal during training. We still emit
+the per-layer keys so any downstream tooling that already expects them
+keeps working — the aggregates (``mean``, ``std``, ...) are the most
+useful in practice.
+
+Key shape: ``<prefix>/gamma/layer_<i>`` for per-module values and
+``<prefix>/gamma/<agg>`` for aggregates, where ``agg ∈ {mean, min, max,
+std, abs_mean, n_negative, n_modules}``.
 """
 
 from __future__ import annotations
@@ -30,9 +34,8 @@ def _aggregate(values: list[float], out: dict, key: str) -> None:
 
 
 def collect_gamma_stats(model: nn.Module, prefix: str = "gate_norm") -> dict:
-    """Collect per-module γ (and β, when present) values with aggregates."""
+    """Collect per-module γ values with aggregates."""
     gammas: list[float] = []
-    betas: list[float] = []
     out: dict[str, float] = {}
     for m in model.modules():
         if not getattr(m, "_gate_norm_module", False):
@@ -41,13 +44,7 @@ def collect_gamma_stats(model: nn.Module, prefix: str = "gate_norm") -> dict:
             g = m.gamma.detach().float().item()
             out[f"{prefix}/gamma/layer_{len(gammas)}"] = g
             gammas.append(g)
-        if hasattr(m, "beta"):
-            b = m.beta.detach().float().item()
-            out[f"{prefix}/beta/layer_{len(betas)}"] = b
-            betas.append(b)
 
     if gammas:
         _aggregate(gammas, out, f"{prefix}/gamma")
-    if betas:
-        _aggregate(betas, out, f"{prefix}/beta")
     return out

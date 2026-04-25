@@ -1,10 +1,11 @@
 """Reduction statistics used by Gate Normalization.
 
-We centre the gate input: ``normed = (z - μ) / σ``. Given the reduction axes
-and ``eps`` this module computes ``(μ, rsigma)`` once — the forward uses them
-to build the gate input, the backward reuses them to avoid a second pass over
-``z``. Statistics are computed in float32 regardless of input dtype so AMP
-autocast doesn't underflow.
+We rescale the gate input by its root-mean-square: ``normed = z / rms(z)``,
+where ``rms(z) = sqrt(mean(z²) + eps)``. Unlike LayerNorm we deliberately
+*do not* subtract the mean — preserving the DC component is what makes the
+outer ``z · g(...)`` retain ReLU-style "deactivate the negative side"
+inductive bias. Statistics are computed in float32 regardless of input
+dtype so AMP autocast doesn't underflow.
 """
 
 from __future__ import annotations
@@ -14,16 +15,12 @@ import torch
 
 def layer_stats(
     z: torch.Tensor, axes: tuple[int, ...], eps: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(μ, 1/σ)`` over ``axes`` in float32, both with ``keepdim=True``.
+) -> torch.Tensor:
+    """Return ``1 / rms(z)`` over ``axes`` in float32 with ``keepdim=True``.
 
-    Uses the identity ``Var = E[z²] - E[z]²`` so only two reductions are
-    required; keeping ``rsigma`` rather than ``σ`` spares a divide on the hot
-    path. ``eps`` is added inside the variance before sqrt, matching the
-    LayerNorm convention.
+    Returning the reciprocal saves a divide on the hot forward path; the
+    backward reuses the same value rather than recomputing.
     """
     z32 = z.float() if z.dtype != torch.float32 else z
-    mu = z32.mean(dim=axes, keepdim=True)
-    var = z32.var(dim=axes, keepdim=True, unbiased=False)
-    rsigma = (var + eps).rsqrt()
-    return mu, rsigma
+    ms = z32.pow(2).mean(dim=axes, keepdim=True)
+    return (ms + eps).rsqrt()

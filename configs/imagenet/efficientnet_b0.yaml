@@ -79,7 +79,6 @@ model_ema_decay: 0.9999
 seed: 42
 
 activation: silu
-gamma_init: 0.0
 norm_axes: sample         # Initial swap default; overridden per-location
                              # by rewire_efficientnet_mbconv in train/swap.py:
                              # MBConv conv_pw-adjacent activation uses (1,)

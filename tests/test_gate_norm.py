@@ -1,4 +1,12 @@
-"""Tests for the Gate Normalization core and its concrete instances."""
+"""Tests for the Gate Normalization core and its concrete instances.
+
+Form under test::
+
+    y = x · g(γ · x / rms(x))
+
+with γ a non-learnable scalar buffer (driven externally by
+:class:`gate_norm.GammaWarmup`) and ``rms(x) = sqrt(mean(x²) + eps)``.
+"""
 
 from __future__ import annotations
 
@@ -6,19 +14,17 @@ import math
 
 import pytest
 import torch
+import torch.nn as nn
 
-from gate_norm import NELU, NELUGLU, NiLU, NiLUGLU, SwiGLU, gate_norm
+from gate_norm import GammaWarmup, NELU, NELUGLU, NiLU, NiLUGLU, SwiGLU, gate_norm
 from gate_norm.core import GateNorm
 
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 
 
-def _centered(x: torch.Tensor, axes: tuple[int, ...]) -> torch.Tensor:
-    """Reference implementation of (x - μ) / σ used to check formulas."""
-    mu = x.mean(dim=axes, keepdim=True)
-    var = x.var(dim=axes, keepdim=True, unbiased=False)
-    return (x - mu) / var.sqrt()
+def _rms(x: torch.Tensor, axes: tuple[int, ...], eps: float = 0.0) -> torch.Tensor:
+    return torch.sqrt(x.pow(2).mean(dim=axes, keepdim=True) + eps)
 
 
 # ── Forward identities ──────────────────────────────────────────────────
@@ -49,11 +55,11 @@ def test_gamma_zero_recovers_constant_times_x() -> None:
 def test_nelu_matches_explicit_formula() -> None:
     torch.manual_seed(1)
     x = torch.randn(3, 8)
-    gamma, beta = 0.3, 0.4
-    act = NELU(gamma_init=gamma, beta_init=beta, eps=0.0)
+    gamma = 0.6
+    act = NELU(gamma_init=gamma, eps=0.0)
     with torch.no_grad():
-        u = _centered(x, axes=(-1,))
-        t = gamma * u + beta
+        rms = _rms(x, axes=(-1,))
+        t = gamma * x / rms
         expected = x * 0.5 * (1.0 + torch.erf(t * _INV_SQRT2))
     assert torch.allclose(act(x), expected, atol=1e-6)
 
@@ -61,79 +67,109 @@ def test_nelu_matches_explicit_formula() -> None:
 def test_nilu_matches_explicit_formula() -> None:
     torch.manual_seed(2)
     x = torch.randn(3, 8)
-    gamma, beta = 0.7, -0.2
-    act = NiLU(gamma_init=gamma, beta_init=beta, eps=0.0)
+    gamma = 0.7
+    act = NiLU(gamma_init=gamma, eps=0.0)
     with torch.no_grad():
-        u = _centered(x, axes=(-1,))
-        expected = x * torch.sigmoid(gamma * u + beta)
+        rms = _rms(x, axes=(-1,))
+        expected = x * torch.sigmoid(gamma * x / rms)
     assert torch.allclose(act(x), expected, atol=1e-6)
 
 
-# ── Shift + scale invariance of the gate input ──────────────────────────
+# ── Scale invariance of the gate input ─────────────────────────────────
 
 
-def test_gate_input_invariant_to_affine_reparameterization() -> None:
-    """(x - μ)/σ is invariant under x ↦ a·x + b (a > 0)."""
+def test_gate_input_invariant_to_positive_scaling() -> None:
+    """x / rms(x) is invariant under x ↦ a·x for any a > 0."""
     torch.manual_seed(3)
     x = torch.randn(4, 32)
-    a, b = 3.7, -1.9
+    a = 3.7
     act_a = NELU(gamma_init=0.5)
     act_b = NELU(gamma_init=0.5)
-    y_a = act_a(x)
-    y_b = act_b(a * x + b)
-
-    # The gate is reparameterization-invariant, so the gate value is the
-    # same on matched elements. The outer z multiplication differs because
-    # z₂ = a·z + b, so we compare gate values directly.
     with torch.no_grad():
+        y_a = act_a(x)
+        y_b = act_b(a * x)
         gate_a = y_a / x
-        gate_b = y_b / (a * x + b)
-    mask = (x.abs() > 1e-3)
+        gate_b = y_b / (a * x)
+    mask = x.abs() > 1e-3
     assert torch.allclose(gate_a[mask], gate_b[mask], atol=1e-5)
 
 
-# ── Backward ────────────────────────────────────────────────────────────
+# ── γ buffer + scheduler ───────────────────────────────────────────────
 
 
-def test_backward_produces_gamma_and_beta_gradients() -> None:
+def test_gamma_is_buffer_not_parameter() -> None:
+    """γ must not appear in module.parameters() — it's a non-trainable buffer."""
+    act = NELU(gamma_init=0.5)
+    param_names = [n for n, _ in act.named_parameters()]
+    buffer_names = [n for n, _ in act.named_buffers()]
+    assert "gamma" not in param_names
+    assert "gamma" in buffer_names
+
+
+def test_backward_does_not_attach_gradient_to_gamma() -> None:
     torch.manual_seed(4)
     x = torch.randn(8, 32, requires_grad=True)
-    act = NELU(gamma_init=0.3, beta_init=0.2)
+    act = NELU(gamma_init=0.3)
     y = act(x)
     y.sum().backward()
-    assert act.gamma.grad is not None and act.gamma.grad.shape == (1,)
-    assert act.beta.grad is not None and act.beta.grad.shape == (1,)
-    # Both gradients should be non-trivial at a non-zero operating point.
-    assert act.gamma.grad.abs().item() > 0
-    assert act.beta.grad.abs().item() > 0
+    # γ is a buffer; it has no .grad slot at all.
+    assert getattr(act.gamma, "grad", None) is None
+    # x should still receive gradient through the module.
+    assert x.grad is not None and x.grad.abs().sum() > 0
 
 
-def test_beta_zero_matches_betaless_centered_formula() -> None:
-    """With β = 0 the module reduces to the β-less centered formula."""
-    torch.manual_seed(40)
-    x = torch.randn(4, 16)
-    gamma = 0.5
-    act = NELU(gamma_init=gamma, beta_init=0.0, eps=0.0)
-    with torch.no_grad():
-        u = _centered(x, axes=(-1,))
-        expected = x * 0.5 * (1.0 + torch.erf(gamma * u * _INV_SQRT2))
-    assert torch.allclose(act(x), expected, atol=1e-6)
+def test_gamma_warmup_linearly_ramps_buffer() -> None:
+    model = nn.Sequential(NELU(), NELU(), NiLU())
+    sched = GammaWarmup(model, warmup_steps=10, init=0.0, final=1.0,
+                        schedule="linear")
+    assert sched.current_gamma == pytest.approx(0.0)
+    sched.step(5)
+    assert sched.current_gamma == pytest.approx(0.5)
+    sched.step(10)
+    assert sched.current_gamma == pytest.approx(1.0)
+    sched.step(20)  # past warmup → still at final
+    assert sched.current_gamma == pytest.approx(1.0)
 
 
-def test_state_dict_back_compat_beta_missing() -> None:
-    """Pre-β checkpoints (γ only) load cleanly with β initialized to zero."""
-    torch.manual_seed(41)
-    old_sd = {"gamma": torch.tensor([0.42])}  # no "beta" key
+def test_gamma_warmup_zero_steps_is_constant() -> None:
+    model = nn.Sequential(NELU(), NELU())
+    sched = GammaWarmup(model, warmup_steps=0, init=0.0, final=1.0)
+    # warmup_steps=0 means "fix at final immediately".
+    assert sched.current_gamma == pytest.approx(1.0)
+    sched.step(5)
+    assert sched.current_gamma == pytest.approx(1.0)
+
+
+def test_gamma_warmup_state_dict_round_trip() -> None:
+    model_a = nn.Sequential(NELU())
+    sched_a = GammaWarmup(model_a, warmup_steps=100, init=0.0, final=1.0)
+    sched_a.step(60)
+    state = sched_a.state_dict()
+
+    model_b = nn.Sequential(NELU())
+    sched_b = GammaWarmup(model_b, warmup_steps=100, init=0.0, final=1.0)
+    sched_b.load_state_dict(state)
+    assert sched_b.current_gamma == pytest.approx(0.6, abs=1e-6)
+
+
+# ── State-dict back-compat ─────────────────────────────────────────────
+
+
+def test_state_dict_drops_legacy_beta_key() -> None:
+    """Centered+learnable v0.2/v0.3 checkpoints carried β; we silently drop it."""
+    legacy_sd = {
+        "gamma": torch.tensor([0.42]),
+        "beta": torch.tensor([0.13]),  # legacy key, no longer used
+    }
     m = NELU()
-    missing, unexpected = m.load_state_dict(old_sd, strict=True)
+    missing, unexpected = m.load_state_dict(legacy_sd, strict=True)
     assert missing == [] and unexpected == []
     assert m.gamma.item() == pytest.approx(0.42)
-    assert m.beta.item() == pytest.approx(0.0)
 
 
 def test_state_dict_back_compat_gamma_zero_dim() -> None:
     """0-d γ from much older checkpoints reshapes to (1,)."""
-    old_sd = {"gamma": torch.tensor(0.33)}  # 0-dim scalar
+    old_sd = {"gamma": torch.tensor(0.33)}
     m = NELU()
     m.load_state_dict(old_sd, strict=True)
     assert m.gamma.shape == (1,) and m.gamma.item() == pytest.approx(0.33)
@@ -153,7 +189,8 @@ def test_subclassing_gate_function() -> None:
     x = torch.randn(2, 16)
     gn = _SquareGate(gamma_init=1.0, eps=0.0)
     with torch.no_grad():
-        u = _centered(x, axes=(-1,))
+        rms = _rms(x, axes=(-1,))
+        u = x / rms
         expected = x * u * u
     assert torch.allclose(gn(x), expected, atol=1e-6)
 
@@ -164,13 +201,12 @@ def test_subclassing_gate_function() -> None:
 def test_functional_gate_norm_matches_module() -> None:
     torch.manual_seed(6)
     x = torch.randn(2, 16)
-    gamma, beta = 0.25, 0.15
-    module = NELU(gamma_init=gamma, beta_init=beta, eps=1e-6)
+    gamma = 0.25
+    module = NELU(gamma_init=gamma, eps=1e-6)
     functional = gate_norm(
         x,
         gate_fn=lambda t: 0.5 * (1.0 + torch.erf(t * _INV_SQRT2)),
         gamma=gamma,
-        beta=beta,
         norm_axes="channel",
         eps=1e-6,
     )
@@ -186,9 +222,10 @@ def test_glu_variants_match_swiglu_param_count(cls: type) -> None:
     swiglu = SwiGLU(dim)
     variant = cls(dim)
     n_swiglu = sum(p.numel() for p in swiglu.parameters())
-    # The variant adds exactly two scalar parameters: γ and β.
+    # γ is a buffer, not a parameter, so the GLU variant has the same param
+    # count as plain SwiGLU.
     n_variant = sum(p.numel() for p in variant.parameters())
-    assert n_variant == n_swiglu + 2
+    assert n_variant == n_swiglu
 
 
 def test_glu_variants_forward_shape() -> None:

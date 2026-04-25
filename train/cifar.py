@@ -28,7 +28,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from gate_norm import NELU, NiLU, collect_gamma_stats
+from gate_norm import GammaWarmup, NELU, NiLU, collect_gamma_stats
 from train.swap import (  # noqa: F401
     replace_activation,
     replace_activation_auto_axes,
@@ -123,7 +123,6 @@ def build_model(
     num_classes: int = 100,
     *,
     gamma_init: float = 0.0,
-    beta_init: float = 0.0,
 ):
     """Create a CIFAR-100 model and apply the requested activation swap.
 
@@ -161,13 +160,13 @@ def build_model(
     elif activation == "nelu":
         n = replace_activation_auto_axes(
             model, relu_types, NELU, activation_order=order,
-            gamma_init=gamma_init, beta_init=beta_init,
+            gamma_init=gamma_init,
         )
         print(f"Swapped {n} ReLU -> NELU ({order}-activation axes)")
     elif activation == "nilu":
         n = replace_activation_auto_axes(
             model, relu_types, NiLU, activation_order=order,
-            gamma_init=gamma_init, beta_init=beta_init,
+            gamma_init=gamma_init,
         )
         print(f"Swapped {n} ReLU -> NiLU ({order}-activation axes)")
     else:
@@ -262,8 +261,9 @@ def _orig_module(model):
 
 
 def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id,
-                           training_log, epoch):
-    return {
+                           training_log, epoch, *, global_step=None,
+                           gamma_scheduler=None):
+    state = {
         "epoch": epoch,
         "model": _orig_module(model).state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -273,18 +273,27 @@ def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id
         "training_log": training_log,
         "wandb_id": wandb_id,
     }
+    if global_step is not None:
+        state["global_step"] = global_step
+    if gamma_scheduler is not None:
+        state["gamma_scheduler"] = gamma_scheduler.state_dict()
+    return state
 
 def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
-                    scaler=None, use_amp=False, amp_dtype=torch.float16):
+                    scaler=None, use_amp=False, amp_dtype=torch.float16,
+                    gamma_scheduler=None, global_step_start=0):
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
+    global_step = global_step_start
     for batch_idx, (inputs, targets) in enumerate(loader):
         if interruption_requested():
             raise TrainingInterrupted(
                 f"Interruption requested at epoch {epoch}, step {batch_idx}."
             )
+        if gamma_scheduler is not None:
+            gamma_scheduler.step(global_step)
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
@@ -301,12 +310,13 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
         _, predicted = outputs.max(1)
         correct += predicted.eq(targets).sum().item()
         total += inputs.size(0)
+        global_step += 1
         if interruption_requested():
             raise TrainingInterrupted(
                 f"Interruption requested at epoch {epoch}, step {batch_idx}."
             )
     scheduler.step()
-    return total_loss / total, 100.0 * correct / total
+    return total_loss / total, 100.0 * correct / total, global_step
 
 
 @torch.no_grad()
@@ -450,9 +460,13 @@ def parse_args():
     p.add_argument("--min_lr", type=float, default=0.0,
                    help="Cosine schedule floor (ignored for multistep)")
     p.add_argument("--gamma_init", type=float, default=0.0,
-                   help="Initial value of the learnable γ scalar in NELU/NiLU.")
-    p.add_argument("--beta_init", type=float, default=0.0,
-                   help="Initial value of the learnable β scalar in NELU/NiLU.")
+                   help="Initial value of the γ buffer in NELU/NiLU before "
+                        "the warmup scheduler ramps it (0 → 1).")
+    p.add_argument("--gamma_final", type=float, default=1.0,
+                   help="Final value of γ held for the rest of training.")
+    p.add_argument("--gamma_warmup_schedule", type=str, default="linear",
+                   choices=["linear", "cosine", "constant"],
+                   help="Shape of the γ ramp 0 → final.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output_dir", type=str, default="results/cifar")
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
@@ -525,7 +539,7 @@ def main():
     # Model
     model = build_model(
         args.model, args.activation, num_classes=100,
-        gamma_init=args.gamma_init, beta_init=args.beta_init,
+        gamma_init=args.gamma_init,
     )
     model = model.to(device)
     param_count = sum(p.numel() for p in model.parameters())
@@ -577,8 +591,25 @@ def main():
     else:
         scheduler = main_scheduler
 
+    # γ warmup scheduler — ramps the (non-learnable) γ buffer in every
+    # NELU/NiLU module from gamma_init → gamma_final over the same
+    # number of optimizer steps that the LR warmup uses. For CIFAR
+    # warmup_epochs is usually 0 in our recipe; the scheduler then
+    # immediately fixes γ at gamma_final.
+    steps_per_epoch = max(1, len(train_loader))
+    gamma_warmup_steps = warmup_epochs * steps_per_epoch
+    gamma_scheduler = GammaWarmup(
+        model,
+        warmup_steps=gamma_warmup_steps,
+        init=args.gamma_init,
+        final=args.gamma_final,
+        schedule=args.gamma_warmup_schedule,
+    )
+    print(f"γ scheduler: {gamma_scheduler}")
+
     # Resume
     start_epoch = 0
+    global_step = 0
     best_acc = 0.0
     training_log = []
 
@@ -589,10 +620,16 @@ def main():
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
+        global_step = ckpt.get("global_step", start_epoch * steps_per_epoch)
+        if "gamma_scheduler" in ckpt:
+            gamma_scheduler.load_state_dict(ckpt["gamma_scheduler"])
+        else:
+            gamma_scheduler.step(global_step)
         best_acc = ckpt.get("best_acc", 0.0)
         training_log = ckpt.get("training_log", [])
         saved_wandb_id = ckpt.get("wandb_id", None)
-        print(f"  Resumed at epoch {start_epoch}, best_acc={best_acc:.2f}%")
+        print(f"  Resumed at epoch {start_epoch}, global_step={global_step}, "
+              f"best_acc={best_acc:.2f}%, γ={gamma_scheduler.current_gamma:.4f}")
 
     # wandb init — after resume so we can reuse the saved run ID
     wandb_run, wandb_id = init_wandb_run(args, saved_wandb_id)
@@ -605,10 +642,13 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
         try:
-            train_loss, train_acc = train_one_epoch(model, train_loader, optimizer,
-                                                     scheduler, device, epoch,
-                                                     scaler=scaler, use_amp=args.amp,
-                                                     amp_dtype=amp_dtype)
+            train_loss, train_acc, global_step = train_one_epoch(
+                model, train_loader, optimizer,
+                scheduler, device, epoch,
+                scaler=scaler, use_amp=args.amp, amp_dtype=amp_dtype,
+                gamma_scheduler=gamma_scheduler,
+                global_step_start=global_step,
+            )
             test_loss, test_acc = evaluate(model, test_loader, device,
                                            use_amp=args.amp, amp_dtype=amp_dtype)
         except TrainingInterrupted as e:

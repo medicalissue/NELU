@@ -1,10 +1,11 @@
-"""Gate Normalization — shift- and scale-invariant self-gated activations.
+"""Gate Normalization — scale-invariant self-gated activations.
 
-    y = x · g(γ · (x - μ(x)) / σ(x) + β)
+    y = x · g(γ · x / rms(x))
 
-where ``g`` is a pointwise gate (Gaussian CDF for :class:`NELU`, sigmoid for
-:class:`NiLU`) and ``γ``, ``β`` are learnable scalars. ``γ`` is initialized
-near zero and ``β`` at zero so the module recovers ``x · g(0)`` at init.
+where ``g`` is a pointwise gate (Gaussian CDF for :class:`NELU`, sigmoid
+for :class:`NiLU`) and ``γ`` is a non-learnable buffer scheduled by the
+trainer (typically warmed up from 0 → 1 alongside the LR warmup, then
+held at 1 for the rest of training).
 
 Quick start
 -----------
@@ -20,6 +21,14 @@ For NCHW convolutional feature maps::
 >>> x_conv = torch.randn(4, 64, 32, 32)
 >>> NiLU(norm_axes="sample")(x_conv).shape
 torch.Size([4, 64, 32, 32])
+
+To match the trainer's LR warmup, drive γ with :class:`GammaWarmup`::
+
+>>> from gate_norm import GammaWarmup
+>>> sched = GammaWarmup(model, warmup_steps=20 * steps_per_epoch)
+>>> for step, batch in enumerate(loader):
+...     sched.step(step)
+...     # ... usual forward / backward / optimizer.step()
 """
 
 from .activations import NELU, NiLU
@@ -27,9 +36,11 @@ from .core import GateNorm, gate_norm
 from .functional import nelu, nilu
 from .glu import NELUGLU, NiLUGLU, SwiGLU
 from .logging import collect_gamma_stats
+from .scheduler import GammaWarmup
 
 __all__ = [
     "GateNorm",
+    "GammaWarmup",
     "NELU",
     "NiLU",
     "NELUGLU",
@@ -41,4 +52,4 @@ __all__ = [
     "collect_gamma_stats",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -59,7 +59,6 @@ model_ema_decay: 0.9999
 seed: 42
 
 activation: gelu
-gamma_init: 0.0
 norm_axes: [-1]               # ConvNeXt block = ViT-style FFN; activation
                              # follows a channel-mixing Linear at channels-last
                              # layout (N,H,W,C), so RMS axis is the channel dim.

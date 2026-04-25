@@ -6,11 +6,12 @@ Standard SwiGLU (used in LLaMA, Mistral, …) computes::
 
 We normalize the gate branch the same way as the pointwise activations::
 
-    NiLUGLU(x) = W_down( g · σ(γ · (g - μ(g)) / σ(g) + β) · W_up(x) )
-    NELUGLU(x) = W_down( g · Φ(γ · (g - μ(g)) / σ(g) + β) · W_up(x) )
+    NiLUGLU(x) = W_down( g · σ(γ · g / rms(g)) · W_up(x) )
+    NELUGLU(x) = W_down( g · Φ(γ · g / rms(g)) · W_up(x) )
 
 where ``g = W_gate(x)``. Parameter count matches SwiGLU exactly — only the
-gate's activation changes. The up branch is untouched.
+gate's activation changes. The up branch is untouched. ``γ`` is a buffer
+driven by the trainer's warmup scheduler (``GammaWarmup``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .core import _DEFAULT_BETA_INIT, _DEFAULT_GAMMA_INIT, _INV_SQRT2
+from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2
 from .stats import layer_stats
 
 
@@ -59,7 +60,6 @@ class _GatedGLU(nn.Module):
         *,
         eps: float = 1e-6,
         gamma_init: float = _DEFAULT_GAMMA_INIT,
-        beta_init: float = _DEFAULT_BETA_INIT,
     ):
         super().__init__()
         hidden_dim = hidden_dim or _llama_hidden(dim)
@@ -68,11 +68,10 @@ class _GatedGLU(nn.Module):
         self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
-        self.gamma = nn.Parameter(
-            torch.full((1,), float(gamma_init), dtype=torch.float32)
-        )
-        self.beta = nn.Parameter(
-            torch.full((1,), float(beta_init), dtype=torch.float32)
+        # γ is a non-learnable buffer driven by GammaWarmup (see scheduler.py).
+        self.register_buffer(
+            "gamma",
+            torch.full((1,), float(gamma_init), dtype=torch.float32),
         )
         self._gate_norm_module = True
 
@@ -80,27 +79,27 @@ class _GatedGLU(nn.Module):
         g = self.w_gate(x)
         u = self.w_up(x)
         axes = (g.ndim - 1,)
-        mu, rsigma = layer_stats(g, axes, self.eps)
+        rsigma = layer_stats(g, axes, self.eps)
         g32 = g.float() if g.dtype != torch.float32 else g
-        gate = type(self)._gate_fn(self.gamma * (g32 - mu) * rsigma + self.beta)
+        gate = type(self)._gate_fn(self.gamma * g32 * rsigma)
         h = g * gate.to(g.dtype)
         return self.w_down(h * u)
 
     def extra_repr(self) -> str:
         return (
             f"hidden_dim={self.hidden_dim}, eps={self.eps}, "
-            f"gamma={self.gamma.item():.3e}, beta={self.beta.item():.3e}"
+            f"gamma={self.gamma.item():.3e}"
         )
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict,
         missing_keys, unexpected_keys, error_msgs,
     ):
-        # β was introduced in gate_norm v0.3. Older checkpoints don't carry
-        # it; synthesize a zero value so strict loading keeps working.
+        # Older centred-and-learnable checkpoints saved γ as a Parameter
+        # and a separate β. Drop β (no longer used) and let γ load.
         beta_key = prefix + "beta"
-        if beta_key not in state_dict:
-            state_dict[beta_key] = torch.zeros(1, dtype=torch.float32)
+        if beta_key in state_dict:
+            state_dict.pop(beta_key)
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs,

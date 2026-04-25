@@ -45,6 +45,5 @@ model_ema: false
 seed: 42
 
 activation: gelu
-gamma_init: 0.0
 norm_axes: channel
 log_gate_stats_every: 1000

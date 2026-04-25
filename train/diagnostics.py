@@ -61,12 +61,9 @@ def _gated_hook(idx: int, stats: Dict[str, float]):
         with torch.no_grad():
             z = inp[0]
             axes = resolve_axes(z.ndim, module.norm_axes)
-            mu, rsigma = layer_stats(z, axes, module.eps)
+            rsigma = layer_stats(z, axes, module.eps)
             z32 = z.float() if z.dtype != torch.float32 else z
-            beta = getattr(module, "beta", None)
-            t = module.gamma * (z32 - mu) * rsigma
-            if beta is not None:
-                t = t + beta
+            t = module.gamma * z32 * rsigma
             gate = type(module)._gate_python(t)
             _record(stats, gate, idx)
     return fn

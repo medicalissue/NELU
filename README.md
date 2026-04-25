@@ -1,16 +1,18 @@
 # Gate Normalization
 
-*Shift- and Scale-Invariant Self-Gated Activations.*
+*Scale-Invariant Self-Gated Activations.*
 
 Gate Normalization replaces the standard self-gated activation
-`x · g(x)` with a centered, rescaled variant
+`x · g(x)` with an RMS-normalized variant
 
-    y = x · g(γ · (x - μ(x)) / σ(x) + β),
+    y = x · g(γ · x / rms(x)),    rms(x) = sqrt(mean(x²) + eps),
 
-where `g` is a pointwise squashing function (Gaussian CDF or sigmoid),
-`μ, σ` are computed over architecture-specific axes, and `γ`, `β` are
-learnable scalars, both initialized to zero, so the module starts at
-an exact `x · g(0)` identity. Applied to GELU and SiLU this yields two
+where `g` is a pointwise squashing function (Gaussian CDF or sigmoid)
+and `γ` is a non-learnable scalar driven by a warmup scheduler that
+ramps γ from `0` to `1` over the LR warmup horizon. At step 0 the
+activation is `y = 0.5 · x`, an exact linear identity that the
+optimizer can absorb; by the end of warmup the activation has settled
+into its production form. Applied to GELU and SiLU this yields two
 drop-in replacements we call **NELU** and **NiLU**.
 
 | Instance | Base activation | Gate function      |
@@ -26,9 +28,9 @@ cd gate-normalization
 pip install -e '.[train]'
 ```
 
-Python ≥ 3.10 and PyTorch ≥ 2.1. A CUDA toolchain is needed to compile the
-fused kernels the first time the CUDA path is exercised; the pure-Python
-implementation is always available as a fallback.
+Python ≥ 3.10 and PyTorch ≥ 2.1. The pure-PyTorch implementation runs
+on CPU and CUDA out of the box; `torch.compile` (Inductor) fuses the
+forward pass into a single reduction kernel.
 
 ## Usage
 

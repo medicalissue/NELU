@@ -18,29 +18,39 @@ feeding into the activation. Tying the gate's operating point to that
 magnitude adds an implicit coupling between normalization and
 nonlinearity that the optimizer must manage.
 
-Gate Normalization decouples the two by standardizing the gate's input
-— subtract the mean, divide by the standard deviation — and then adding
-a learnable offset `β`, so the operating point is invariant to shifts
-and rescalings of `x` *and* can be learned per layer:
+Gate Normalization decouples the two by rescaling the gate's input by
+its root-mean-square, so the operating point is invariant to rescalings
+of `x`:
 
-    y = x · g(γ · (x - μ(x)) / σ(x) + β).
+    y = x · g(γ · x / rms(x)),    rms(x) = sqrt(mean(x²) + eps).
 
-The gate input is shift- and scale-invariant with respect to `x`. Two
-learnable scalars control how the normalized gate participates:
+The gate input is scale-invariant with respect to `x`, and `γ` is a
+single non-learnable scalar shared per module. We do *not* subtract the
+mean and we do *not* add a learnable bias `β`; both were tried in
+earlier versions of the work (`v0.2-centered-learnable`) and gave
+mixed results — see the appendix ablation.
 
-* `γ` (init `0`) sets the sensitivity of the gate to the normalized
-  input. At `γ = 0` the gate is flat and the module is linear; training
-  grows `|γ|` as needed.
-* `β` (init `0`) shifts the operating point. At `β = 0` the gate sits at
-  `t = 0`, matching the identity-at-init behavior of GELU/SiLU; a
-  non-zero `β` lets the optimizer move the gate's decision boundary to
-  wherever the upstream distribution actually lives.
+`γ` is driven externally by a warmup scheduler
+(:class:`gate_norm.GammaWarmup`) that ramps `γ` from `0` at step 0 to
+`1` over the same number of optimizer steps that the LR warmup uses,
+and then holds `γ = 1` for the rest of training. The ramp serves two
+purposes:
 
-Centering also neutralizes a bias added upstream: a constant DC offset
-in `x` (e.g. from the preceding `Linear.bias`) cancels in `x - μ(x)`,
-so the gate's decision boundary is decoupled from that degree of
-freedom. What remains of the DC component is picked up by the learnable
-`β`.
+* **At step 0 the activation is linear.** With `γ = 0` we get
+  `y = x · g(0) = x · c` for the constant `c = g(0) = 0.5`, so every
+  shipped activation has an exact identity-up-to-constant init that the
+  optimizer can absorb into subsequent weights.
+* **By the end of warmup `γ = 1`** and the activation has settled into
+  its production form. Larger architectures (ConvNeXt-S, Swin-S, …)
+  that were unstable at `γ = 1` from step 0 are stable when γ is
+  introduced gradually.
+
+Earlier learnable-`γ` variants developed two pathological attractors
+that the buffer-only form sidesteps: small models collapsed `γ → 0`
+combined with `β > 0` (gate becomes a constant ≈0.7, the activation
+degenerates to a linear scaling); large models pushed `β` strongly
+negative, killing roughly a third of the layers via near-zero gate
+output. Fixing `γ` removes both.
 
 ## Instances
 
@@ -49,16 +59,16 @@ Two concrete instances are studied in the paper:
 * **NELU** — gate is the Gaussian CDF `Φ(·)`; the baseline is GELU.
 * **NiLU** — gate is the sigmoid `σ(·)`; the baseline is SiLU.
 
-Both keep the same parameter count as their baseline (the only new
-parameter is the scalar `γ`). The drop-in replacement is exact: at
-`γ = 0`, `y = x · g(0) = x · c` for the constant `c = g(0)`, and the
-module reduces to a linear rescaling that the optimizer can absorb into
-subsequent weights.
+Both keep the *same parameter count as their baseline* — `γ` is a
+non-learnable buffer, not a parameter. The drop-in replacement is
+exact: at `γ = 0`, `y = x · g(0) = x · c` for the constant
+`c = g(0) = 0.5`, and the module reduces to a linear rescaling that
+the optimizer can absorb into subsequent weights.
 
 ## Reduction axes
 
-`μ(x)` and `σ(x)` are computed over axes that match the *mixing axes of
-the preceding linear operation*, so the gate sees the same statistical
+`rms(x)` is computed over axes that match the *mixing axes of the
+preceding linear operation*, so the gate sees the same statistical
 granularity that the upstream linear created:
 
 * `"channel"` — trailing feature axis only. Matches channel-mixing
@@ -75,21 +85,24 @@ this automatically for timm's EfficientNet MBConv / DepthwiseSeparable
 / EdgeResidual blocks — see `_MBCONV_POLICY` in `train/swap.py` for
 the exact mapping per sub-attribute.
 
-## Initialization
+## Initialization and scheduling
 
-`γ` and `β` are both initialized to exactly `0`. At zero both scalars
-the gate is flat at ``g(0)``, so the module is ``y = x · g(0)`` at
-initialization — a linear rescaling that the optimizer can absorb into
-surrounding weights. Training grows `|γ|` as the gate becomes useful
-and shifts `β` to place the gate's decision boundary where the data
-actually lives.
+`γ` is initialized to `0` and ramped to `1` by
+:class:`gate_norm.GammaWarmup` over the same number of optimizer steps
+as the LR warmup. At step 0 the gate is flat at `g(0) = 0.5`, so the
+module is `y = 0.5 · x` — a linear rescaling that the optimizer can
+absorb into surrounding weights. After warmup `γ` is held at `1` and
+the activation behaves as `y = x · g(x / rms(x))`.
+
+The schedule is "linear" by default (matches `LinearLR`); "cosine" and
+"constant" variants are available for ablation.
 
 ## GLU variants
 
 For GLU-family feed-forward blocks (SwiGLU and relatives), Gate
 Normalization is applied *only to the gate branch*:
 
-    y = W_down( gate · g(γ · (gate - μ(gate)) / σ(gate) + β) ⊙ up )
+    y = W_down( gate · g(γ · gate / rms(gate)) ⊙ up )
 
 where `gate = W_gate(x)` and `up = W_up(x)`. The up-projection is left
 intact. Parameter count is unchanged relative to SwiGLU. The

@@ -63,7 +63,6 @@ model_ema_decay: 0.9999      # Unified across all archs (MMPretrain used 0.99996
 seed: 42
 
 activation: gelu
-gamma_init: 0.0
 norm_axes: [-1]               # DeiT FFN activation follows a channel-mixing
                              # Linear (fc1) on (N, L, D); RMS axis is the
                              # channel dim = last axis.

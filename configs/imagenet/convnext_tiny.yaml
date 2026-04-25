@@ -67,7 +67,6 @@ model_ema_decay: 0.9999      # MMPretrain EMAHook momentum=1e-4 ⇒ decay 1−1e
 seed: 42
 
 activation: gelu
-gamma_init: 0.0
 norm_axes: [-1]               # ConvNeXt block = ViT-style FFN; activation
                              # follows a channel-mixing Linear at channels-last
                              # layout (N,H,W,C), so RMS axis is the channel dim.

@@ -50,6 +50,5 @@ model_ema: false
 seed: 42
 
 activation: nelu
-gamma_init: 0.0
 norm_axes: sample
 log_gate_stats_every: 1000
