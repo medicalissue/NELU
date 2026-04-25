@@ -86,14 +86,38 @@ class CIFAR100C(Dataset):
 
 def load_checkpoint(model: nn.Module, path: str) -> None:
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    state = ckpt.get("model_state") or ckpt.get("state_dict") or ckpt
+    # train.cifar saves a dict with the model weights under the "model" key.
+    # Earlier CIFAR scripts used "state_dict" / "model_state"; keep both for
+    # back-compat. The bare-dict fallback is intentionally last so a wrong
+    # key in the checkpoint does not silently leave the model at random init.
+    if isinstance(ckpt, dict):
+        for k in ("model", "model_state", "state_dict"):
+            if k in ckpt and isinstance(ckpt[k], dict):
+                state = ckpt[k]
+                break
+        else:
+            state = ckpt  # raw state_dict, no wrapper
+    else:
+        state = ckpt
     state = {k.removeprefix("module."): v for k, v in state.items()}
+    # Strip any torch.compile prefix (_orig_mod.) too — train.cifar wraps the
+    # model with torch.compile when configured.
+    state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     missing, unexpected = model.load_state_dict(state, strict=False)
+    # Refuse to evaluate an effectively-random model: if more than half of the
+    # parameters were left untouched, the checkpoint format probably changed.
+    real_missing = [k for k in missing if not k.endswith("num_batches_tracked")]
+    if len(real_missing) > 4:
+        raise RuntimeError(
+            f"checkpoint {path} produced {len(real_missing)} missing keys "
+            f"(first 4: {real_missing[:4]}). The state-dict layout probably "
+            f"changed; refusing to evaluate a partially-loaded model."
+        )
     if missing:
         print(f"[eval] warning: missing keys: {missing[:4]}...")
     if unexpected:
         print(f"[eval] warning: unexpected keys: {unexpected[:4]}...")
-    epoch = ckpt.get("epoch", "?")
+    epoch = ckpt.get("epoch", "?") if isinstance(ckpt, dict) else "?"
     print(f"[eval] loaded checkpoint {path} (epoch={epoch})")
 
 
