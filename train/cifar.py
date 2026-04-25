@@ -352,16 +352,22 @@ def init_wandb_run(args, saved_wandb_id=None):
         "config": vars(args),
     }
     if saved_wandb_id:
+        # resume="allow" so a deleted/expired remote run falls back to creating
+        # a fresh run with a new id, instead of crashing the trainer (which
+        # then loses the in-progress checkpoint to spot-preempt corruption).
         init_kwargs["id"] = saved_wandb_id
-        init_kwargs["resume"] = "must"
+        init_kwargs["resume"] = "allow"
     else:
         init_kwargs["id"] = wandb.util.generate_id()
         init_kwargs["resume"] = "never"
 
     wandb_run = wandb.init(**init_kwargs)
     if saved_wandb_id and wandb_run.id != saved_wandb_id:
-        raise RuntimeError(
-            f"wandb resumed unexpected run id: expected {saved_wandb_id}, got {wandb_run.id}"
+        # Server returned a different id (e.g. the saved one was deleted).
+        # Continue with the new id so the next checkpoint write picks it up.
+        print(
+            f"WARNING: wandb returned new id {wandb_run.id} (saved {saved_wandb_id} "
+            f"likely deleted); continuing with new run."
         )
 
     wandb.define_metric("epoch")
