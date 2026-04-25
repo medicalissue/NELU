@@ -71,7 +71,14 @@ launch_in_az() {
     local subnet
     subnet=$(subnet_for_az "$az") || { echo "unknown az $az" >&2; return 2; }
 
-    echo "▶ launching ${NAME} in ${az} (${INSTANCE_TYPE}, spot)"
+    local market_args=()
+    local market_label="spot"
+    if [[ "${EVAL_USE_SPOT:-1}" == "1" ]]; then
+        market_args=(--instance-market-options 'MarketType=spot')
+    else
+        market_label="on-demand"
+    fi
+    echo "▶ launching ${NAME} in ${az} (${INSTANCE_TYPE}, ${market_label})"
     aws ec2 run-instances \
         --region "$REGION" \
         --image-id "$AMI" \
@@ -80,7 +87,7 @@ launch_in_az() {
         --subnet-id "$subnet" \
         --security-group-ids "$SG" \
         --iam-instance-profile "Name=$IAM_PROFILE" \
-        --instance-market-options 'MarketType=spot' \
+        ${market_args[@]+"${market_args[@]}"} \
         --block-device-mappings '[
             {"DeviceName":"/dev/sda1",
              "Ebs":{"VolumeSize":200,"VolumeType":"gp3","DeleteOnTermination":true}},
