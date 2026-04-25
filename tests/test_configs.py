@@ -127,6 +127,30 @@ def test_convnext_deit_swin_share_mmpretrain_defaults() -> None:
         )
 
 
+def test_imagenet_configs_share_unified_ema() -> None:
+    """All ImageNet runs use the same EMA recipe (decay 0.9999) so that
+    eval_top1 in W&B is directly comparable across the whole sweep."""
+    for path in IMAGENET_CONFIGS:
+        cfg = yaml.safe_load(path.read_text())
+        assert cfg.get("model_ema") is True, f"{path.name}: model_ema must be on"
+        assert cfg.get("model_ema_decay") == 0.9999, (
+            f"{path.name}: unified decay 0.9999, got {cfg.get('model_ema_decay')!r}"
+        )
+
+
+def test_imagenet_configs_set_validation_batch_size() -> None:
+    """Eval has no optimizer state / activations-for-grad to hold, so we
+    run validation at 2× the train batch — finishes ~2× faster."""
+    for path in IMAGENET_CONFIGS:
+        cfg = yaml.safe_load(path.read_text())
+        bs = cfg["batch_size"]
+        vbs = cfg.get("validation_batch_size")
+        assert vbs == 2 * bs, (
+            f"{path.name}: validation_batch_size should be 2×batch_size "
+            f"({2 * bs}); got {vbs!r}"
+        )
+
+
 def test_efficientnet_configs_match_timm_training_script() -> None:
     """timm training_script.mdx RMSProp-TF recipe hallmarks."""
     for path in IMAGENET_CONFIGS:

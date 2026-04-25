@@ -18,6 +18,8 @@ input_size: [3, 224, 224]
 train_interpolation: bicubic
 crop_pct: 0.875
 batch_size: 512              # 512 × 8 GPUs = 4096 effective, no grad accum
+validation_batch_size: 1024  # 2× train batch: eval has no optimizer state / grads,
+                             # so activations fit comfortably and eval finishes ~2× faster.
 grad_accum_steps: 1          # H100-80GB + bf16 holds the full micro-batch
 workers: 10
 pin_mem: true              # pinned host memory → faster GPU transfer (~10%)

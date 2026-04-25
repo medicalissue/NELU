@@ -57,28 +57,28 @@ Useful flags:
 (null by default) so ``--config`` alone is enough to turn compile on
 for a production sweep.
 
-## EMA per architecture
+## EMA
 
-We follow each architecture's reference recipe verbatim for the EMA
-hyperparameter (this is uniform across activation variants, so the
-controlled comparison is unaffected):
+All ImageNet runs use a single unified EMA recipe (``decay = 0.9999``).
+This is a small departure from the per-arch reference recipes — DeiT-S
+and Swin-T/S originally ship without EMA, and DeiT-B uses
+``decay = 0.99996`` — but a uniform decay makes ``eval_top1`` directly
+comparable across the whole sweep without per-arch footnotes.
 
-| Model | EMA | Decay (timm) | Reference momentum |
-|-------|-----|--------------|--------------------|
-| DeiT-Small        | off | —        | MMPretrain drops EMA for the small variant |
-| DeiT-Base         | on  | 0.99996  | MMPretrain ``momentum=4e-5`` |
-| Swin-Tiny / Small | off | —        | MMPretrain swin recipe omits EMAHook |
-| ConvNeXt-Tiny / Small | on | 0.9999 | MMPretrain ``momentum=1e-4`` |
-| EfficientNet-B0 / B2  | on | 0.9999 | timm training script ``--model-ema-decay 0.9999`` |
+| Model                 | EMA | Decay  | Reference                              |
+|-----------------------|-----|--------|----------------------------------------|
+| DeiT-Small / Base     | on  | 0.9999 | MMPretrain drops EMA (S) / 0.99996 (B) |
+| Swin-Tiny / Small     | on  | 0.9999 | MMPretrain swin recipe omits EMAHook   |
+| ConvNeXt-Tiny / Small | on  | 0.9999 | MMPretrain ``momentum=1e-4``           |
+| EfficientNet-B0 / B2  | on  | 0.9999 | timm ``--model-ema-decay 0.9999``      |
 
-When EMA is on, ``eval_top1`` / ``eval_top5`` in W&B are the **EMA**
-metrics (and best-checkpoint tracking uses them). The non-EMA branch
-is logged in parallel as ``raw_eval_top1`` / ``raw_eval_top5`` for
-debugging and ablation. When EMA is off, ``eval_*`` is the only branch
-and ``raw_*`` keys are absent.
+``eval_top1`` / ``eval_top5`` in W&B are the **EMA** metrics (and
+best-checkpoint tracking uses them). The non-EMA branch is logged in
+parallel as ``raw_eval_top1`` / ``raw_eval_top5`` for debugging and
+ablation — keep these around to diagnose EMA-vs-raw divergence.
 
-For the paper, report EMA ``eval_top1`` whenever EMA is on — that
-matches every reported reference number from MMPretrain / timm.
+For the paper, report EMA ``eval_top1`` in the main table and list
+``raw_eval_top1`` in the appendix.
 
 ## SkyPilot (managed jobs)
 

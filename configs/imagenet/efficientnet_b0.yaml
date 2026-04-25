@@ -23,6 +23,8 @@ batch_size: 256           # 256 × 8 GPUs = 2048 effective.
                           # other ImageNet models in this repo and fully use
                           # 8×A100-80GB. Linear LR scaling (below) keeps the
                           # effective-SGD step size aligned with the reference.
+validation_batch_size: 512 # 2× train batch: eval has no optimizer state / grads,
+                          # so activations fit comfortably and eval finishes ~2× faster.
 grad_accum_steps: 1
 workers: 10
 pin_mem: true              # pinned host memory → faster GPU transfer (~10%)

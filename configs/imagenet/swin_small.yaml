@@ -17,6 +17,8 @@ train_interpolation: bicubic
 crop_pct: 0.875
 batch_size: 256              # 256 × 8 GPUs = 2048 effective (2× MMPretrain base;
                              # lr_base_scale=linear scales lr 1e-3 → 2e-3 automatically)
+validation_batch_size: 512   # 2× train batch: eval has no optimizer state / grads,
+                             # so activations fit comfortably and eval finishes ~2× faster.
 grad_accum_steps: 1
 workers: 10
 pin_mem: true              # pinned host memory → faster GPU transfer (~10%)
@@ -51,7 +53,9 @@ amp-dtype: bfloat16
 torchcompile: null              # "inductor" to enable torch.compile
 torchcompile_mode: null
 clip_grad: 5.0
-model_ema: false
+model_ema: true              # Unified across all archs for the paper (decay 0.9999);
+model_ema_decay: 0.9999      # MMPretrain's swin recipe omits EMAHook, but we enable
+                             # it here so eval_top1 is comparable across the sweep.
 seed: 42
 
 activation: gelu

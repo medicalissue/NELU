@@ -19,6 +19,8 @@ train_interpolation: bicubic
 crop_pct: 0.875
 batch_size: 256              # 256 × 8 GPUs = 2048 effective (2× MMPretrain base;
                              # lr_base_scale=linear scales lr 1e-3 → 2e-3 automatically)
+validation_batch_size: 512   # 2× train batch: eval has no optimizer state / grads,
+                             # so activations fit comfortably and eval finishes ~2× faster.
 grad_accum_steps: 1
 workers: 10
 pin_mem: true              # pinned host memory → faster GPU transfer (~10%)
@@ -55,7 +57,9 @@ torchcompile: null              # "inductor" to enable torch.compile
 torchcompile_mode: null
 clip_grad: 5.0
 model_ema: true
-model_ema_decay: 0.99996     # MMPretrain EMAHook momentum=4e-5 ⇒ decay=1−4e-5
+model_ema_decay: 0.9999      # Unified across all archs (MMPretrain used 0.99996
+                             # for DeiT-B only; we use 0.9999 so eval_top1 is
+                             # directly comparable across the whole ImageNet sweep).
 seed: 42
 
 activation: gelu
