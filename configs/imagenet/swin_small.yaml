@@ -19,6 +19,7 @@ batch_size: 256              # 256 × 8 GPUs = 2048 effective (2× MMPretrain ba
                              # lr_base_scale=linear scales lr 1e-3 → 2e-3 automatically)
 grad_accum_steps: 1
 workers: 10
+pin_mem: true              # pinned host memory → faster GPU transfer (~10%)
 
 opt: adamw
 opt_eps: 1.0e-8

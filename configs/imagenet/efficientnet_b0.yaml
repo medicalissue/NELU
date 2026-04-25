@@ -25,6 +25,7 @@ batch_size: 256           # 256 × 8 GPUs = 2048 effective.
                           # effective-SGD step size aligned with the reference.
 grad_accum_steps: 1
 workers: 10
+pin_mem: true              # pinned host memory → faster GPU transfer (~10%)
 
 opt: rmsproptf
 opt_eps: 1.0e-3
