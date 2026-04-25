@@ -9,9 +9,18 @@ License:     MIT (see LICENSE)
 Commit SHA:  24f1c456f48c78133088c4eefd182ca9e6199b03
 Vendored:    2026-04-24
 
-Files used (verbatim, no modifications):
-    models/cifar/densenet.py  →  densenet.py
-    models/cifar/resnet.py    →  resnet.py
+Files used:
+    models/cifar/resnet.py    →  resnet.py       (verbatim)
+    models/cifar/densenet.py  →  densenet.py     (local modification, see
+                                                  the header note in that
+                                                  file — Bottleneck's
+                                                  single ``self.relu`` is
+                                                  split into two distinct
+                                                  modules ``relu1`` /
+                                                  ``relu2`` so each call
+                                                  site gets its own
+                                                  Gate-Normalization axes
+                                                  after activation swap).
 """
 
 COMMIT_SHA = "24f1c456f48c78133088c4eefd182ca9e6199b03"

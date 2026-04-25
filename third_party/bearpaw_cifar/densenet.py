@@ -7,6 +7,19 @@ import math
 __all__ = ['densenet']
 
 
+# ── LOCAL MODIFICATION ──────────────────────────────────────────────────
+# Upstream Bottleneck shares ``self.relu`` between the (BN1→ReLU→Conv1x1)
+# and (BN2→ReLU→Conv3x3) stages, so swapping that single ReLU in for a
+# Gate-Normalization module forces the two call sites — which follow
+# channel-mixing (1×1) and full-mixing (3×3) linears respectively — to
+# share a single ``norm_axes``. Split the shared module into two distinct
+# instances so each site can pick the axes that match the conv that
+# *follows* it (this is a pre-activation block; the upstream introspector
+# in ``train/swap.py`` classifies by the NEXT conv for pre-activation
+# architectures). Original bearpaw behavior is preserved at the level of
+# computed logits because ``ReLU`` has no state.
+# ────────────────────────────────────────────────────────────────────────
+
 from torch.autograd import Variable
 
 class Bottleneck(nn.Module):
@@ -16,17 +29,21 @@ class Bottleneck(nn.Module):
         self.bn1 = nn.BatchNorm2d(inplanes)
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, growthRate, kernel_size=3, 
+        self.conv2 = nn.Conv2d(planes, growthRate, kernel_size=3,
                                padding=1, bias=False)
-        self.relu = nn.ReLU(inplace=True)
+        # Two distinct ReLU modules (local modification; see header note).
+        # ``inplace=False`` so a Gate-Normalization swap at relu1 does not
+        # mutate the tensor feeding bn2.
+        self.relu1 = nn.ReLU(inplace=False)
+        self.relu2 = nn.ReLU(inplace=False)
         self.dropRate = dropRate
 
     def forward(self, x):
         out = self.bn1(x)
-        out = self.relu(out)
+        out = self.relu1(out)
         out = self.conv1(out)
         out = self.bn2(out)
-        out = self.relu(out)
+        out = self.relu2(out)
         out = self.conv2(out)
         if self.dropRate > 0:
             out = F.dropout(out, p=self.dropRate, training=self.training)

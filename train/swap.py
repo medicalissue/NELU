@@ -103,20 +103,19 @@ _MBCONV_POLICY: dict[str, dict[str, tuple[int, ...]]] = {
 
 def _axes_from_ancestors(
     ancestors: list[tuple[str, nn.Module]],
-    default: NormAxes | DimsLike,
-) -> NormAxes | DimsLike:
+    default: NormAxes | DimsLike | None = None,
+):
     """Pick ``norm_axes`` by walking up ``ancestors`` for an MBConv match.
 
     ``ancestors`` is ordered *bottom-up*: ``ancestors[0]`` is the
     activation's direct parent together with the attribute the parent
     uses to reach it, ``ancestors[1]`` is the grandparent, and so on.
 
-    We look for the nearest ancestor whose class lives in
-    :data:`_MBCONV_POLICY`; when one matches, the attribute it uses to
-    reach its *downstream* child (``ancestors[i][0]``) is the policy
-    key — e.g. ``InvertedResidual.bn1`` holds a ``BatchNormAct2d``
-    whose ``.act`` is the activation we're swapping, and the policy
-    keys on ``"bn1"``.
+    Returns the policy-dictated axes if any ancestor is a known MBConv
+    block type and its downward attribute hits :data:`_MBCONV_POLICY`.
+    Returns ``default`` otherwise; callers pass ``None`` to distinguish
+    "policy had nothing to say" from "policy said ``sample``" and hand
+    resolution off to the conv-introspection fallback.
     """
     blocks = _timm_blocks()
     if not blocks:
@@ -159,34 +158,58 @@ def _replace_with_policy(
     eps: float,
     gamma_init: float,
     beta_init: float,
-    ancestors: list[tuple[str, nn.Module]] | None = None,
 ) -> int:
     """Walk the module tree; substitute baseline activations for GateNorm.
 
-    For each matched activation :func:`_axes_from_ancestors` resolves the
-    per-site norm_axes from the enclosing block type, replacing the old
-    "swap globally then rewire" two-phase approach.
+    Axis resolution order, first hit wins:
+      1. MBConv / DepthwiseSeparableConv / EdgeResidual policy
+         (:func:`_axes_from_ancestors`).
+      2. Nearest preceding ``nn.Conv2d`` / ``nn.Linear`` in declaration
+         order, classified by :func:`_linear_mixing_axes`. This is the
+         generic "post-activation auto-axes" used by CIFAR's hub-backed
+         models; it also catches ImageNet activations that sit outside
+         any MBConv-family block (e.g. EfficientNet's ``bn2`` head).
+      3. ``default_axes`` (last-resort fallback for sites that have no
+         upstream linear op at all — rare, typically the first activation
+         in a stem).
+
+    Walking the tree in two passes is necessary so pass 2 can see the
+    complete ordered list of linear ops for step (2) above. Pass 1 just
+    records every ``(parent, child_name, ancestors, linear_index)``
+    tuple; pass 2 writes the swaps back.
     """
-    if ancestors is None:
-        ancestors = []
-    count = 0
-    for name, child in list(model.named_children()):
-        if isinstance(child, baseline_types):
-            # `model` is the direct parent; pass it as ancestor[0].
-            chain = [(name, model)] + ancestors
-            axes = _axes_from_ancestors(chain, default_axes)
-            setattr(model, name, gate_cls(
-                norm_axes=axes, eps=eps,
-                gamma_init=gamma_init, beta_init=beta_init,
-            ))
-            count += 1
-        else:
-            count += _replace_with_policy(
-                child, baseline_types, gate_cls, default_axes,
-                eps=eps, gamma_init=gamma_init, beta_init=beta_init,
-                ancestors=[(name, model)] + ancestors,
-            )
-    return count
+    linear_ops: list[nn.Module] = []
+    sites: list[tuple[nn.Module, str, list[tuple[str, nn.Module]], int]] = []
+
+    def sweep(
+        root: nn.Module,
+        ancestors: list[tuple[str, nn.Module]],
+    ) -> None:
+        for name, child in root.named_children():
+            if isinstance(child, (nn.Conv2d, nn.Linear)):
+                linear_ops.append(child)
+            if isinstance(child, baseline_types):
+                chain = [(name, root)] + ancestors
+                sites.append((root, name, chain, len(linear_ops)))
+            else:
+                sweep(child, [(name, root)] + ancestors)
+
+    sweep(model, [])
+
+    for parent, name, chain, idx in sites:
+        # (1) MBConv-family policy.
+        axes = _axes_from_ancestors(chain, default=None)
+        # (2) Conv-introspection fallback.
+        if axes is None:
+            if idx > 0:
+                axes = _linear_mixing_axes(linear_ops[idx - 1])
+            else:
+                axes = default_axes
+        setattr(parent, name, gate_cls(
+            norm_axes=axes, eps=eps,
+            gamma_init=gamma_init, beta_init=beta_init,
+        ))
+    return len(sites)
 
 
 # ── Thin, type-specific wrappers ────────────────────────────────────────
