@@ -407,6 +407,59 @@ __global__ void bwd_twopass_emit(
 }
 
 
+// Two-pass emit, no block-local accumulators. Used when N is so large that
+// shared memory cannot hold even ``2*N`` floats (e.g. CIFAR ResNet stem with
+// "sample" axes: C·H·W = 16·32·32 = 16384, smem = 128 KB > A10G cap 100 KB).
+// dz emit identical to bwd_twopass_emit; dγ/dβ atomicAdd directly into the
+// global accumulators row-by-row. Slower (cross-row contention on the same
+// gamma index), but unconditionally correct for any N.
+template <typename T, int KIND, int BLOCK>
+__global__ void bwd_twopass_emit_global(
+    const T* __restrict__ z_ptr,
+    const float* __restrict__ mu_in,
+    const float* __restrict__ rsigma_in,
+    const T* __restrict__ dy_ptr,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    const float* __restrict__ r1_in,
+    const float* __restrict__ r2_in,
+    T* __restrict__ dz_ptr,
+    float* __restrict__ dgamma_acc,
+    float* __restrict__ dbeta_acc,
+    int N
+) {
+    using Gate = GateFn<KIND>;
+    const int row = blockIdx.x;
+    const float mu = __ldg(mu_in + row);
+    const float rs = __ldg(rsigma_in + row);
+    const float r1 = __ldg(r1_in + row);
+    const float r2 = __ldg(r2_in + row);
+    const float inv_n = __frcp_rn((float)N);
+
+    const T* __restrict__ z_row  = z_ptr  + (size_t)row * N;
+    const T* __restrict__ dy_row = dy_ptr + (size_t)row * N;
+    T*       __restrict__ dz_row = dz_ptr + (size_t)row * N;
+
+    #pragma unroll 4
+    for (int i = threadIdx.x; i < N; i += BLOCK) {
+        float z  = (float)z_row[i];
+        float dy = (float)dy_row[i];
+        float u  = (z - mu) * rs;
+        float g  = __ldg(gamma + i);
+        float b  = __ldg(beta  + i);
+        float t  = g * u + b;
+        float gval = Gate::gate(t);
+        float gp   = Gate::gate_prime(t);
+        float h    = dy * z * gp;
+        float dz   = dy * gval + g * rs * (h - inv_n * (r1 + u * r2));
+        dz_row[i]  = (T)dz;
+
+        atomicAdd(&dgamma_acc[i], h * u);
+        atomicAdd(&dbeta_acc[i],  h);
+    }
+}
+
+
 // ══════════════════════════════════════════════════════════════════════════
 // Launchers
 // ══════════════════════════════════════════════════════════════════════════
@@ -495,35 +548,57 @@ static void launch_backward(
         return;
     }
 
-    // Two-pass fallback: reduce then emit. Emit still uses block-local
-    // dγ/dβ accumulators so we keep the atomic-contention win even when
-    // the row is too large to cache.
+    // Two-pass fallback: reduce then emit. Tier 2 keeps block-local dγ/dβ
+    // accumulators (smem = 2·N floats) to avoid cross-block atomic contention.
+    // Tier 3 drops the block-local accumulators when even 2·N floats don't
+    // fit (CIFAR ResNet stem with "sample" axes: C·H·W = 16384 → 128 KB).
+    // Both tiers share the same reduce kernel.
     const int smem_reduce = (int)sizeof(float) * BWD_TWOPASS_REDUCE_OVERHEAD;
     const int smem_emit   = (int)sizeof(float) * (2 * N);
-    if (smem_emit > smem_cap) {
-        // Extreme-N case: drop to global atomicAdd per iteration. Very rare
-        // for transformers / CIFAR CNNs (N is bounded by the hidden dim).
-        TORCH_CHECK(false,
-            "gate_norm backward: N too large for even the two-pass emit "
-            "accumulator (need ", smem_emit, " bytes, cap ", smem_cap, ").");
-    }
-    #define LAUNCH_BWD_TWOPASS(BS) do {                                       \
-        auto kred  = bwd_twopass_reduce<T, KIND, BS>;                         \
+
+    #define LAUNCH_BWD_TWOPASS_REDUCE(BS) do {                                \
+        auto kred = bwd_twopass_reduce<T, KIND, BS>;                          \
         kred<<<M, BS, smem_reduce, stream>>>(                                 \
             z, mu, rsigma, dy, gamma, beta, r1_scratch, r2_scratch, N);       \
+    } while (0)
+
+    #define LAUNCH_BWD_TWOPASS_SHARED(BS) do {                                \
+        LAUNCH_BWD_TWOPASS_REDUCE(BS);                                        \
         auto kemit = bwd_twopass_emit<T, KIND, BS>;                           \
         enable_dynamic_smem((const void*)kemit, smem_emit);                   \
         kemit<<<M, BS, smem_emit, stream>>>(                                  \
             z, mu, rsigma, dy, gamma, beta, r1_scratch, r2_scratch,           \
             dz, dgamma_acc, dbeta_acc, N);                                    \
     } while (0)
-    switch (BLOCK) {
-        case 128:  LAUNCH_BWD_TWOPASS(128);  break;
-        case 256:  LAUNCH_BWD_TWOPASS(256);  break;
-        case 512:  LAUNCH_BWD_TWOPASS(512);  break;
-        default:   LAUNCH_BWD_TWOPASS(1024); break;
+
+    #define LAUNCH_BWD_TWOPASS_GLOBAL(BS) do {                                \
+        LAUNCH_BWD_TWOPASS_REDUCE(BS);                                        \
+        auto kemit = bwd_twopass_emit_global<T, KIND, BS>;                    \
+        kemit<<<M, BS, 0, stream>>>(                                          \
+            z, mu, rsigma, dy, gamma, beta, r1_scratch, r2_scratch,           \
+            dz, dgamma_acc, dbeta_acc, N);                                    \
+    } while (0)
+
+    if (smem_emit <= smem_cap) {
+        switch (BLOCK) {
+            case 128:  LAUNCH_BWD_TWOPASS_SHARED(128);  break;
+            case 256:  LAUNCH_BWD_TWOPASS_SHARED(256);  break;
+            case 512:  LAUNCH_BWD_TWOPASS_SHARED(512);  break;
+            default:   LAUNCH_BWD_TWOPASS_SHARED(1024); break;
+        }
+    } else {
+        // Tier 3: global atomicAdd emit. Unconditionally correct for any N.
+        switch (BLOCK) {
+            case 128:  LAUNCH_BWD_TWOPASS_GLOBAL(128);  break;
+            case 256:  LAUNCH_BWD_TWOPASS_GLOBAL(256);  break;
+            case 512:  LAUNCH_BWD_TWOPASS_GLOBAL(512);  break;
+            default:   LAUNCH_BWD_TWOPASS_GLOBAL(1024); break;
+        }
     }
-    #undef LAUNCH_BWD_TWOPASS
+
+    #undef LAUNCH_BWD_TWOPASS_SHARED
+    #undef LAUNCH_BWD_TWOPASS_GLOBAL
+    #undef LAUNCH_BWD_TWOPASS_REDUCE
 }
 
 
