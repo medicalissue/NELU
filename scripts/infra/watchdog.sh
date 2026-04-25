@@ -174,7 +174,20 @@ while :; do
     while (( live < effective_target )); do
         # launch_one retries indefinitely; no fall-through path needed.
         launch_one
+        # AWS DescribeInstances has a few-second eventual-consistency
+        # window after RunInstances — the new instance isn't visible to
+        # the next describe call for ~1-3s. Without this sleep, the loop
+        # condition still holds and we end up double-launching workers.
+        # 8s is well past the typical window.
+        sleep 8
         live=$(count_live_workers)
+        # Re-check the cap, in case workers came up or jobs completed
+        # while we were launching.
+        remaining=$(count_incomplete)
+        effective_target=$TARGET_WORKERS
+        if (( remaining < effective_target )); then
+            effective_target=$remaining
+        fi
     done
 
     sleep "$POLL_INTERVAL_SEC"
