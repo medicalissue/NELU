@@ -158,13 +158,14 @@ while :; do
         break
     fi
 
+    # Authoritative live count from AWS at the top of each polling pass.
+    # Inside the inner launch loop we increment locally rather than
+    # re-querying the API: DescribeInstances has a 1-3s eventual-consistency
+    # window after RunInstances, so successive API calls would still
+    # report the old count and we'd double-launch. The next outer pass
+    # will correct any drift via this authoritative read.
     live=$(count_live_workers)
     remaining=$(count_incomplete)
-    # Cap effective target by the number of incomplete experiments.
-    # Without this cap, if TARGET_WORKERS=3 but only 1 exp is left in the
-    # queue, a freshly-launched extra worker finds nothing to do, self-
-    # terminates, and the watchdog re-launches → launch/terminate loop
-    # burning spot $.
     effective_target=$TARGET_WORKERS
     if (( remaining < effective_target )); then
         effective_target=$remaining
@@ -173,20 +174,11 @@ while :; do
 
     while (( live < effective_target )); do
         # launch_one retries indefinitely; no fall-through path needed.
-        launch_one
-        # AWS DescribeInstances has a few-second eventual-consistency
-        # window after RunInstances — the new instance isn't visible to
-        # the next describe call for ~1-3s. Without this sleep, the loop
-        # condition still holds and we end up double-launching workers.
-        # 8s is well past the typical window.
-        sleep 8
-        live=$(count_live_workers)
-        # Re-check the cap, in case workers came up or jobs completed
-        # while we were launching.
-        remaining=$(count_incomplete)
-        effective_target=$TARGET_WORKERS
-        if (( remaining < effective_target )); then
-            effective_target=$remaining
+        if launch_one; then
+            # Optimistic local increment — successful RunInstances means
+            # the slot is committed even if DescribeInstances hasn't
+            # caught up yet.
+            live=$((live + 1))
         fi
     done
 
