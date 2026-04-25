@@ -76,13 +76,20 @@ for triple in $EVAL_MODELS; do
     log "================================================================"
     log "▶ eval: cfg=$cfg act=$act exp=$exp ep=$EVAL_EPOCH"
 
-    # The trainer stores checkpoints nested under s3://.../<exp>/<exp>/...
-    src="${CKPT_BUCKET}/${exp}/${exp}/checkpoint-${EVAL_EPOCH}.pth.tar"
-    local_ckpt="$WORKDIR/${exp}-ep${EVAL_EPOCH}.pth.tar"
+    # EVAL_EPOCH accepts: a number ("250"), "best" (model_best.pth.tar),
+    # or "last" (last.pth.tar). The trainer stores checkpoints nested
+    # under s3://.../<exp>/<exp>/...
+    case "$EVAL_EPOCH" in
+        best) ckpt_name="model_best.pth.tar" ;;
+        last) ckpt_name="last.pth.tar" ;;
+        *)    ckpt_name="checkpoint-${EVAL_EPOCH}.pth.tar" ;;
+    esac
+    src="${CKPT_BUCKET}/${exp}/${exp}/${ckpt_name}"
+    local_ckpt="$WORKDIR/${exp}-${EVAL_EPOCH}.pth.tar"
     log "  fetching $src"
     aws s3 cp "$src" "$local_ckpt" --only-show-errors
 
-    out_json="$WORKDIR/${exp}-ep${EVAL_EPOCH}-result.json"
+    out_json="$WORKDIR/${exp}-${EVAL_EPOCH}-result.json"
     model_name=$(model_name_from_cfg "$cfg")
     log "  running imagenet_robustness.py (model=$model_name, act=$act)"
     # DataParallel across all visible GPUs is built-in; batch-size is
@@ -97,7 +104,7 @@ for triple in $EVAL_MODELS; do
         --workers 8
 
     # Upload result
-    dst="${CKPT_BUCKET}/${EVAL_RESULT_PREFIX}/${RUN_TS}/${exp}-ep${EVAL_EPOCH}.json"
+    dst="${CKPT_BUCKET}/${EVAL_RESULT_PREFIX}/${RUN_TS}/${exp}-${EVAL_EPOCH}.json"
     log "  uploading $dst"
     aws s3 cp "$out_json" "$dst" --only-show-errors
 

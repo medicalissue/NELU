@@ -107,14 +107,32 @@ def build_model(model_name: str, activation: str) -> nn.Module:
 
 def load_checkpoint(model: nn.Module, path: str) -> None:
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    state = ckpt.get("state_dict") or ckpt.get("model") or ckpt
+    # timm CheckpointSaver writes the weights under "state_dict"; train.cifar
+    # uses "model"; raw torch.save(state_dict, ...) is the bare-dict fallback.
+    if isinstance(ckpt, dict):
+        for k in ("state_dict", "model", "model_state"):
+            if k in ckpt and isinstance(ckpt[k], dict):
+                state = ckpt[k]
+                break
+        else:
+            state = ckpt
+    else:
+        state = ckpt
     state = {k.removeprefix("module."): v for k, v in state.items()}
+    state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     missing, unexpected = model.load_state_dict(state, strict=False)
+    real_missing = [k for k in missing if not k.endswith("num_batches_tracked")]
+    if len(real_missing) > 4:
+        raise RuntimeError(
+            f"checkpoint {path} produced {len(real_missing)} missing keys "
+            f"(first 4: {real_missing[:4]}). Refusing to evaluate a "
+            f"partially-loaded model — checkpoint format probably changed."
+        )
     if missing:
         print(f"[eval] warning: missing keys ({len(missing)}): {missing[:4]}...")
     if unexpected:
         print(f"[eval] warning: unexpected keys ({len(unexpected)}): {unexpected[:4]}...")
-    epoch = ckpt.get("epoch", "?")
+    epoch = ckpt.get("epoch", "?") if isinstance(ckpt, dict) else "?"
     print(f"[eval] loaded checkpoint {path} (epoch={epoch})")
 
 
