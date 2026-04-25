@@ -351,30 +351,42 @@ def init_wandb_run(args, saved_wandb_id=None):
         "name": f"{args.model}_{args.activation}_s{args.seed}",
         "config": vars(args),
     }
-    # If the saved id is gone from the server (deleted by an operator), the
-    # wandb backend silently creates a "phantom" run that never uploads. We
-    # have to detect this via the API before init and fall back to a fresh
-    # id ourselves.
-    use_id = saved_wandb_id
+    # Prefer reattach. resume="allow" reattaches when the id exists, lets
+    # wandb create a brand-new run when no id is supplied. Only when we can
+    # *positively confirm* the id has been deleted from the server do we
+    # generate a fresh id ourselves — a transient API hiccup must NOT be
+    # mistaken for "deleted" (that mistake earlier cost us a dozen runs by
+    # spawning new ids on every restart).
     if saved_wandb_id:
+        deleted = False
         try:
-            api_run = wandb.Api().run(
-                f"{wandb.api.default_entity or ''}/{args.wandb_project}/{saved_wandb_id}"
-            )
-            _ = api_run.state  # touch — raises if not found
-            init_kwargs["id"] = saved_wandb_id
-            init_kwargs["resume"] = "must"
+            entity = wandb.api.default_entity or ""
+            wandb.Api().run(f"{entity}/{args.wandb_project}/{saved_wandb_id}")
         except Exception as e:
+            msg = str(e).lower()
+            # Only the "could not find" / 404 family means the id is truly
+            # gone. Anything else (timeout, 5xx, auth blip, rate limit) we
+            # treat as transient and keep the saved id, so wandb.init's own
+            # retry logic gets a chance.
+            if "could not find" in msg or "not found" in msg or "404" in msg:
+                deleted = True
+            else:
+                print(
+                    f"WARNING: wandb API hiccup checking {saved_wandb_id} "
+                    f"({type(e).__name__}: {e}); reusing the saved id anyway."
+                )
+        if deleted:
             print(
-                f"WARNING: saved wandb id {saved_wandb_id} is gone from the "
-                f"server ({type(e).__name__}); starting a fresh run."
+                f"WARNING: saved wandb id {saved_wandb_id} is deleted on the "
+                f"server; creating a fresh run."
             )
-            use_id = wandb.util.generate_id()
-            init_kwargs["id"] = use_id
+            init_kwargs["id"] = wandb.util.generate_id()
             init_kwargs["resume"] = "never"
+        else:
+            init_kwargs["id"] = saved_wandb_id
+            init_kwargs["resume"] = "allow"
     else:
-        use_id = wandb.util.generate_id()
-        init_kwargs["id"] = use_id
+        init_kwargs["id"] = wandb.util.generate_id()
         init_kwargs["resume"] = "never"
 
     wandb_run = wandb.init(**init_kwargs)
