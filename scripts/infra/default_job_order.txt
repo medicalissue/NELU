@@ -1,6 +1,8 @@
 configs/imagenet/swin_small.yaml:gelu
 configs/imagenet/swin_small.yaml:nelu
-configs/imagenet/convnext_small.yaml:gelu
+# convnext_small.yaml:gelu — already trained (mb9dxt5n, top1 83.19,
+# ConvNeXt's model-default ls_init_value=1e-6 makes that run a valid
+# baseline; we re-use it instead of retraining.
 configs/imagenet/convnext_small.yaml:nelu
 configs/imagenet/deit_base.yaml:gelu
 configs/imagenet/deit_base.yaml:nelu
@@ -10,9 +12,7 @@ configs/imagenet/convnext_tiny.yaml:gelu
 configs/imagenet/convnext_tiny.yaml:nelu
 configs/imagenet/deit_small.yaml:gelu
 configs/imagenet/deit_small.yaml:nelu
-# EfficientNet add-on queue. Append to default_job_order.txt (or use as
-# JOB_ORDER directly) to include EfficientNet in the ImageNet campaign.
-# Uses SiLU ↔ NiLU because EfficientNet's native activation is SiLU.
+# EfficientNet uses SiLU/NiLU (its native activation family).
 configs/imagenet/efficientnet_b0.yaml:silu
 configs/imagenet/efficientnet_b0.yaml:nilu
 configs/imagenet/efficientnet_b2.yaml:silu
