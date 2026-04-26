@@ -129,7 +129,7 @@ group.add_argument('--activation', default='gelu', type=str,
                    choices=['relu', 'gelu', 'silu', 'nelu', 'nilu'],
                    help='gelu/silu/relu leave the model unchanged; nelu swaps every '
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
-group.add_argument('--gamma-init', type=float, default=1e-6,
+group.add_argument('--gamma-init', type=float, default=0.01,
                    help='Initial *effective* γ in NELU/NiLU. γ is now '
                         'learnable (softplus reparam); this sets γ_eff at '
                         'step 0 and the optimizer drives it from there.')

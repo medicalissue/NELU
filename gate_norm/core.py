@@ -6,8 +6,8 @@ Gate Normalization (GN) generalizes self-gated activations of the form
     y = x · g(γ · x / rms(x))
 
 where ``g`` is a pointwise squashing function (sigmoid, Gaussian CDF, …)
-and ``γ`` is a learnable scalar with a soft positivity constraint:
-``γ_eff = softplus(γ_raw)``. The softplus reparameterization keeps γ
+and ``γ`` is a learnable scalar with a soft positivity constraint via
+softplus reparameterization: ``γ_eff = softplus(γ_raw)``. This keeps γ
 strictly positive (anti-gate sign-flip is unphysical for self-gated
 activations — `Φ(γ x̂)` with γ < 0 inverts the gate so the layer outputs
 are non-positive, breaking the "save positives, drop negatives"
@@ -39,7 +39,7 @@ from .layout import DimsLike, NormAxes, resolve_axes
 from .stats import layer_stats
 
 
-_DEFAULT_GAMMA_INIT = 1e-6
+_DEFAULT_GAMMA_INIT = 0.01
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 
 
@@ -47,7 +47,6 @@ def _inv_softplus(y: float) -> float:
     """Inverse of softplus: solve softplus(x) = y for x."""
     if y <= 0:
         raise ValueError(f"softplus output must be > 0, got {y}")
-    # x = log(exp(y) - 1); use expm1 for numerical stability near y=0.
     return math.log(math.expm1(y))
 
 
@@ -57,16 +56,12 @@ class GateNorm(nn.Module):
     Parameters
     ----------
     norm_axes : str or tuple of int, default ``"channel"``
-        Axes over which the RMS is computed. Either a preset alias
-        (``"channel"`` for channel-mixing inputs, ``"sample"`` for NCHW
-        convolutions whose preceding linear mixes both channel and space)
-        or an explicit axis tuple matching the mixing axes of the preceding
-        linear operation (e.g. ``(2, 3)`` after a depthwise convolution).
+        Axes over which the RMS is computed.
     eps : float, default ``1e-6``
         Numerical floor added inside the RMS before sqrt.
-    gamma_init : float, default ``1e-6``
-        Initial *effective* γ (i.e. γ_eff = softplus(γ_raw)). The raw
-        parameter is set to inv_softplus(gamma_init).
+    gamma_init : float, default ``0.01``
+        Initial *effective* γ (i.e. γ_eff = softplus(γ_raw) at step 0).
+        The raw parameter is set to inv_softplus(gamma_init).
     """
 
     _CUDA_OP: str | None = None
@@ -81,8 +76,6 @@ class GateNorm(nn.Module):
         super().__init__()
         self.norm_axes = norm_axes
         self.eps = eps
-        # γ_raw is the unconstrained learnable parameter; γ_eff =
-        # softplus(γ_raw) is the value used in the forward gate.
         raw = _inv_softplus(float(gamma_init))
         self.gamma_raw = nn.Parameter(
             torch.full((1,), raw, dtype=torch.float32),
@@ -97,7 +90,6 @@ class GateNorm(nn.Module):
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
-        """Pointwise squashing function applied to ``γ · x / rms(x)``."""
         raise NotImplementedError
 
     def _axes(self, z: torch.Tensor) -> tuple[int, ...]:
@@ -105,10 +97,9 @@ class GateNorm(nn.Module):
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         # The CUDA fused path bakes γ in as a Python float and drops the
-        # gradient w.r.t. γ_raw, so now that γ is learnable we always use
-        # the pure-PyTorch path. inductor still fuses it at compile time.
+        # gradient, so always use the pure-PyTorch path. inductor still fuses.
         axes = self._axes(z)
-        gamma_eff = self.gamma  # softplus(γ_raw)
+        gamma_eff = self.gamma
         rsigma = layer_stats(z, axes, self.eps)
         z32 = z.float() if z.dtype != torch.float32 else z
         t = gamma_eff * z32 * rsigma
@@ -125,18 +116,14 @@ class GateNorm(nn.Module):
         self, state_dict, prefix, local_metadata, strict,
         missing_keys, unexpected_keys, error_msgs,
     ):
-        # Back-compat: older checkpoints stored `gamma` directly (the
-        # effective γ value). Convert to `gamma_raw = inv_softplus(γ)`.
+        # Back-compat: legacy `gamma` (effective γ stored directly) → gamma_raw.
         gamma_key = prefix + "gamma"
         gamma_raw_key = prefix + "gamma_raw"
         if gamma_key in state_dict and gamma_raw_key not in state_dict:
             t = state_dict.pop(gamma_key)
             if isinstance(t, torch.Tensor):
-                t = t.reshape(1).float()
-                t = t.clamp(min=1e-12)  # softplus output must be > 0
-                raw = torch.log(torch.expm1(t))
-                state_dict[gamma_raw_key] = raw
-        # Drop legacy β key if present.
+                t = t.reshape(1).float().clamp(min=1e-12)
+                state_dict[gamma_raw_key] = torch.log(torch.expm1(t))
         beta_key = prefix + "beta"
         if beta_key in state_dict:
             state_dict.pop(beta_key)
@@ -157,20 +144,12 @@ def gate_norm(
     norm_axes: NormAxes | DimsLike = "channel",
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Functional form: ``z · gate_fn(γ · z / rms(z))``.
-
-    Note: the functional form takes γ directly (not γ_raw); use the
-    :class:`GateNorm` module if you want the softplus reparameterization.
-    """
+    """Functional form: ``z · gate_fn(γ · z / rms(z))``."""
     axes = resolve_axes(z.ndim, norm_axes)
     rsigma = layer_stats(z, axes, eps)
-
     if isinstance(gamma, torch.Tensor):
         if gamma.numel() != 1:
-            raise ValueError(
-                f"gamma must be a scalar, got shape {tuple(gamma.shape)}"
-            )
+            raise ValueError(f"gamma must be a scalar, got shape {tuple(gamma.shape)}")
         gamma = gamma.reshape(())
-
     z32 = z.float() if z.dtype != torch.float32 else z
     return z * gate_fn(gamma * z32 * rsigma).to(z.dtype)

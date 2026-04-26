@@ -459,7 +459,7 @@ def parse_args():
                    help="Initial multiplier on lr when warmup is enabled")
     p.add_argument("--min_lr", type=float, default=0.0,
                    help="Cosine schedule floor (ignored for multistep)")
-    p.add_argument("--gamma_init", type=float, default=1e-6,
+    p.add_argument("--gamma_init", type=float, default=0.01,
                    help="Initial *effective* γ in NELU/NiLU. γ is now a "
                         "learnable parameter via softplus reparam, so this "
                         "sets γ_eff at step 0; the optimizer drives it after.")
