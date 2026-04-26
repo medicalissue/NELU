@@ -104,22 +104,11 @@ class GateNorm(nn.Module):
         return resolve_axes(z.ndim, self.norm_axes)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # The CUDA fused path bakes γ in as a Python float and drops the
+        # gradient w.r.t. γ_raw, so now that γ is learnable we always use
+        # the pure-PyTorch path. inductor still fuses it at compile time.
         axes = self._axes(z)
         gamma_eff = self.gamma  # softplus(γ_raw)
-        # CUDA fused path bakes γ into the kernel as a Python float and
-        # therefore drops the gradient w.r.t. γ_raw. Skip it whenever γ
-        # is learnable and we're training.
-        gamma_grad_active = self.gamma_raw.requires_grad and torch.is_grad_enabled()
-        if (
-            self._CUDA_OP is not None
-            and should_use_cuda(z)
-            and not gamma_grad_active
-        ):
-            from . import cuda
-            return cuda.fused_forward(
-                self._CUDA_OP, z, gamma_eff, axes, self.eps,
-            )
-
         rsigma = layer_stats(z, axes, self.eps)
         z32 = z.float() if z.dtype != torch.float32 else z
         t = gamma_eff * z32 * rsigma
