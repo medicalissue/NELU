@@ -711,7 +711,7 @@ def main():
         # Gamma stats (nelu/nilu only)
         gamma_stats = {}
         if args.activation in ("nelu", "nilu"):
-            gamma_stats = collect_gamma_stats(model)
+            gamma_stats = collect_gamma_stats(_orig_module(model))
 
         # Gate entropy + variance (all activations)
         gate_stats = measure_gate_stats(model, probe_batch, device)
