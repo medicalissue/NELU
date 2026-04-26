@@ -60,28 +60,11 @@ from train.diagnostics import gamma_stats, gate_stats, weight_norms  # noqa: E40
 
 
 def _sync_gamma_to_ema(model_ema, model):
-    """Copy the live γ buffer from every NELU/NiLU module into the EMA model.
-
-    γ is driven externally by ``GammaWarmup`` and isn't a gradient-tracked
-    parameter, so the standard EMA lerp would just lag it. We force-sync
-    after every EMA update.
+    """No-op: γ is now a learnable Parameter (``γ_raw``) and the standard
+    EMA already lerps it correctly. Kept as a stub so existing call sites
+    don't have to be edited.
     """
-    src_modules = []
-    for m in model.modules():
-        if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma"):
-            src_modules.append(m)
-    if not src_modules:
-        return
-    ema_target = getattr(model_ema, "module", model_ema)
-    dst_modules = [
-        m for m in ema_target.modules()
-        if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma")
-    ]
-    if len(dst_modules) != len(src_modules):
-        return  # structure mismatch (compiled wrapper etc.); skip silently.
-    with torch.no_grad():
-        for src, dst in zip(src_modules, dst_modules):
-            dst.gamma.copy_(src.gamma)
+    return
 
 
 try:
@@ -146,9 +129,10 @@ group.add_argument('--activation', default='gelu', type=str,
                    choices=['relu', 'gelu', 'silu', 'nelu', 'nilu'],
                    help='gelu/silu/relu leave the model unchanged; nelu swaps every '
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
-group.add_argument('--gamma-init', type=float, default=0.0,
-                   help='Initial value of the (non-learnable) γ buffer before '
-                        'the warmup scheduler ramps it to gamma-final.')
+group.add_argument('--gamma-init', type=float, default=1e-6,
+                   help='Initial *effective* γ in NELU/NiLU. γ is now '
+                        'learnable (softplus reparam); this sets γ_eff at '
+                        'step 0 and the optimizer drives it from there.')
 group.add_argument('--gamma-final', type=float, default=1.0,
                    help='Final γ value held for the rest of training.')
 group.add_argument('--gamma-warmup-schedule', type=str, default='linear',

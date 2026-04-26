@@ -1,19 +1,12 @@
-"""Warmup scheduler for the Gate Normalization γ buffer.
+"""(Deprecated) Warmup scheduler for the Gate Normalization γ.
 
-γ is *not* a learnable parameter in this form of GN: starting at γ = 0
-makes the activation behave like an identity-up-to-constant
-(``y = x · g(0) = 0.5x``), which is safe at init for any model size,
-and ramping γ to 1 as the LR warmup completes lands the activation in
-its production form ``y = x · g(x / rms(x))``.
+γ is now a learnable parameter (``γ_raw`` with softplus reparam — see
+:mod:`gate_norm.core`), so this scheduler is informational only: it
+tracks the conceptual ramp curve for logging but no longer writes back
+to the module. The module's own optimizer drives γ.
 
-The scheduler is intentionally trainer-agnostic: instantiate it once,
-call ``step(step_idx)`` (or ``step()`` to advance internally) on every
-training step, and every :class:`gate_norm.core.GateNorm` module in the
-model picks up the new γ in time for the next forward.
-
-Linear warmup is the default — it's what ``LinearLR`` uses for the LR
-side, so γ and LR move together. Cosine and constant variants are
-also provided for ablation.
+Kept for state-dict back-compat with older runs that did rely on the
+ramp.
 """
 
 from __future__ import annotations
@@ -103,9 +96,10 @@ class GammaWarmup:
         return g
 
     def _set(self, value: float) -> None:
-        for m in self.modules:
-            with torch.no_grad():
-                m.gamma.fill_(float(value))
+        # γ is now a learnable parameter (γ_raw with softplus reparam),
+        # so the warmup schedule is informational only — we do not write
+        # back to the module. The module's own optimizer drives γ.
+        return
 
     # ── checkpointing ─────────────────────────────────────────────────
 

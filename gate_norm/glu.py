@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2
+from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2, _inv_softplus
 from .stats import layer_stats
 
 
@@ -68,15 +68,18 @@ class _GatedGLU(nn.Module):
         self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
-        # γ is a non-learnable scalar driven by GammaWarmup. We use a
-        # Parameter with requires_grad=False (not a buffer) so that
-        # torch.compile / inductor doesn't specialize it at trace time;
-        # see core.py for the full rationale.
-        self.gamma = nn.Parameter(
-            torch.full((1,), float(gamma_init), dtype=torch.float32),
-            requires_grad=False,
+        # γ_raw is learnable; γ_eff = softplus(γ_raw) is what the gate sees.
+        # See core.py for the rationale (anti-gate suppression, no collapse).
+        raw = _inv_softplus(float(gamma_init))
+        self.gamma_raw = nn.Parameter(
+            torch.full((1,), raw, dtype=torch.float32),
+            requires_grad=True,
         )
         self._gate_norm_module = True
+
+    @property
+    def gamma(self) -> torch.Tensor:
+        return F.softplus(self.gamma_raw)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         g = self.w_gate(x)
@@ -91,15 +94,21 @@ class _GatedGLU(nn.Module):
     def extra_repr(self) -> str:
         return (
             f"hidden_dim={self.hidden_dim}, eps={self.eps}, "
-            f"gamma={self.gamma.item():.3e}"
+            f"gamma={self.gamma.item():.3e} (raw={self.gamma_raw.item():.3e})"
         )
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict,
         missing_keys, unexpected_keys, error_msgs,
     ):
-        # Older centred-and-learnable checkpoints saved γ as a Parameter
-        # and a separate β. Drop β (no longer used) and let γ load.
+        # Back-compat: convert legacy `gamma` (effective) → `gamma_raw`.
+        gamma_key = prefix + "gamma"
+        gamma_raw_key = prefix + "gamma_raw"
+        if gamma_key in state_dict and gamma_raw_key not in state_dict:
+            t = state_dict.pop(gamma_key)
+            if isinstance(t, torch.Tensor):
+                t = t.reshape(1).float().clamp(min=1e-12)
+                state_dict[gamma_raw_key] = torch.log(torch.expm1(t))
         beta_key = prefix + "beta"
         if beta_key in state_dict:
             state_dict.pop(beta_key)
