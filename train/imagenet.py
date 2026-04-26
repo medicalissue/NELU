@@ -603,6 +603,19 @@ def main():
         gamma_init=args.gamma_init,
         model_name=args.model,
     )
+
+    # Set γ to its final value BEFORE torch.compile traces the model.
+    # Inductor specializes buffers at trace time, so a γ=0 init followed by
+    # an in-place fill_(1.0) inside GammaWarmup would leave the compiled
+    # graph evaluating at γ=0 (i.e. y = 0.5*x, a no-op linearization).
+    # This forfeits γ warmup under compile but keeps the recipe correct;
+    # disable --torchcompile if you need a non-trivial γ ramp.
+    if n_swapped > 0:
+        with torch.no_grad():
+            for m in model.modules():
+                if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma"):
+                    m.gamma.fill_(float(args.gamma_final))
+
     if utils.is_primary(args):
         _logger.info(
             f'[activation] {args.activation}: swapped {n_swapped} modules '

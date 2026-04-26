@@ -546,6 +546,21 @@ def main():
     print(f"Model: {args.model}, activation: {args.activation}, "
           f"params: {param_count:,}, device: {device}")
 
+    # Set γ to its final value BEFORE torch.compile. Inductor traces the
+    # gate_norm modules at first forward and bakes the γ buffer value into
+    # the compiled graph as a constant; if we let the buffer enter compile
+    # at init (γ=0) and only fill it later, the live model would silently
+    # be a linear `0.5 * x` for the rest of training.
+    #
+    # We accept that compiled training cannot use a non-trivial γ warmup
+    # ramp (final value would also be baked). The CIFAR base recipe uses
+    # warmup_epochs=0, so this is a no-op there. ImageNet recipes with
+    # warmup>0 must either disable compile or skip the γ ramp.
+    with torch.no_grad():
+        for m in model.modules():
+            if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma"):
+                m.gamma.fill_(float(args.gamma_final))
+
     # torch.compile — wrap the model in-place. State dicts are saved from
     # the underlying ``._orig_mod`` when compiled so checkpoints remain
     # portable between --compile and eager runs.
@@ -596,6 +611,17 @@ def main():
     # number of optimizer steps that the LR warmup uses. For CIFAR
     # warmup_epochs is usually 0 in our recipe; the scheduler then
     # immediately fixes γ at gamma_final.
+    #
+    # IMPORTANT: torch.compile traces the gate_norm modules at first
+    # forward and may bake the γ buffer's value into the compiled graph
+    # as a constant. We therefore do TWO things to make sure the gate
+    # actually fires:
+    #   1. set γ to its final value BEFORE compile (or before first
+    #      forward) so that compile traces the production γ.
+    #   2. when warmup_steps > 0, run the compiled model in eager
+    #      ramping mode is unsafe; the existing recipe (`warmup_epochs=0`
+    #      for CIFAR) keeps γ constant after the initial set, which is
+    #      the regime compile is safe in.
     steps_per_epoch = max(1, len(train_loader))
     gamma_warmup_steps = warmup_epochs * steps_per_epoch
     gamma_scheduler = GammaWarmup(
