@@ -39,15 +39,8 @@ from .layout import DimsLike, NormAxes, resolve_axes
 from .stats import layer_stats
 
 
-_DEFAULT_GAMMA_INIT = 0.01
+_DEFAULT_GAMMA_INIT = 0.0
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
-
-
-def _inv_softplus(y: float) -> float:
-    """Inverse of softplus: solve softplus(x) = y for x."""
-    if y <= 0:
-        raise ValueError(f"softplus output must be > 0, got {y}")
-    return math.log(math.expm1(y))
 
 
 class GateNorm(nn.Module):
@@ -59,9 +52,12 @@ class GateNorm(nn.Module):
         Axes over which the RMS is computed.
     eps : float, default ``1e-6``
         Numerical floor added inside the RMS before sqrt.
-    gamma_init : float, default ``0.01``
-        Initial *effective* γ (i.e. γ_eff = softplus(γ_raw) at step 0).
-        The raw parameter is set to inv_softplus(gamma_init).
+    gamma_init : float, default ``0.0``
+        Initial value of the *raw* parameter γ_raw (the unconstrained
+        scalar). The effective gate temperature is
+        ``γ_eff = softplus(γ_raw)``. Defaults: γ_raw=0 → γ_eff=ln 2 ≈
+        0.693, gradient gate sigmoid(0)=0.5 (well-conditioned).
+        Pick γ_raw=1 for γ_eff≈1.31, γ_raw=-2 for γ_eff≈0.13, etc.
     """
 
     _CUDA_OP: str | None = None
@@ -76,9 +72,9 @@ class GateNorm(nn.Module):
         super().__init__()
         self.norm_axes = norm_axes
         self.eps = eps
-        raw = _inv_softplus(float(gamma_init))
+        # gamma_init now sets γ_raw directly (no inv_softplus).
         self.gamma_raw = nn.Parameter(
-            torch.full((1,), raw, dtype=torch.float32),
+            torch.full((1,), float(gamma_init), dtype=torch.float32),
             requires_grad=True,
         )
         self._gate_norm_module = True

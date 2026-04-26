@@ -129,10 +129,10 @@ group.add_argument('--activation', default='gelu', type=str,
                    choices=['relu', 'gelu', 'silu', 'nelu', 'nilu'],
                    help='gelu/silu/relu leave the model unchanged; nelu swaps every '
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
-group.add_argument('--gamma-init', type=float, default=0.01,
-                   help='Initial *effective* γ in NELU/NiLU. γ is now '
-                        'learnable (softplus reparam); this sets γ_eff at '
-                        'step 0 and the optimizer drives it from there.')
+group.add_argument('--gamma-init', type=float, default=0.0,
+                   help='Initial value of the raw learnable parameter γ_raw '
+                        '(γ_eff = softplus(γ_raw)). Default 0 → γ_eff = ln 2 '
+                        '≈ 0.693, gradient gate sigmoid(0) = 0.5.')
 group.add_argument('--gamma-final', type=float, default=1.0,
                    help='Final γ value held for the rest of training.')
 group.add_argument('--gamma-warmup-schedule', type=str, default='linear',
