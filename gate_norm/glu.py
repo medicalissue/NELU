@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2
+from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2, _inv_softplus
 from .stats import layer_stats
 
 
@@ -69,9 +69,10 @@ class _GatedGLU(nn.Module):
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
         # γ_raw is learnable; γ_eff = softplus(γ_raw) is what the gate sees.
-        # gamma_init sets γ_raw directly (no inv_softplus). See core.py.
+        # gamma_init is the effective γ at step 0; γ_raw stored as inv_softplus.
+        raw = _inv_softplus(float(gamma_init))
         self.gamma_raw = nn.Parameter(
-            torch.full((1,), float(gamma_init), dtype=torch.float32),
+            torch.full((1,), raw, dtype=torch.float32),
             requires_grad=True,
         )
         self._gate_norm_module = True

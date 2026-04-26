@@ -459,10 +459,10 @@ def parse_args():
                    help="Initial multiplier on lr when warmup is enabled")
     p.add_argument("--min_lr", type=float, default=0.0,
                    help="Cosine schedule floor (ignored for multistep)")
-    p.add_argument("--gamma_init", type=float, default=0.0,
-                   help="Initial value of the raw learnable parameter γ_raw "
-                        "(γ_eff = softplus(γ_raw)). Default 0 → γ_eff = ln 2 "
-                        "≈ 0.693, gradient gate sigmoid(0) = 0.5.")
+    p.add_argument("--gamma_init", type=float, default=1.0,
+                   help="Initial *effective* γ at step 0 (the value the "
+                        "gate sees). γ_eff = softplus(γ_raw); γ_raw is "
+                        "stored as inv_softplus(gamma_init).")
     p.add_argument("--gamma_final", type=float, default=1.0,
                    help="Final value of γ held for the rest of training.")
     p.add_argument("--gamma_warmup_schedule", type=str, default="linear",
