@@ -12,8 +12,10 @@ configs/imagenet/convnext_tiny.yaml:gelu
 configs/imagenet/convnext_tiny.yaml:nelu
 configs/imagenet/deit_small.yaml:gelu
 configs/imagenet/deit_small.yaml:nelu
-# EfficientNet uses SiLU/NiLU (its native activation family).
-configs/imagenet/efficientnet_b0.yaml:silu
-configs/imagenet/efficientnet_b0.yaml:nilu
-configs/imagenet/efficientnet_b2.yaml:silu
-configs/imagenet/efficientnet_b2.yaml:nilu
+# EfficientNet (BN-only, no LayerScale knob) is excluded from the
+# unified table to keep the LS=1e-6 ablation clean. Re-add as an
+# opt-in queue if the SiLU/NiLU sweep is needed later:
+#   configs/imagenet/efficientnet_b0.yaml:silu
+#   configs/imagenet/efficientnet_b0.yaml:nilu
+#   configs/imagenet/efficientnet_b2.yaml:silu
+#   configs/imagenet/efficientnet_b2.yaml:nilu
