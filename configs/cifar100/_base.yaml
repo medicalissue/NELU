@@ -27,6 +27,7 @@ warmup_epochs: 0
 min_lr: 0.0
 
 # ── Gate Normalization ────────────────────────────────────────────
+gamma_init: 1.0
 
 # ── Runtime ──────────────────────────────────────────────────────
 # bf16 AMP keeps underflow out of the picture (fp16 would need a

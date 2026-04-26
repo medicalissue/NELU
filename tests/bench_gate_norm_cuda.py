@@ -1,128 +1,116 @@
-"""CUDA kernel correctness + microbench for gate_norm.
+"""Throughput benchmark: pure PyTorch vs fused CUDA kernel.
 
-Run this on a GPU worker to verify the fused kernel against the pure-PyTorch
-path and measure HBM throughput.
+Usage::
 
-    python -m tests.bench_gate_norm_cuda
+    python -m tests.bench_gate_norm_cuda                          # default suite
+    python -m tests.bench_gate_norm_cuda --shape 32 1024 3072     # ad-hoc
 
-Output: a table of (dtype, M, N) → max fwd/bwd abs error, and fwd/bwd
-GB/s effective HBM bandwidth. Useful after the variance-algorithm swap or
-any kernel edit.
+Reports forward and backward wallclock for a few representative shapes
+that show up in the paper's networks.
+
+The benchmark builds the CUDA extension lazily on first call (30–60 s
+the first time, cached afterwards). Subsequent runs reuse the cached
+.so under ``~/.cache/torch_extensions/``.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import time
 
 import torch
 
-os.environ.setdefault("GATE_NORM_FORCE_PYTHON", "0")
-
-from gate_norm import NELU, NiLU  # noqa: E402
+from gate_norm import NELU, NiLU
 
 
-def _run_one(kind: str, dtype: torch.dtype, M: int, N: int,
-             warmup: int = 5, iters: int = 20):
-    """One (dtype, M, N) microbench + numerical check."""
-    torch.manual_seed(0)
-    device = "cuda"
-    cls = NELU if kind == "nelu" else NiLU
-    act_kernel = cls(gamma_init=0.3, beta_init=0.2, eps=1e-6).to(device)
-    act_python = cls(gamma_init=0.3, beta_init=0.2, eps=1e-6).to(device)
-    # copy params so the two paths see identical γ, β
-    act_python.gamma.data.copy_(act_kernel.gamma.data)
-    act_python.beta.data.copy_(act_kernel.beta.data)
+_SHAPES = [
+    # (B, L, D)  — DeiT-Base FFN (B*L, 4*D)
+    ("DeiT-Base FFN",   (32, 197, 3072)),
+    # ConvNeXt-Tiny stage 3, channels-last (B, H, W, C)
+    ("ConvNeXt-T s3",   (32, 14, 14, 384)),
+    # Toy small/medium
+    ("Small (4,128)",   (4, 128)),
+    ("Medium (32,768)", (32, 768)),
+    ("Large (8,8192)",  (8, 8192)),
+    # Streaming tier
+    ("Huge (4,32768)",  (4, 32768)),
+]
 
-    x = torch.randn(M, N, device=device, dtype=dtype, requires_grad=True)
-    xp = x.detach().clone().requires_grad_(True)
 
-    # Kernel path
-    y_k = act_kernel(x)
-    # Python path — force disable CUDA dispatch
-    os.environ["GATE_NORM_FORCE_PYTHON"] = "1"
-    y_p = act_python(xp)
-    os.environ["GATE_NORM_FORCE_PYTHON"] = "0"
-
-    err_fwd = (y_k.float() - y_p.float()).abs().max().item()
-
-    dy = torch.randn_like(y_k)
-    y_k.backward(dy)
-    dy_p = dy.detach().clone()
-    y_p.backward(dy_p)
-
-    err_dx = (x.grad.float() - xp.grad.float()).abs().max().item()
-    err_dg = (act_kernel.gamma.grad - act_python.gamma.grad).abs().max().item()
-    err_db = (act_kernel.beta.grad - act_python.beta.grad).abs().max().item()
-
-    # Microbench — forward
-    x_bench = torch.randn(M, N, device=device, dtype=dtype)
-    torch.cuda.synchronize()
-    for _ in range(warmup):
-        _ = act_kernel(x_bench)
+def _bench_one(layer, x, n_warm=10, n_iter=100, do_backward=False):
+    grad_out = torch.randn_like(x) if do_backward else None
+    # warm
+    for _ in range(n_warm):
+        if do_backward:
+            x_in = x.detach().clone().requires_grad_(True)
+            y = layer(x_in)
+            y.backward(grad_out)
+        else:
+            with torch.no_grad():
+                _ = layer(x)
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    for _ in range(iters):
-        _ = act_kernel(x_bench)
+    for _ in range(n_iter):
+        if do_backward:
+            x_in = x.detach().clone().requires_grad_(True)
+            y = layer(x_in)
+            y.backward(grad_out)
+        else:
+            with torch.no_grad():
+                _ = layer(x)
     torch.cuda.synchronize()
-    fwd_sec = (time.perf_counter() - t0) / iters
-
-    # Microbench — backward
-    x_bench.requires_grad_(True)
-    dy_bench = torch.randn(M, N, device=device, dtype=dtype)
-    for _ in range(warmup):
-        y = act_kernel(x_bench)
-        y.backward(dy_bench)
-        x_bench.grad = None
-        act_kernel.gamma.grad = None
-        act_kernel.beta.grad = None
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(iters):
-        y = act_kernel(x_bench)
-        y.backward(dy_bench)
-        x_bench.grad = None
-        act_kernel.gamma.grad = None
-        act_kernel.beta.grad = None
-    torch.cuda.synchronize()
-    bwd_sec = (time.perf_counter() - t0) / iters
-
-    elem_bytes = dtype.itemsize
-    fwd_bytes = 2 * M * N * elem_bytes  # read z + write y
-    bwd_bytes = 3 * M * N * elem_bytes  # read z + read dy + write dz
-    fwd_gbs = fwd_bytes / fwd_sec / 1e9
-    bwd_gbs = (fwd_bytes + bwd_bytes) / bwd_sec / 1e9  # fwd is inside bwd loop
-
-    return {
-        "err_fwd": err_fwd, "err_dx": err_dx,
-        "err_dg": err_dg, "err_db": err_db,
-        "fwd_ms": fwd_sec * 1e3, "bwd_ms": bwd_sec * 1e3,
-        "fwd_gbs": fwd_gbs, "bwd_gbs": bwd_gbs,
-    }
+    return (time.perf_counter() - t0) / n_iter * 1e3  # ms / iter
 
 
 def main():
-    assert torch.cuda.is_available(), "needs a GPU"
-    shapes = [
-        (8192,  256),
-        (4096, 1024),
-        (2048, 4096),
-        ( 512, 8192),
-    ]
-    dtypes = [torch.float32, torch.float16, torch.bfloat16]
-    for kind in ("nelu", "nilu"):
-        print(f"\n=== {kind.upper()} ===")
-        print(f"{'dtype':>10} {'M':>6} {'N':>6}   "
-              f"{'err_y':>8} {'err_dx':>8} {'err_dγ':>8} {'err_dβ':>8}   "
-              f"{'fwd ms':>8} {'bwd ms':>8}   {'fwd GB/s':>10} {'bwd GB/s':>10}")
-        for dtype in dtypes:
-            for M, N in shapes:
-                r = _run_one(kind, dtype, M, N)
-                print(f"{str(dtype).replace('torch.',''):>10} {M:>6} {N:>6}   "
-                      f"{r['err_fwd']:>8.2e} {r['err_dx']:>8.2e} "
-                      f"{r['err_dg']:>8.2e} {r['err_db']:>8.2e}   "
-                      f"{r['fwd_ms']:>8.3f} {r['bwd_ms']:>8.3f}   "
-                      f"{r['fwd_gbs']:>10.1f} {r['bwd_gbs']:>10.1f}")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--shape", nargs="+", type=int, default=None,
+                    help="single ad-hoc shape to benchmark")
+    ap.add_argument("--dtype", default="bfloat16",
+                    choices=["float32", "float16", "bfloat16"])
+    ap.add_argument("--kind", default="nelu", choices=["nelu", "nilu"])
+    ap.add_argument("--axes", default="channel",
+                    help="norm_axes: 'channel', 'sample', or comma-sep ints")
+    args = ap.parse_args()
+
+    if not torch.cuda.is_available():
+        print("CUDA not available; nothing to benchmark.")
+        return
+
+    dtype = getattr(torch, args.dtype)
+    cls = NELU if args.kind == "nelu" else NiLU
+
+    if args.axes == "channel":
+        norm_axes = "channel"
+    elif args.axes == "sample":
+        norm_axes = "sample"
+    else:
+        norm_axes = tuple(int(a) for a in args.axes.split(","))
+
+    shapes = [(f"adhoc {tuple(args.shape)}", tuple(args.shape))] if args.shape else _SHAPES
+
+    print(f"# Gate Normalization benchmark — {args.kind.upper()}, dtype={args.dtype}, axes={args.axes}")
+    print(f"# {'name':<22} {'fwd-py(ms)':>12} {'fwd-cu(ms)':>12} {'bwd-py(ms)':>12} {'bwd-cu(ms)':>12} {'fwd×':>8} {'bwd×':>8}")
+
+    for name, shape in shapes:
+        x = torch.randn(*shape, dtype=dtype, device="cuda")
+        layer = cls(norm_axes=norm_axes).cuda()
+
+        # CUDA path
+        os.environ.pop("GATE_NORM_FORCE_PYTHON", None)
+        fwd_cu = _bench_one(layer, x, do_backward=False)
+        bwd_cu = _bench_one(layer, x, do_backward=True)
+
+        # Python path (same layer; dispatch reads env var on each call).
+        os.environ["GATE_NORM_FORCE_PYTHON"] = "1"
+        fwd_py = _bench_one(layer, x, do_backward=False)
+        bwd_py = _bench_one(layer, x, do_backward=True)
+        os.environ.pop("GATE_NORM_FORCE_PYTHON", None)
+
+        fwd_x = fwd_py / max(fwd_cu, 1e-9)
+        bwd_x = bwd_py / max(bwd_cu, 1e-9)
+        print(f"  {name:<22} {fwd_py:>12.3f} {fwd_cu:>12.3f} {bwd_py:>12.3f} {bwd_cu:>12.3f} {fwd_x:>7.2f}× {bwd_x:>7.2f}×")
 
 
 if __name__ == "__main__":

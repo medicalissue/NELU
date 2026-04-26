@@ -12,6 +12,8 @@ model: deit_base_patch16_224
 num_classes: 1000
 drop: 0.0
 drop_path: 0.1
+model_kwargs:
+  init_values: 1.0e-6          # LayerScale (Touvron et al., CaiT 2021).
 
 data_dir: /data/imagenet
 input_size: [3, 224, 224]
@@ -66,4 +68,5 @@ activation: gelu
 norm_axes: [-1]               # DeiT FFN activation follows a channel-mixing
                              # Linear (fc1) on (N, L, D); RMS axis is the
                              # channel dim = last axis.
+gamma_init: 1.0
 log_gate_stats_every: 1

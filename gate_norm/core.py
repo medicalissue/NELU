@@ -6,23 +6,20 @@ Gate Normalization (GN) generalizes self-gated activations of the form
     y = x · g(γ · x / rms(x))
 
 where ``g`` is a pointwise squashing function (sigmoid, Gaussian CDF, …)
-and ``γ`` is a learnable scalar with a soft positivity constraint via
-softplus reparameterization: ``γ_eff = softplus(γ_raw)``. This keeps γ
-strictly positive (anti-gate sign-flip is unphysical for self-gated
-activations — `Φ(γ x̂)` with γ < 0 inverts the gate so the layer outputs
-are non-positive, breaking the "save positives, drop negatives"
-inductive bias of ReLU/GELU/SiLU) while leaving γ_eff = 0 unreachable
-in finite training so the activation never collapses to a pure linear
-pass. The outer multiplication by ``x`` preserves the feature's DC
-component so the activation retains the family's deactivation bias.
+and ``γ`` is a single learnable scalar shared per module. The optimizer
+drives ``γ`` together with the rest of the model; in practice gradient
+flow keeps it positive — anti-gating (``γ < 0``) inverts the gate and
+flips the "keep positives, drop negatives" inductive bias, which yields
+no useful loss signal — so no explicit positivity constraint is needed.
 
-The forward pass is pure PyTorch so it composes cleanly with torch.compile,
-AMP autocast, and arbitrary reduction axes (including non-contiguous subsets
-such as ``(2, 3)`` used after depthwise convolutions). Statistics are upcast
-to float32 internally to avoid fp16/bf16 underflow.
+The forward pass is plain PyTorch so it composes cleanly with
+torch.compile, AMP autocast, and arbitrary reduction axes (including
+non-contiguous subsets such as ``(2, 3)`` used after depthwise
+convolutions). Statistics are upcast to float32 internally to avoid
+fp16/bf16 underflow.
 
-Subclasses implement :meth:`_gate_python` and advertise their fused kernel
-name via ``_CUDA_OP``.
+Subclasses implement :meth:`_gate_python` to select the pointwise gate
+function.
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .dispatch import should_use_cuda
 from .layout import DimsLike, NormAxes, resolve_axes
@@ -43,15 +39,8 @@ _DEFAULT_GAMMA_INIT = 1.0
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 
 
-def _inv_softplus(y: float) -> float:
-    """Inverse of softplus: solve softplus(x) = y for x."""
-    if y <= 0:
-        raise ValueError(f"softplus output must be > 0, got {y}")
-    return math.log(math.expm1(y))
-
-
 class GateNorm(nn.Module):
-    """Scale-invariant self-gated activation with a learnable scalar γ.
+    """Scale-invariant self-gated activation with a single learnable γ.
 
     Parameters
     ----------
@@ -60,12 +49,20 @@ class GateNorm(nn.Module):
     eps : float, default ``1e-6``
         Numerical floor added inside the RMS before sqrt.
     gamma_init : float, default ``1.0``
-        Initial *effective* γ at step 0 (the value the gate actually
-        sees). γ_eff = softplus(γ_raw); the raw learnable parameter is
-        initialised to inv_softplus(gamma_init).
+        Initial value of the learnable γ at step 0.
+
+    Subclasses provide ``_gate_python`` (the pure-PyTorch reference
+    implementation, used on CPU / MPS / autocast-disabled paths) and
+    optionally ``_CUDA_KIND`` — the integer enum understood by the fused
+    CUDA backend (``0`` for NELU/Φ, ``1`` for NiLU/σ). When set, and the
+    runtime conditions in :func:`gate_norm.dispatch.should_use_cuda` are
+    met, the fused kernel takes the call. Subclasses that don't set
+    ``_CUDA_KIND`` (e.g. user-defined gates) stay on the PyTorch path.
     """
 
-    _CUDA_OP: str | None = None
+    # CUDA gate kind for this module. None disables the fused path; the
+    # forward then falls back to ``_gate_python``. Subclasses override.
+    _CUDA_KIND: int | None = None
 
     def __init__(
         self,
@@ -77,18 +74,10 @@ class GateNorm(nn.Module):
         super().__init__()
         self.norm_axes = norm_axes
         self.eps = eps
-        # gamma_init is the effective γ at step 0; store γ_raw = inv_softplus.
-        raw = _inv_softplus(float(gamma_init))
-        self.gamma_raw = nn.Parameter(
-            torch.full((1,), raw, dtype=torch.float32),
-            requires_grad=True,
+        self.gamma = nn.Parameter(
+            torch.full((1,), float(gamma_init), dtype=torch.float32)
         )
         self._gate_norm_module = True
-
-    @property
-    def gamma(self) -> torch.Tensor:
-        """Effective γ used by the gate: softplus(γ_raw), strictly positive."""
-        return F.softplus(self.gamma_raw)
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
@@ -98,40 +87,24 @@ class GateNorm(nn.Module):
         return resolve_axes(z.ndim, self.norm_axes)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        # The CUDA fused path bakes γ in as a Python float and drops the
-        # gradient, so always use the pure-PyTorch path. inductor still fuses.
         axes = self._axes(z)
-        gamma_eff = self.gamma
+        if self._CUDA_KIND is not None and should_use_cuda(z):
+            # Fused kernel path: imports lazily so CUDA-less environments
+            # never reach the cpp_extension build.
+            from . import cuda as _cuda
+            return _cuda.gate_norm_cuda_forward(
+                z, self.gamma, self._CUDA_KIND, axes, float(self.eps),
+            )
+        # Pure PyTorch fallback.
         rsigma = layer_stats(z, axes, self.eps)
         z32 = z.float() if z.dtype != torch.float32 else z
-        t = gamma_eff * z32 * rsigma
-        gate = type(self)._gate_python(t)
+        gate = type(self)._gate_python(self.gamma * z32 * rsigma)
         return z * gate.to(z.dtype)
 
     def extra_repr(self) -> str:
         return (
             f"norm_axes={self.norm_axes!r}, eps={self.eps}, "
-            f"gamma={self.gamma.item():.3e} (raw={self.gamma_raw.item():.3e})"
-        )
-
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict,
-        missing_keys, unexpected_keys, error_msgs,
-    ):
-        # Back-compat: legacy `gamma` (effective γ stored directly) → gamma_raw.
-        gamma_key = prefix + "gamma"
-        gamma_raw_key = prefix + "gamma_raw"
-        if gamma_key in state_dict and gamma_raw_key not in state_dict:
-            t = state_dict.pop(gamma_key)
-            if isinstance(t, torch.Tensor):
-                t = t.reshape(1).float().clamp(min=1e-12)
-                state_dict[gamma_raw_key] = torch.log(torch.expm1(t))
-        beta_key = prefix + "beta"
-        if beta_key in state_dict:
-            state_dict.pop(beta_key)
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs,
+            f"gamma={self.gamma.item():.3e}"
         )
 
 

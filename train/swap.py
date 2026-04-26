@@ -219,7 +219,7 @@ def gelu_to_nelu(
     *,
     norm_axes: NormAxes | DimsLike = "channel",
     eps: float = 1e-6,
-    gamma_init: float = 0.0,
+    gamma_init: float = 1.0,
 ) -> int:
     """Swap every GELU instance for :class:`gate_norm.NELU`."""
     return _replace_with_policy(
@@ -233,7 +233,7 @@ def silu_to_nilu(
     *,
     norm_axes: NormAxes | DimsLike = "channel",
     eps: float = 1e-6,
-    gamma_init: float = 0.0,
+    gamma_init: float = 1.0,
 ) -> int:
     """Swap every SiLU instance for :class:`gate_norm.NiLU`."""
     return _replace_with_policy(
@@ -248,7 +248,7 @@ def apply_gate_normalization(
     *,
     norm_axes: NormAxes | DimsLike | None = None,
     eps: float = 1e-6,
-    gamma_init: float = 0.0,
+    gamma_init: float = 1.0,
     model_name: str = "",
 ) -> int:
     """Dispatch based on a string activation name.
@@ -357,7 +357,7 @@ def replace_activation_auto_axes(
     activation_order: str = "post",
     default_axes: NormAxes | DimsLike = "sample",
     eps: float = 1e-6,
-    gamma_init: float = 0.0,
+    gamma_init: float = 1.0,
 ) -> int:
     """Replace baseline activations with ``gate_cls``, picking axes from a
     nearby :class:`nn.Conv2d` in the module tree.

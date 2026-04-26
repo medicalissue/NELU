@@ -42,13 +42,10 @@ Useful flags:
   reduction axes. Accepts the ``"channel"`` / ``"sample"`` aliases or an
   explicit axis list such as ``[-1]`` or ``[2, 3]``.
 * ``--torchcompile [backend]`` (alias: ``inductor`` when no arg), plus
-  ``--torchcompile-mode {default,reduce-overhead,max-autotune,…}`` — wrap
-  the training task in ``torch.compile``. Gate-Normalization's fused
-  CUDA kernels are registered via ``torch.library.custom_op`` with
-  ``register_fake`` tensors, so Dynamo traces through them without graph
-  breaks. The baseline (GELU/SiLU) arm compiles unconditionally; the
-  Gate-Normalization arm falls through to the Python path on the first
-  iteration and the CUDA op on the rest.
+  ``--torchcompile-mode {default,reduce-overhead,max-autotune,…}`` —
+  wrap the training task in ``torch.compile``. Gate-Normalization's
+  forward pass is plain PyTorch, so Inductor traces and fuses it
+  end-to-end without help.
 * ``--amp`` + ``--amp-dtype {float16,bfloat16}`` — bfloat16 is the
   preferred choice on Hopper (no GradScaler needed, wider dynamic range).
   Leave at ``float16`` for bitwise fidelity to MMPretrain/timm baselines.
@@ -56,6 +53,50 @@ Useful flags:
 ``torchcompile``/``torchcompile_mode`` are also exposed in every YAML
 (null by default) so ``--config`` alone is enough to turn compile on
 for a production sweep.
+
+## Fused CUDA kernel
+
+NELU / NiLU forward and backward have a fused CUDA implementation under
+``gate_norm/csrc/``. It is built on first call via
+``torch.utils.cpp_extension.load`` and cached under
+``~/.cache/torch_extensions/`` (re-import is essentially free
+afterwards). The kernel implements the RMS-only form
+
+    rsigma = 1 / sqrt(mean(z²) + eps)
+    y      = z · g(γ · z · rsigma)
+
+with three dispatch tiers selected at launch time:
+
+* **Vectorized register-cached** for medium ``N`` (≤ ~4 K bf16 / fp16,
+  ≤ ~2 K fp32 backward): row stays in per-thread registers across both
+  reduction and emit passes, smem holds only warp-staging scratch.
+* **Smem-cached** for larger rows that still fit in dynamic shared
+  memory (Hopper opt-in cap ~228 KB, Ampere ~164 KB).
+* **Streaming two-pass** for ``N`` beyond the smem cap: stream ``z``
+  twice, share ``rsigma`` / ``S`` via global scratch.
+
+The dgamma reduction uses one ``atomicAdd`` per block into a single
+fp32 scalar — contention is ``O(M)`` and never the bottleneck for
+typical FFN row counts.
+
+The pure-PyTorch path remains the reference; the kernel is taken only
+when the input is on CUDA and dtype is fp32 / fp16 / bf16. To bisect
+numerical mismatches between paths, set
+``GATE_NORM_FORCE_PYTHON=1`` to force the PyTorch path everywhere
+without rebuilding.
+
+Build troubleshooting:
+
+* The kernel needs the CUDA SDK (``nvcc``) on the system PATH and
+  ``ninja`` (``pip install ninja``). Both are present in the standard
+  PyTorch ``nvidia/cuda:*-devel`` images.
+* Build artefacts live under
+  ``~/.cache/torch_extensions/<py_ver>/gate_norm_fused/``. Delete this
+  directory to force a rebuild after CUDA SDK changes.
+* If you see ``cudaErrorInvalidValue`` on Hopper / Ampere with very
+  long rows, the dynamic-smem opt-in is failing — check
+  ``cudaDeviceProp.sharedMemPerBlockOptin`` returns the expected
+  ~228 KB / ~164 KB.
 
 ## EMA
 

@@ -84,4 +84,5 @@ norm_axes: sample         # Initial swap default; overridden per-location
                              # MBConv conv_pw-adjacent activation uses (1,)
                              # (channel mixing), conv_dw-adjacent uses (2, 3)
                              # (spatial mixing).
+gamma_init: 1.0
 log_gate_stats_every: 1

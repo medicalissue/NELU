@@ -30,7 +30,7 @@
 #   DATA_SNAPSHOT       e.g. snap-0adfaa42ce378623c
 #   CKPT_BUCKET         e.g. s3://nelu-checkpoints
 #   WANDB_API_KEY       W&B api key
-#   WANDB_PROJECT       default gate-normalization
+#   WANDB_PROJECT       default imnet-gate-normalization
 #   WANDB_ENTITY        optional
 #   AWS_DEFAULT_REGION  us-west-2
 #
@@ -50,7 +50,7 @@ log() { printf '[orchestrate %s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
 
 : "${CKPT_BUCKET:?CKPT_BUCKET not set (e.g. s3://nelu-checkpoints)}"
 : "${WANDB_API_KEY:?WANDB_API_KEY not set}"
-: "${WANDB_PROJECT:=gate-normalization}"
+: "${WANDB_PROJECT:=imnet-gate-normalization}"
 : "${WANDB_ENTITY:=}"
 : "${AWS_DEFAULT_REGION:=us-west-2}"
 : "${LEASE_TTL:=600}"

@@ -20,16 +20,14 @@ CIFAR_BASE = CIFAR_DIR / "_base.yaml"
 # Model-specific stubs under configs/cifar100/ inherit from _base.yaml via
 # the ``include:`` directive resolved by train/cifar.py::_load_config_with_includes.
 CIFAR_STUBS = sorted(p for p in CIFAR_DIR.glob("*.yaml") if p.name != "_base.yaml")
-OTHER_CONFIGS = [
-    CIFAR_BASE,
-    REPO_ROOT / "configs" / "ablation" / "gamma_init.yaml",
-]
+OTHER_CONFIGS = [CIFAR_BASE]
 
 _REQUIRED_IMAGENET_KEYS = {
     "model", "num_classes", "data_dir",
     "batch_size", "opt", "weight_decay",
     "sched", "epochs", "warmup_epochs",
     "activation", "norm_axes",
+    "gamma_init",
     "seed",
 }
 
@@ -124,6 +122,26 @@ def test_convnext_deit_swin_share_mmpretrain_defaults() -> None:
         assert cfg["color_jitter"] == 0.0, (
             f"{path.name}: MMPretrain pipeline has no ColorJitter"
         )
+
+
+def test_transformer_configs_set_layer_scale() -> None:
+    """All ImageNet vision-transformer recipes (DeiT, Swin, ConvNeXt)
+    initialize LayerScale at 1e-6 — the standard CaiT setting that
+    paper-default NELU runs adopt."""
+    for path in IMAGENET_CONFIGS:
+        cfg = yaml.safe_load(path.read_text())
+        model = cfg["model"]
+        if model.startswith("efficientnet_"):
+            continue
+        kwargs = cfg.get("model_kwargs", {})
+        if model.startswith("convnext_"):
+            assert kwargs.get("ls_init_value") == 1.0e-6, (
+                f"{path.name}: ConvNeXt expects ls_init_value=1e-6"
+            )
+        else:
+            assert kwargs.get("init_values") == 1.0e-6, (
+                f"{path.name}: transformer expects init_values=1e-6"
+            )
 
 
 def test_imagenet_configs_share_unified_ema() -> None:

@@ -4,12 +4,6 @@ Walks an ``nn.Module`` tree, collects the γ scalar from every Gate
 Normalization instance, and returns a flat dict of scalars suitable for
 ``wandb.log``. The caller decides when to log (typically once per epoch).
 
-Since γ is now a non-learnable buffer driven by :class:`GammaWarmup`, the
-per-layer values are typically all equal during training. We still emit
-the per-layer keys so any downstream tooling that already expects them
-keeps working — the aggregates (``mean``, ``std``, ...) are the most
-useful in practice.
-
 Key shape: ``<prefix>/gamma/layer_<i>`` for per-module values and
 ``<prefix>/gamma/<agg>`` for aggregates, where ``agg ∈ {mean, min, max,
 std, abs_mean, n_negative, n_modules}``.

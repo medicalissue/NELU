@@ -14,6 +14,8 @@ model: swin_tiny_patch4_window7_224
 num_classes: 1000
 drop: 0.0
 drop_path: 0.2
+model_kwargs:
+  init_values: 1.0e-6          # LayerScale on the residual branches.
 
 data_dir: /data/imagenet
 input_size: [3, 224, 224]
@@ -68,4 +70,5 @@ activation: gelu
 norm_axes: [-1]               # Swin FFN activation follows a channel-mixing
                              # Linear (fc1) on (N, L, D); RMS axis is the
                              # channel dim = last axis.
+gamma_init: 1.0
 log_gate_stats_every: 1

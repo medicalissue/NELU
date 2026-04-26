@@ -62,4 +62,5 @@ activation: gelu
 norm_axes: [-1]               # ConvNeXt block = ViT-style FFN; activation
                              # follows a channel-mixing Linear at channels-last
                              # layout (N,H,W,C), so RMS axis is the channel dim.
+gamma_init: 1.0
 log_gate_stats_every: 1

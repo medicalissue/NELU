@@ -1,14 +1,20 @@
-"""Where to run the forward pass: PyTorch or the fused CUDA kernel.
+"""Runtime backend selection for Gate Normalization forward.
 
-`GateNorm.forward` consults :func:`should_use_cuda` on every call. The dispatch
-rule is dead simple: if the tensor lives on CUDA **and** the kernel is
-available for this dtype, take the fused path; otherwise stay in PyTorch. No
-environment variables, no global toggles — the kernel is an implementation
-detail, not a feature flag.
+:meth:`gate_norm.GateNorm.forward` consults :func:`should_use_cuda` on
+every call. The rule is intentionally narrow: the fused CUDA kernel
+takes the call iff
 
-The one escape hatch is ``GATE_NORM_FORCE_PYTHON=1`` for debugging. It forces
-the PyTorch path everywhere so numerical mismatches between the two backends
-can be bisected without rebuilding.
+* the input lives on CUDA,
+* its dtype is one of (fp32, fp16, bf16),
+* CUDA is available to PyTorch in this process, and
+* the user has not set ``GATE_NORM_FORCE_PYTHON=1`` (debug escape hatch).
+
+If any condition fails, the pure PyTorch path runs — guaranteeing
+identical numerical semantics on CPU, MPS, and CUDA-less builds.
+
+The CUDA extension itself is built lazily by :mod:`gate_norm.cuda` on
+first call; we don't probe it here so that environments without ``nvcc``
+(macOS, CPU-only Linux) never trigger a build attempt.
 """
 
 from __future__ import annotations
@@ -18,16 +24,22 @@ import os
 import torch
 
 
-_FORCE_PYTHON = os.environ.get("GATE_NORM_FORCE_PYTHON", "0") == "1"
-
 _SUPPORTED_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
+
+
+def _force_python() -> bool:
+    """Read the escape-hatch env var on every call so tests can flip it
+    without reloading or re-importing the gate_norm package."""
+    return os.environ.get("GATE_NORM_FORCE_PYTHON", "0") == "1"
 
 
 def should_use_cuda(z: torch.Tensor) -> bool:
     """True iff the fused CUDA kernel should handle ``z``."""
-    if _FORCE_PYTHON:
+    if _force_python():
         return False
     if not z.is_cuda:
+        return False
+    if not torch.cuda.is_available():
         return False
     if z.dtype not in _SUPPORTED_DTYPES:
         return False

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """ImageNet-1k trainer for the Gate Normalization paper.
 
-Forked from timm's reference ``train.py`` (Ross Wightman, Apache-2.0). The
-only project-specific additions over upstream are:
+Forked from timm's reference ``train.py`` (Ross Wightman, Apache-2.0).
+The only project-specific additions over upstream are:
 
-1. ``--activation`` / ``--gamma-init`` / ``--beta-init`` / ``--norm-axes``
-   CLI arguments plumbed into a :func:`train.swap.apply_gate_normalization`
-   call after the model is built.
+1. ``--activation`` / ``--gamma-init`` / ``--norm-axes`` CLI arguments
+   plumbed into a :func:`train.swap.apply_gate_normalization` call
+   after the model is built.
 2. Gate-normalization diagnostics (γ trajectories, gate entropy, weight
    norms) logged alongside the standard loss/accuracy metrics.
-3. W&B run-id persistence across preemption resumes: the run ID is stored
-   in the checkpoint so a resumed job reconnects to the same W&B run
-   without needing ``--wandb-resume-id`` on the command line.
+3. W&B run-id persistence across preemption resumes: the run ID is
+   stored in the checkpoint so a resumed job reconnects to the same
+   W&B run without needing ``--wandb-resume-id`` on the command line.
 
-Everything else — recipes, optimizers, schedulers, mixup, EMA — is handled
-by upstream timm and uses upstream flag names.
+Everything else — recipes, optimizers, schedulers, mixup, EMA — is
+handled by upstream timm and uses upstream flag names.
 """
 import argparse
 import copy
@@ -51,20 +51,12 @@ from timm.task import (
 )
 
 # ── Gate Normalization integration ────────────────────────────────
-# All project-specific additions on top of upstream timm train.py live in
-# gate_norm/ and train/{swap,diagnostics}.py. Upstream handles the recipes
-# (BCE loss, head-init-bias, aug-repeats, mixup-prob, LAMB, etc.) natively.
-from gate_norm import GammaWarmup  # noqa: E402
+# All project-specific additions on top of upstream timm train.py live
+# in gate_norm/ and train/{swap,diagnostics}.py. Upstream handles the
+# recipes (BCE loss, head-init-bias, aug-repeats, mixup-prob, LAMB,
+# etc.) natively.
 from train.swap import apply_gate_normalization  # noqa: E402
 from train.diagnostics import gamma_stats, gate_stats, weight_norms  # noqa: E402
-
-
-def _sync_gamma_to_ema(model_ema, model):
-    """No-op: γ is now a learnable Parameter (``γ_raw``) and the standard
-    EMA already lerps it correctly. Kept as a stub so existing call sites
-    don't have to be edited.
-    """
-    return
 
 
 try:
@@ -130,14 +122,8 @@ group.add_argument('--activation', default='gelu', type=str,
                    help='gelu/silu/relu leave the model unchanged; nelu swaps every '
                         'GELU for NELU, nilu swaps every SiLU for NiLU.')
 group.add_argument('--gamma-init', type=float, default=1.0,
-                   help='Initial *effective* γ at step 0 (what the gate '
-                        'sees). γ_eff = softplus(γ_raw); γ_raw stored as '
-                        'inv_softplus(gamma_init).')
-group.add_argument('--gamma-final', type=float, default=1.0,
-                   help='Final γ value held for the rest of training.')
-group.add_argument('--gamma-warmup-schedule', type=str, default='linear',
-                   choices=['linear', 'cosine', 'constant'],
-                   help='Shape of the γ ramp 0 → final.')
+                   help='Initial value of the learnable γ at step 0; '
+                        'the optimizer drives it from there.')
 group.add_argument('--norm-axes', default=None,
                    help='Axes over which the gate statistics are computed. '
                         'Accepts an alias ("channel" / "sample") or an '
@@ -588,15 +574,10 @@ def main():
         model_name=args.model,
     )
 
-    # γ is left at its init value here; GammaWarmup updates the buffer
-    # every optimizer step. The torch.compile call below uses dynamic=True
-    # so inductor doesn't specialize γ at trace time and the warmup ramp
-    # actually fires at runtime.
     if utils.is_primary(args):
         _logger.info(
             f'[activation] {args.activation}: swapped {n_swapped} modules '
-            f'(norm_axes={args.norm_axes!r}, gamma_init={args.gamma_init}, '
-            f'gamma_final={args.gamma_final}, schedule={args.gamma_warmup_schedule})'
+            f'(norm_axes={args.norm_axes!r}, gamma_init={args.gamma_init})'
         )
 
     if args.num_classes is None:
@@ -1017,13 +998,11 @@ def main():
         task.prepare_distributed(device_ids=[device])
 
     # Compile task if requested (should be done after DDP).
-    # dynamic=True so inductor doesn't specialize the GammaWarmup-driven
-    # γ buffer at trace time; without it the warmup ramp gets baked out.
     if args.torchcompile:
         assert has_compile, 'A version of torch w/ torch.compile() is required for --compile, possibly a nightly.'
         if utils.is_primary(args):
-            _logger.info(f"Compiling task with backend={args.torchcompile}, mode={args.torchcompile_mode}, dynamic=True")
-        task = torch.compile(task, backend=args.torchcompile, mode=args.torchcompile_mode, dynamic=True)
+            _logger.info(f"Compiling task with backend={args.torchcompile}, mode={args.torchcompile_mode}")
+        task = torch.compile(task, backend=args.torchcompile, mode=args.torchcompile_mode)
 
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric if loader_eval is not None else 'loss'
@@ -1106,24 +1085,6 @@ def main():
         else:
             lr_scheduler.step(start_epoch)
 
-    # ── γ warmup scheduler ──
-    # Ramps the (non-learnable) γ buffer in every NELU/NiLU module from
-    # gamma_init → gamma_final over the same number of optimizer steps as
-    # the LR warmup. For NELU/NiLU we tie γ to the LR warmup so the gate
-    # nonlinearity ramps in lockstep with the learning rate.
-    gamma_warmup_steps = int(args.warmup_epochs) * updates_per_epoch
-    gamma_scheduler = GammaWarmup(
-        model,
-        warmup_steps=gamma_warmup_steps,
-        init=args.gamma_init,
-        final=args.gamma_final,
-        schedule=args.gamma_warmup_schedule,
-    )
-    if start_epoch > 0:
-        gamma_scheduler.step(start_epoch * updates_per_epoch)
-    if utils.is_primary(args):
-        _logger.info(f'γ scheduler: {gamma_scheduler}')
-
     if utils.is_primary(args):
         if args.warmup_prefix:
             sched_explain = '(warmup_epochs + epochs + cooldown_epochs). Warmup added to total when warmup_prefix=True'
@@ -1170,7 +1131,6 @@ def main():
                 mixup_fn=mixup_fn,
                 num_updates_total=num_epochs * updates_per_epoch,
                 naflex_mode=naflex_mode,
-                gamma_scheduler=gamma_scheduler,
             )
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
@@ -1234,8 +1194,9 @@ def main():
             else:
                 eval_metrics = None
 
-            # Gate Normalization diagnostics — γ trajectories for NELU/NiLU
-            # and gate entropy/variance for any activation class.
+            # Gate Normalization diagnostics — γ trajectories for NELU/NiLU,
+            # gate entropy/variance for any activation, and Frobenius weight
+            # norms for the whole model.
             if args.log_gate_stats_every > 0 and (epoch % args.log_gate_stats_every == 0):
                 gn_metrics: dict = {}
                 if args.activation in ("nelu", "nilu"):
@@ -1247,6 +1208,7 @@ def main():
                     except Exception as e:  # pragma: no cover — diagnostic-only
                         if utils.is_primary(args):
                             _logger.warning(f"[gate-norm] gate-stats probe failed: {e}")
+                gn_metrics.update(weight_norms(model))
                 if gn_metrics:
                     train_metrics.update(gn_metrics)
 
@@ -1343,7 +1305,6 @@ def train_one_epoch(
         mixup_fn=None,
         num_updates_total=None,
         naflex_mode=False,
-        gamma_scheduler=None,
 ):
     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
         if args.prefetcher and loader.mixup_enabled:
@@ -1476,16 +1437,8 @@ def train_one_epoch(
 
         num_updates += 1
         optimizer.zero_grad()
-        if gamma_scheduler is not None:
-            gamma_scheduler.step(num_updates)
         if model_ema is not None:
             model_ema.update(model, step=num_updates)
-            # γ is deterministic (driven by GammaWarmup, not by gradients);
-            # the EMA-lagged buffer would only delay convergence at eval
-            # time. Force-sync after every EMA step so model_ema sees the
-            # same γ as the live model.
-            if gamma_scheduler is not None:
-                _sync_gamma_to_ema(model_ema, model)
 
         if args.synchronize_step:
             if device.type == 'cuda':

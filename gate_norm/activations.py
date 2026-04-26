@@ -1,14 +1,13 @@
 """Gate-normalized instances of GELU and SiLU.
 
-* ``NELU`` — gate function is the Gaussian CDF Φ, so ``NELU`` is the
-  scale-invariant counterpart of GELU.
-* ``NiLU`` — gate function is the sigmoid, making ``NiLU`` the
+* :class:`NELU` — gate function is the Gaussian CDF Φ, so ``NELU`` is
+  the scale-invariant counterpart of GELU.
+* :class:`NiLU` — gate function is the sigmoid, making ``NiLU`` the
   scale-invariant counterpart of SiLU.
 
-Both are drop-in replacements for their baselines: construct one in place of
-``nn.GELU()`` / ``nn.SiLU()`` and pass ``norm_axes`` matching the mixing
-axes of the preceding linear operation. ``γ`` is a non-learnable buffer
-driven by the trainer's warmup scheduler (see :mod:`gate_norm.scheduler`).
+Both are drop-in replacements for their baselines: construct one in
+place of ``nn.GELU()`` / ``nn.SiLU()`` and pass ``norm_axes`` matching
+the mixing axes of the preceding linear operation.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ def _phi(t: torch.Tensor) -> torch.Tensor:
 class NELU(GateNorm):
     """GELU with gate normalization: ``y = z · Φ(γ · z / rms(z))``."""
 
-    _CUDA_OP = "nelu"
+    _CUDA_KIND = 0  # GATE_PHI in gate_norm_common.cuh
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
@@ -40,7 +39,7 @@ class NELU(GateNorm):
 class NiLU(GateNorm):
     """SiLU with gate normalization: ``y = z · σ(γ · z / rms(z))``."""
 
-    _CUDA_OP = "nilu"
+    _CUDA_KIND = 1  # GATE_SIGMOID in gate_norm_common.cuh
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:

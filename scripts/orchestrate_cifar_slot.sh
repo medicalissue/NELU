@@ -40,7 +40,7 @@ log() {
 
 : "${CKPT_BUCKET:?CKPT_BUCKET not set (e.g. s3://nelu-checkpoints)}"
 : "${WANDB_API_KEY:?WANDB_API_KEY not set}"
-: "${WANDB_PROJECT:=nelu-cifar}"
+: "${WANDB_PROJECT:=cifar-gate-normalization}"
 : "${WANDB_ENTITY:=}"
 : "${AWS_DEFAULT_REGION:=us-west-2}"
 : "${LEASE_TTL:=600}"
@@ -256,11 +256,7 @@ run_job() {
 
     # setsid → trainer becomes its own session leader, so the preempt
     # watcher can SIGTERM the whole process tree by pgid (== pid).
-    # GATE_NORM_FORCE_PYTHON=1: bench on A10G shows the native PyTorch path
-    # under torch.compile is faster than the fused CUDA kernel for CIFAR's
-    # large reduction axis (sample axes, N=CHW=16384), where the kernel falls
-    # to its Tier-3 global-atomicAdd fallback. ImageNet keeps the fused path.
-    setsid env "${entity_env[@]}" GATE_NORM_FORCE_PYTHON=1 python -m train.cifar \
+    setsid env "${entity_env[@]}" python -m train.cifar \
         --config "$cfg" \
         --activation "$act" \
         --seed "$seed" \

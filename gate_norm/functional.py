@@ -1,9 +1,9 @@
 """Functional helpers for quick experiments.
 
-These mirror ``torch.nn.functional.gelu`` / ``torch.nn.functional.silu`` but
-apply Gate Normalization with a user-supplied ``γ``. Production code should
-use the :class:`gate_norm.NELU` / :class:`gate_norm.NiLU` modules so γ ships
-through state_dict and the warmup scheduler.
+These mirror ``torch.nn.functional.gelu`` / ``torch.nn.functional.silu``
+but apply Gate Normalization with a user-supplied ``γ``. Production
+code should use the :class:`gate_norm.NELU` / :class:`gate_norm.NiLU`
+modules so γ is a learned parameter that ships through ``state_dict``.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 
 def _gated(z, gate_fn, gamma, axes, eps: float) -> torch.Tensor:
     rsigma = layer_stats(z, axes, eps)
-    # Keep the outer multiplication in the caller's dtype; statistics and
+    # Outer multiplication stays in the caller's dtype; statistics and
     # the gate are resolved in float32 to match the module path.
     z32 = z.float() if z.dtype != torch.float32 else z
     gate = gate_fn(gamma * z32 * rsigma)

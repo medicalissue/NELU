@@ -8,12 +8,9 @@ Gate Normalization replaces the standard self-gated activation
     y = x · g(γ · x / rms(x)),    rms(x) = sqrt(mean(x²) + eps),
 
 where `g` is a pointwise squashing function (Gaussian CDF or sigmoid)
-and `γ` is a non-learnable scalar driven by a warmup scheduler that
-ramps γ from `0` to `1` over the LR warmup horizon. At step 0 the
-activation is `y = 0.5 · x`, an exact linear identity that the
-optimizer can absorb; by the end of warmup the activation has settled
-into its production form. Applied to GELU and SiLU this yields two
-drop-in replacements we call **NELU** and **NiLU**.
+and `γ` is a single learnable scalar shared per module. Applied to GELU
+and SiLU this yields two drop-in replacements we call **NELU** and
+**NiLU**.
 
 | Instance | Base activation | Gate function      |
 |----------|-----------------|--------------------|
@@ -28,23 +25,30 @@ cd gate-normalization
 pip install -e '.[train]'
 ```
 
-Python ≥ 3.10 and PyTorch ≥ 2.1. The pure-PyTorch implementation runs
-on CPU and CUDA out of the box; `torch.compile` (Inductor) fuses the
-forward pass into a single reduction kernel.
+Python ≥ 3.10 and PyTorch ≥ 2.1. The implementation is pure PyTorch and
+runs on CPU and CUDA out of the box; `torch.compile` (Inductor) fuses
+the forward pass into a single reduction kernel.
+
+An optional **fused CUDA kernel** is shipped under `gate_norm/csrc/` and
+auto-builds at first call on CUDA inputs (requires `nvcc`). It collapses
+the RMS reduction, scalar gate, and outer multiplication into one
+register-resident pass and gives roughly 2–3× throughput over the
+PyTorch path on supported `(M, N)` layouts. CUDA-less environments stay
+on the PyTorch path with no build attempt; set
+`GATE_NORM_FORCE_PYTHON=1` to disable the kernel even on CUDA.
 
 ## Usage
 
-Gate Normalization layers are plain `nn.Module`s and can be constructed in
-place of `nn.GELU()` / `nn.SiLU()`:
+Gate Normalization layers are plain `nn.Module`s and can be constructed
+in place of `nn.GELU()` / `nn.SiLU()`:
 
 ```python
-import torch.nn as nn
 from gate_norm import NELU, NiLU
 
-# Drop-in for channels-last or transformer inputs (default).
+# Channel-axis statistics (default): transformer FFN, channels-last conv blocks.
 act = NELU()
 
-# For NCHW conv feature maps, reduce over (C, H, W).
+# (C, H, W) statistics for NCHW conv feature maps.
 act_conv = NiLU(norm_axes="sample")
 ```
 
@@ -61,13 +65,13 @@ apply_gate_normalization(model, "nelu")  # swaps every GELU -> NELU
 
 ## Reproducing the paper
 
-Eight ImageNet-1k recipes and one CIFAR-100 recipe are provided under
-`configs/`. Each ImageNet config is ported verbatim from a reproduced
-reference (MMPretrain for ConvNeXt / DeiT / Swin; timm's
-`training_script.mdx` for EfficientNet) — see the header comment in each
-file for the source URL and the reproduced Top-1 number.
+Eight ImageNet-1k recipes and seven CIFAR-100 recipes are provided
+under `configs/`. Each ImageNet config is ported verbatim from a
+reproduced reference (MMPretrain for ConvNeXt / DeiT / Swin; timm's
+`training_script.mdx` for EfficientNet) — see the header comment in
+each file for the source URL and the reproduced Top-1 number.
 
-### Single run (locally)
+### ImageNet
 
 ```bash
 torchrun --nproc_per_node=8 -m train.imagenet \
@@ -77,24 +81,15 @@ torchrun --nproc_per_node=8 -m train.imagenet \
     --output ./runs/convnext_tiny-nelu
 ```
 
-Set `--activation gelu` (the default) to train the baseline, or `silu` /
-`nilu` for the SiLU/NiLU pair.
-
-### Single run (SkyPilot)
-
-```bash
-sky jobs launch -n convnext-tiny-nelu sky/train.yaml \
-    --env CONFIG=configs/imagenet/convnext_tiny.yaml \
-    --env ACTIVATION=nelu
-```
-
-Managed jobs recover automatically from spot preemption; see
-[`sky/README.md`](sky/README.md).
+Set `--activation gelu` (the default) to train the baseline, or
+`silu` / `nilu` for the SiLU/NiLU pair.
 
 ### CIFAR-100
 
 ```bash
-python -m train.cifar --config configs/cifar100.yaml --activation nelu
+python -m train.cifar \
+    --config configs/cifar100/resnet20.yaml \
+    --activation nelu
 ```
 
 ### Robustness evaluation
@@ -121,11 +116,10 @@ python -m eval.cifar_robustness \
 ## Repository layout
 
 ```
-gate_norm/        Library: GateNorm, NELU, NiLU, fused CUDA backend.
+gate_norm/        Library: GateNorm, NELU, NiLU, NELUGLU, NiLUGLU.
 train/            Trainers: imagenet.py (timm-based), cifar.py.
 eval/             Robustness eval: imagenet_robustness.py, cifar_robustness.py.
 configs/          Recipe YAMLs, one per model.
-sky/              SkyPilot task specs.
 scripts/          Helper scripts (prepare_data.sh).
 tests/            Unit tests.
 docs/             Method derivation and reproduction notes.

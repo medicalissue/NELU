@@ -9,9 +9,8 @@ We normalize the gate branch the same way as the pointwise activations::
     NiLUGLU(x) = W_down( g · σ(γ · g / rms(g)) · W_up(x) )
     NELUGLU(x) = W_down( g · Φ(γ · g / rms(g)) · W_up(x) )
 
-where ``g = W_gate(x)``. Parameter count matches SwiGLU exactly — only the
-gate's activation changes. The up branch is untouched. ``γ`` is a buffer
-driven by the trainer's warmup scheduler (``GammaWarmup``).
+where ``g = W_gate(x)``. Parameter count matches SwiGLU exactly (γ is a
+single scalar per module). The up branch is untouched.
 """
 
 from __future__ import annotations
@@ -22,7 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2, _inv_softplus
+from .core import _DEFAULT_GAMMA_INIT, _INV_SQRT2
+from .dispatch import should_use_cuda
 from .stats import layer_stats
 
 
@@ -48,9 +48,14 @@ class SwiGLU(nn.Module):
 
 
 class _GatedGLU(nn.Module):
-    """Shared plumbing for NiLUGLU / NELUGLU."""
+    """Shared plumbing for NiLUGLU / NELUGLU.
+
+    Subclasses set ``_CUDA_KIND`` (matches :class:`gate_norm.GateNorm`)
+    to opt into the fused CUDA path on the gate branch.
+    """
 
     _gate_fn: Callable[[torch.Tensor], torch.Tensor]
+    _CUDA_KIND: int | None = None
 
     def __init__(
         self,
@@ -68,58 +73,41 @@ class _GatedGLU(nn.Module):
         self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
-        # γ_raw is learnable; γ_eff = softplus(γ_raw) is what the gate sees.
-        # gamma_init is the effective γ at step 0; γ_raw stored as inv_softplus.
-        raw = _inv_softplus(float(gamma_init))
-        self.gamma_raw = nn.Parameter(
-            torch.full((1,), raw, dtype=torch.float32),
-            requires_grad=True,
+        self.gamma = nn.Parameter(
+            torch.full((1,), float(gamma_init), dtype=torch.float32)
         )
         self._gate_norm_module = True
 
-    @property
-    def gamma(self) -> torch.Tensor:
-        return F.softplus(self.gamma_raw)
+    def _gated(self, g: torch.Tensor) -> torch.Tensor:
+        """Compute ``g · gate(γ · g / rms(g))`` over the trailing axis."""
+        axes = (g.ndim - 1,)
+        if self._CUDA_KIND is not None and should_use_cuda(g):
+            from . import cuda as _cuda
+            return _cuda.gate_norm_cuda_forward(
+                g, self.gamma, self._CUDA_KIND, axes, float(self.eps),
+            )
+        rsigma = layer_stats(g, axes, self.eps)
+        g32 = g.float() if g.dtype != torch.float32 else g
+        gate = type(self)._gate_fn(self.gamma * g32 * rsigma)
+        return g * gate.to(g.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         g = self.w_gate(x)
         u = self.w_up(x)
-        axes = (g.ndim - 1,)
-        rsigma = layer_stats(g, axes, self.eps)
-        g32 = g.float() if g.dtype != torch.float32 else g
-        gate = type(self)._gate_fn(self.gamma * g32 * rsigma)
-        h = g * gate.to(g.dtype)
+        h = self._gated(g)
         return self.w_down(h * u)
 
     def extra_repr(self) -> str:
         return (
             f"hidden_dim={self.hidden_dim}, eps={self.eps}, "
-            f"gamma={self.gamma.item():.3e} (raw={self.gamma_raw.item():.3e})"
-        )
-
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict,
-        missing_keys, unexpected_keys, error_msgs,
-    ):
-        # Back-compat: convert legacy `gamma` (effective) → `gamma_raw`.
-        gamma_key = prefix + "gamma"
-        gamma_raw_key = prefix + "gamma_raw"
-        if gamma_key in state_dict and gamma_raw_key not in state_dict:
-            t = state_dict.pop(gamma_key)
-            if isinstance(t, torch.Tensor):
-                t = t.reshape(1).float().clamp(min=1e-12)
-                state_dict[gamma_raw_key] = torch.log(torch.expm1(t))
-        beta_key = prefix + "beta"
-        if beta_key in state_dict:
-            state_dict.pop(beta_key)
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs,
+            f"gamma={self.gamma.item():.3e}"
         )
 
 
 class NiLUGLU(_GatedGLU):
     """SwiGLU with Gate Normalization on the gate branch."""
+
+    _CUDA_KIND = 1  # GATE_SIGMOID
 
     @staticmethod
     def _gate_fn(t: torch.Tensor) -> torch.Tensor:
@@ -128,6 +116,8 @@ class NiLUGLU(_GatedGLU):
 
 class NELUGLU(_GatedGLU):
     """SwiGLU with Gate Normalization + Gaussian-CDF gate."""
+
+    _CUDA_KIND = 0  # GATE_PHI
 
     @staticmethod
     def _gate_fn(t: torch.Tensor) -> torch.Tensor:

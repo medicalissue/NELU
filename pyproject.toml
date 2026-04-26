@@ -48,8 +48,11 @@ where = ["."]
 include = ["gate_norm*", "train*"]
 exclude = ["tests*", "third_party*", "docs*"]
 
+# Ship the CUDA source files alongside the Python package so the lazy
+# torch.utils.cpp_extension.load() inside gate_norm.cuda can find them
+# in installed environments (sdist / wheel / `pip install -e .`).
 [tool.setuptools.package-data]
-"gate_norm.csrc" = ["*.cu", "*.cuh"]
+"gate_norm" = ["csrc/*.cu", "csrc/*.cuh"]
 
 [tool.ruff]
 line-length = 100

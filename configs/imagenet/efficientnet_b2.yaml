@@ -81,4 +81,5 @@ seed: 42
 activation: silu
 norm_axes: sample         # Initial swap default; overridden per-location
                              # by rewire_efficientnet_mbconv in train/swap.py.
+gamma_init: 1.0
 log_gate_stats_every: 1

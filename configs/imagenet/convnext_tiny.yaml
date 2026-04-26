@@ -56,10 +56,7 @@ remode: rand                 # MMPretrain RandomErasing mode='rand'
 
 amp: true
 amp-dtype: bfloat16             # bf16 on tensor cores: no GradScaler, no underflow
-# torch.compile is opt-in; set to "inductor" to enable. Gate-Normalization
-# registers torch.library.custom_op's for the fused CUDA kernels, so
-# Dynamo traces them without graph breaks.
-torchcompile: null
+torchcompile: null              # "inductor" to enable torch.compile
 torchcompile_mode: null
 clip_grad: null
 model_ema: true
@@ -70,4 +67,5 @@ activation: gelu
 norm_axes: [-1]               # ConvNeXt block = ViT-style FFN; activation
                              # follows a channel-mixing Linear at channels-last
                              # layout (N,H,W,C), so RMS axis is the channel dim.
+gamma_init: 1.0
 log_gate_stats_every: 1

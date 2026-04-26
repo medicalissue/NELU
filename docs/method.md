@@ -25,32 +25,21 @@ of `x`:
     y = x · g(γ · x / rms(x)),    rms(x) = sqrt(mean(x²) + eps).
 
 The gate input is scale-invariant with respect to `x`, and `γ` is a
-single non-learnable scalar shared per module. We do *not* subtract the
-mean and we do *not* add a learnable bias `β`; both were tried in
-earlier versions of the work (`v0.2-centered-learnable`) and gave
-mixed results — see the appendix ablation.
+single learnable scalar shared per module. We do *not* subtract the mean
+and we do *not* add a learnable bias `β`: the outer multiplication by
+the un-normalized `x` preserves the DC component, which is what keeps
+the activation's "save positives, drop negatives" inductive bias intact.
 
-`γ` is driven externally by a warmup scheduler
-(:class:`gate_norm.GammaWarmup`) that ramps `γ` from `0` at step 0 to
-`1` over the same number of optimizer steps that the LR warmup uses,
-and then holds `γ = 1` for the rest of training. The ramp serves two
-purposes:
+## Learning γ
 
-* **At step 0 the activation is linear.** With `γ = 0` we get
-  `y = x · g(0) = x · c` for the constant `c = g(0) = 0.5`, so every
-  shipped activation has an exact identity-up-to-constant init that the
-  optimizer can absorb into subsequent weights.
-* **By the end of warmup `γ = 1`** and the activation has settled into
-  its production form. Larger architectures (ConvNeXt-S, Swin-S, …)
-  that were unstable at `γ = 1` from step 0 are stable when γ is
-  introduced gradually.
-
-Earlier learnable-`γ` variants developed two pathological attractors
-that the buffer-only form sidesteps: small models collapsed `γ → 0`
-combined with `β > 0` (gate becomes a constant ≈0.7, the activation
-degenerates to a linear scaling); large models pushed `β` strongly
-negative, killing roughly a third of the layers via near-zero gate
-output. Fixing `γ` removes both.
+`γ` is a single learnable scalar per module, initialised to `γ_init`
+(default 1) and driven by the optimizer alongside the rest of the
+model. No reparameterization or positivity constraint is applied:
+gradient flow naturally keeps `γ` positive because flipping `γ`
+negative inverts the gate (`Φ(γ x̂)` becomes `1 − Φ(|γ| x̂)`) and
+exchanges positive- and negative-half saturation, which yields no
+useful loss signal. We empirically observe `γ` to stay in a narrow
+positive range across all architectures we evaluate.
 
 ## Instances
 
@@ -59,11 +48,9 @@ Two concrete instances are studied in the paper:
 * **NELU** — gate is the Gaussian CDF `Φ(·)`; the baseline is GELU.
 * **NiLU** — gate is the sigmoid `σ(·)`; the baseline is SiLU.
 
-Both keep the *same parameter count as their baseline* — `γ` is a
-non-learnable buffer, not a parameter. The drop-in replacement is
-exact: at `γ = 0`, `y = x · g(0) = x · c` for the constant
-`c = g(0) = 0.5`, and the module reduces to a linear rescaling that
-the optimizer can absorb into subsequent weights.
+Both keep the same parameter count as their baseline up to a single
+shared scalar `γ_raw`. Both are exact drop-in replacements for
+`nn.GELU()` / `nn.SiLU()`.
 
 ## Reduction axes
 
@@ -85,18 +72,6 @@ this automatically for timm's EfficientNet MBConv / DepthwiseSeparable
 / EdgeResidual blocks — see `_MBCONV_POLICY` in `train/swap.py` for
 the exact mapping per sub-attribute.
 
-## Initialization and scheduling
-
-`γ` is initialized to `0` and ramped to `1` by
-:class:`gate_norm.GammaWarmup` over the same number of optimizer steps
-as the LR warmup. At step 0 the gate is flat at `g(0) = 0.5`, so the
-module is `y = 0.5 · x` — a linear rescaling that the optimizer can
-absorb into surrounding weights. After warmup `γ` is held at `1` and
-the activation behaves as `y = x · g(x / rms(x))`.
-
-The schedule is "linear" by default (matches `LinearLR`); "cosine" and
-"constant" variants are available for ablation.
-
 ## GLU variants
 
 For GLU-family feed-forward blocks (SwiGLU and relatives), Gate
@@ -105,5 +80,5 @@ Normalization is applied *only to the gate branch*:
     y = W_down( gate · g(γ · gate / rms(gate)) ⊙ up )
 
 where `gate = W_gate(x)` and `up = W_up(x)`. The up-projection is left
-intact. Parameter count is unchanged relative to SwiGLU. The
-`NELUGLU` / `NiLUGLU` modules in `gate_norm.glu` implement this form.
+intact. Parameter count matches SwiGLU up to the single `γ_raw` scalar.
+The `NELUGLU` / `NiLUGLU` modules in `gate_norm.glu` implement this form.

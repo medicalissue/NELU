@@ -28,7 +28,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from gate_norm import GammaWarmup, NELU, NiLU, collect_gamma_stats
+from gate_norm import NELU, NiLU, collect_gamma_stats
 from train.swap import (  # noqa: F401
     replace_activation,
     replace_activation_auto_axes,
@@ -122,7 +122,7 @@ def build_model(
     activation: str = "relu",
     num_classes: int = 100,
     *,
-    gamma_init: float = 0.0,
+    gamma_init: float = 1.0,
 ):
     """Create a CIFAR-100 model and apply the requested activation swap.
 
@@ -261,8 +261,7 @@ def _orig_module(model):
 
 
 def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id,
-                           training_log, epoch, *, global_step=None,
-                           gamma_scheduler=None):
+                           training_log, epoch, *, global_step=None):
     state = {
         "epoch": epoch,
         "model": _orig_module(model).state_dict(),
@@ -275,13 +274,11 @@ def build_checkpoint_state(model, optimizer, scheduler, best_acc, args, wandb_id
     }
     if global_step is not None:
         state["global_step"] = global_step
-    if gamma_scheduler is not None:
-        state["gamma_scheduler"] = gamma_scheduler.state_dict()
     return state
 
 def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
                     scaler=None, use_amp=False, amp_dtype=torch.float16,
-                    gamma_scheduler=None, global_step_start=0):
+                    global_step_start=0):
     model.train()
     total_loss = 0.0
     correct = 0
@@ -292,8 +289,6 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch,
             raise TrainingInterrupted(
                 f"Interruption requested at epoch {epoch}, step {batch_idx}."
             )
-        if gamma_scheduler is not None:
-            gamma_scheduler.step(global_step)
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
@@ -460,14 +455,8 @@ def parse_args():
     p.add_argument("--min_lr", type=float, default=0.0,
                    help="Cosine schedule floor (ignored for multistep)")
     p.add_argument("--gamma_init", type=float, default=1.0,
-                   help="Initial *effective* γ at step 0 (the value the "
-                        "gate sees). γ_eff = softplus(γ_raw); γ_raw is "
-                        "stored as inv_softplus(gamma_init).")
-    p.add_argument("--gamma_final", type=float, default=1.0,
-                   help="Final value of γ held for the rest of training.")
-    p.add_argument("--gamma_warmup_schedule", type=str, default="linear",
-                   choices=["linear", "cosine", "constant"],
-                   help="Shape of the γ ramp 0 → final.")
+                   help="Initial value of the learnable γ at step 0; "
+                        "the optimizer drives it from there.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output_dir", type=str, default="results/cifar")
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
@@ -485,7 +474,7 @@ def parse_args():
     p.add_argument("--compile_backend", type=str, default="inductor",
                    help="torch.compile backend (default: inductor)")
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    p.add_argument("--wandb_project", type=str, default="nelu-cifar")
+    p.add_argument("--wandb_project", type=str, default="cifar-gate-normalization")
     p.add_argument("--config", type=str, default=None, help="YAML config (overrides defaults)")
     return p.parse_args()
 
@@ -547,22 +536,15 @@ def main():
     print(f"Model: {args.model}, activation: {args.activation}, "
           f"params: {param_count:,}, device: {device}")
 
-    # torch.compile — wrap the model in-place. State dicts are saved from
-    # the underlying ``._orig_mod`` when compiled so checkpoints remain
-    # portable between --compile and eager runs.
-    #
-    # ``dynamic=True`` is REQUIRED. Without it, inductor specializes the
-    # γ buffer at trace time and bakes it into the compiled graph. Our
-    # GammaWarmup scheduler updates γ every step (fill_ on the buffer);
-    # specialization would freeze γ at its init value (0), turning every
-    # NELU/NiLU into a linear ``0.5 * x``. ``dynamic=True`` keeps the
-    # buffer as a runtime input so the warmup ramp actually fires.
+    # torch.compile — wrap the model in-place. State dicts are saved
+    # from the underlying ``._orig_mod`` when compiled so checkpoints
+    # remain portable between --compile and eager runs.
     if args.compile:
         assert hasattr(torch, "compile"), "torch.compile requires PyTorch >= 2.0"
         model = torch.compile(model, backend=args.compile_backend,
-                              mode=args.compile_mode, dynamic=True)
+                              mode=args.compile_mode)
         print(f"Model compiled with torch.compile "
-              f"(backend={args.compile_backend}, mode={args.compile_mode}, dynamic=True)")
+              f"(backend={args.compile_backend}, mode={args.compile_mode})")
 
     # AMP scaler — only needed for fp16; bf16 has the fp32 dynamic range.
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bfloat16" else torch.float16
@@ -599,32 +581,7 @@ def main():
     else:
         scheduler = main_scheduler
 
-    # γ warmup scheduler — ramps the (non-learnable) γ buffer in every
-    # NELU/NiLU module from gamma_init → gamma_final over the same
-    # number of optimizer steps that the LR warmup uses. For CIFAR
-    # warmup_epochs is usually 0 in our recipe; the scheduler then
-    # immediately fixes γ at gamma_final.
-    #
-    # IMPORTANT: torch.compile traces the gate_norm modules at first
-    # forward and may bake the γ buffer's value into the compiled graph
-    # as a constant. We therefore do TWO things to make sure the gate
-    # actually fires:
-    #   1. set γ to its final value BEFORE compile (or before first
-    #      forward) so that compile traces the production γ.
-    #   2. when warmup_steps > 0, run the compiled model in eager
-    #      ramping mode is unsafe; the existing recipe (`warmup_epochs=0`
-    #      for CIFAR) keeps γ constant after the initial set, which is
-    #      the regime compile is safe in.
     steps_per_epoch = max(1, len(train_loader))
-    gamma_warmup_steps = warmup_epochs * steps_per_epoch
-    gamma_scheduler = GammaWarmup(
-        model,
-        warmup_steps=gamma_warmup_steps,
-        init=args.gamma_init,
-        final=args.gamma_final,
-        schedule=args.gamma_warmup_schedule,
-    )
-    print(f"γ scheduler: {gamma_scheduler}")
 
     # Resume
     start_epoch = 0
@@ -640,15 +597,11 @@ def main():
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
         global_step = ckpt.get("global_step", start_epoch * steps_per_epoch)
-        if "gamma_scheduler" in ckpt:
-            gamma_scheduler.load_state_dict(ckpt["gamma_scheduler"])
-        else:
-            gamma_scheduler.step(global_step)
         best_acc = ckpt.get("best_acc", 0.0)
         training_log = ckpt.get("training_log", [])
         saved_wandb_id = ckpt.get("wandb_id", None)
         print(f"  Resumed at epoch {start_epoch}, global_step={global_step}, "
-              f"best_acc={best_acc:.2f}%, γ={gamma_scheduler.current_gamma:.4f}")
+              f"best_acc={best_acc:.2f}%")
 
     # wandb init — after resume so we can reuse the saved run ID
     wandb_run, wandb_id = init_wandb_run(args, saved_wandb_id)
@@ -665,7 +618,6 @@ def main():
                 model, train_loader, optimizer,
                 scheduler, device, epoch,
                 scaler=scaler, use_amp=args.amp, amp_dtype=amp_dtype,
-                gamma_scheduler=gamma_scheduler,
                 global_step_start=global_step,
             )
             test_loss, test_acc = evaluate(model, test_loader, device,
