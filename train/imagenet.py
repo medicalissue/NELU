@@ -604,18 +604,10 @@ def main():
         model_name=args.model,
     )
 
-    # Set γ to its final value BEFORE torch.compile traces the model.
-    # Inductor specializes buffers at trace time, so a γ=0 init followed by
-    # an in-place fill_(1.0) inside GammaWarmup would leave the compiled
-    # graph evaluating at γ=0 (i.e. y = 0.5*x, a no-op linearization).
-    # This forfeits γ warmup under compile but keeps the recipe correct;
-    # disable --torchcompile if you need a non-trivial γ ramp.
-    if n_swapped > 0:
-        with torch.no_grad():
-            for m in model.modules():
-                if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma"):
-                    m.gamma.fill_(float(args.gamma_final))
-
+    # γ is left at its init value here; GammaWarmup updates the buffer
+    # every optimizer step. The torch.compile call below uses dynamic=True
+    # so inductor doesn't specialize γ at trace time and the warmup ramp
+    # actually fires at runtime.
     if utils.is_primary(args):
         _logger.info(
             f'[activation] {args.activation}: swapped {n_swapped} modules '
@@ -744,6 +736,7 @@ def main():
                 model_ema,
                 backend=args.torchcompile,
                 mode=args.torchcompile_mode,
+                dynamic=True,
             )
 
     # create the train and eval datasets
@@ -1039,12 +1032,14 @@ def main():
             _logger.info("Preparing task for distributed training")
         task.prepare_distributed(device_ids=[device])
 
-    # Compile task if requested (should be done after DDP)
+    # Compile task if requested (should be done after DDP).
+    # dynamic=True so inductor doesn't specialize the GammaWarmup-driven
+    # γ buffer at trace time; without it the warmup ramp gets baked out.
     if args.torchcompile:
         assert has_compile, 'A version of torch w/ torch.compile() is required for --compile, possibly a nightly.'
         if utils.is_primary(args):
-            _logger.info(f"Compiling task with backend={args.torchcompile}, mode={args.torchcompile_mode}")
-        task = torch.compile(task, backend=args.torchcompile, mode=args.torchcompile_mode)
+            _logger.info(f"Compiling task with backend={args.torchcompile}, mode={args.torchcompile_mode}, dynamic=True")
+        task = torch.compile(task, backend=args.torchcompile, mode=args.torchcompile_mode, dynamic=True)
 
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric if loader_eval is not None else 'loss'

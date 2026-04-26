@@ -546,30 +546,22 @@ def main():
     print(f"Model: {args.model}, activation: {args.activation}, "
           f"params: {param_count:,}, device: {device}")
 
-    # Set γ to its final value BEFORE torch.compile. Inductor traces the
-    # gate_norm modules at first forward and bakes the γ buffer value into
-    # the compiled graph as a constant; if we let the buffer enter compile
-    # at init (γ=0) and only fill it later, the live model would silently
-    # be a linear `0.5 * x` for the rest of training.
-    #
-    # We accept that compiled training cannot use a non-trivial γ warmup
-    # ramp (final value would also be baked). The CIFAR base recipe uses
-    # warmup_epochs=0, so this is a no-op there. ImageNet recipes with
-    # warmup>0 must either disable compile or skip the γ ramp.
-    with torch.no_grad():
-        for m in model.modules():
-            if getattr(m, "_gate_norm_module", False) and hasattr(m, "gamma"):
-                m.gamma.fill_(float(args.gamma_final))
-
     # torch.compile — wrap the model in-place. State dicts are saved from
     # the underlying ``._orig_mod`` when compiled so checkpoints remain
     # portable between --compile and eager runs.
+    #
+    # ``dynamic=True`` is REQUIRED. Without it, inductor specializes the
+    # γ buffer at trace time and bakes it into the compiled graph. Our
+    # GammaWarmup scheduler updates γ every step (fill_ on the buffer);
+    # specialization would freeze γ at its init value (0), turning every
+    # NELU/NiLU into a linear ``0.5 * x``. ``dynamic=True`` keeps the
+    # buffer as a runtime input so the warmup ramp actually fires.
     if args.compile:
         assert hasattr(torch, "compile"), "torch.compile requires PyTorch >= 2.0"
         model = torch.compile(model, backend=args.compile_backend,
-                              mode=args.compile_mode)
+                              mode=args.compile_mode, dynamic=True)
         print(f"Model compiled with torch.compile "
-              f"(backend={args.compile_backend}, mode={args.compile_mode})")
+              f"(backend={args.compile_backend}, mode={args.compile_mode}, dynamic=True)")
 
     # AMP scaler — only needed for fp16; bf16 has the fp32 dynamic range.
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bfloat16" else torch.float16
