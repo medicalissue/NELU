@@ -30,10 +30,7 @@ def _phi(t: torch.Tensor) -> torch.Tensor:
 class NELU(GateNorm):
     """GELU with gate normalization: ``y = z · Φ(γ · z / rms(z))``."""
 
-    # _CUDA_OP left as None — the fused kernel was written for the
-    # centered+learnable variant and hasn't been ported to the RMS-only
-    # form yet. The native PyTorch path is what we use.
-    _CUDA_OP = None
+    _CUDA_OP = "nelu"
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
@@ -43,7 +40,7 @@ class NELU(GateNorm):
 class NiLU(GateNorm):
     """SiLU with gate normalization: ``y = z · σ(γ · z / rms(z))``."""
 
-    _CUDA_OP = None
+    _CUDA_OP = "nilu"
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:

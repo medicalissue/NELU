@@ -72,6 +72,14 @@ struct GateFn<GATE_PHI> {
         // φ(t) = (1/√(2π)) · exp(-t²/2)
         return __expf(-0.5f * t * t) * kInvSqrt2Pi;
     }
+    // Compute g(t) and g'(t) together. For PHI both transcendentals are
+    // distinct (erf and exp), so this is just a packaging convenience —
+    // no FLOP saving — but keeps the call sites uniform with SIGMOID.
+    static __device__ __forceinline__ void
+    gate_and_prime(float t, float& g, float& gp) {
+        g  = 0.5f * (1.f + erff(t * kInvSqrt2));
+        gp = __expf(-0.5f * t * t) * kInvSqrt2Pi;
+    }
 };
 
 template <>
@@ -84,6 +92,12 @@ struct GateFn<GATE_SIGMOID> {
         // σ'(t) = σ(t) · (1 - σ(t))
         float s = gate(t);
         return s * (1.f - s);
+    }
+    // For SIGMOID, σ'(t) = σ(t)·(1-σ(t)) — reuse the single __expf call.
+    static __device__ __forceinline__ void
+    gate_and_prime(float t, float& g, float& gp) {
+        g  = 1.f / (1.f + __expf(-t));
+        gp = g * (1.f - g);
     }
 };
 
