@@ -68,10 +68,13 @@ class _GatedGLU(nn.Module):
         self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
         self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
         self.eps = eps
-        # γ is a non-learnable buffer driven by GammaWarmup (see scheduler.py).
-        self.register_buffer(
-            "gamma",
+        # γ is a non-learnable scalar driven by GammaWarmup. We use a
+        # Parameter with requires_grad=False (not a buffer) so that
+        # torch.compile / inductor doesn't specialize it at trace time;
+        # see core.py for the full rationale.
+        self.gamma = nn.Parameter(
             torch.full((1,), float(gamma_init), dtype=torch.float32),
+            requires_grad=False,
         )
         self._gate_norm_module = True
 

@@ -97,13 +97,13 @@ def test_gate_input_invariant_to_positive_scaling() -> None:
 # ── γ buffer + scheduler ───────────────────────────────────────────────
 
 
-def test_gamma_is_buffer_not_parameter() -> None:
-    """γ must not appear in module.parameters() — it's a non-trainable buffer."""
+def test_gamma_is_frozen_parameter() -> None:
+    """γ is a Parameter with requires_grad=False — that way torch.compile /
+    inductor doesn't specialize it at trace time, but the optimizer also
+    won't touch it. The buffer-equivalent behavior comes from grad=False."""
     act = NELU(gamma_init=0.5)
-    param_names = [n for n, _ in act.named_parameters()]
-    buffer_names = [n for n, _ in act.named_buffers()]
-    assert "gamma" not in param_names
-    assert "gamma" in buffer_names
+    assert "gamma" in dict(act.named_parameters())
+    assert act.gamma.requires_grad is False
 
 
 def test_backward_does_not_attach_gradient_to_gamma() -> None:
@@ -112,8 +112,8 @@ def test_backward_does_not_attach_gradient_to_gamma() -> None:
     act = NELU(gamma_init=0.3)
     y = act(x)
     y.sum().backward()
-    # γ is a buffer; it has no .grad slot at all.
-    assert getattr(act.gamma, "grad", None) is None
+    # γ has requires_grad=False so its .grad never accumulates.
+    assert act.gamma.grad is None
     # x should still receive gradient through the module.
     assert x.grad is not None and x.grad.abs().sum() > 0
 
@@ -217,15 +217,16 @@ def test_functional_gate_norm_matches_module() -> None:
 
 
 @pytest.mark.parametrize("cls", [NELUGLU, NiLUGLU])
-def test_glu_variants_match_swiglu_param_count(cls: type) -> None:
+def test_glu_variants_match_swiglu_trainable_param_count(cls: type) -> None:
     dim = 256
     swiglu = SwiGLU(dim)
     variant = cls(dim)
-    n_swiglu = sum(p.numel() for p in swiglu.parameters())
-    # γ is a buffer, not a parameter, so the GLU variant has the same param
-    # count as plain SwiGLU.
-    n_variant = sum(p.numel() for p in variant.parameters())
-    assert n_variant == n_swiglu
+    # γ is a Parameter with requires_grad=False, so it's in
+    # module.parameters() but contributes zero trainable params. The
+    # variant should match SwiGLU's *trainable* param count exactly.
+    def n_trainable(m):
+        return sum(p.numel() for p in m.parameters() if p.requires_grad)
+    assert n_trainable(variant) == n_trainable(swiglu)
 
 
 def test_glu_variants_forward_shape() -> None:

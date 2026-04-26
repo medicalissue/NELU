@@ -73,11 +73,15 @@ class GateNorm(nn.Module):
         self.norm_axes = norm_axes
         self.eps = eps
         # γ is a non-learnable scalar driven externally by a warmup
-        # scheduler. It rides on the module as a buffer so it ships with
-        # state_dict and DDP broadcasts; gradients are not computed.
-        self.register_buffer(
-            "gamma",
+        # scheduler. We register it as a Parameter with requires_grad=False
+        # rather than a buffer because torch.compile / inductor specializes
+        # buffer values at trace time (baking γ=0 into the compiled graph
+        # would defeat the warmup ramp); Parameters with frozen grad still
+        # show up in the compile inputs and respect runtime mutation. Grads
+        # never accumulate because `requires_grad_(False)`.
+        self.gamma = nn.Parameter(
             torch.full((1,), float(gamma_init), dtype=torch.float32),
+            requires_grad=False,
         )
         # Marker so `collect_gamma_stats` can discover us generically.
         self._gate_norm_module = True
