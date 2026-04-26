@@ -129,8 +129,15 @@ def fused_forward(
     if op not in _GATE_KIND:
         raise ValueError(f"unknown gate op: {op!r}")
     z_flat, layout = flatten_for_reduction(z, axes)
+    # The CUDA kernel expects a 2-D (M, N) view; flatten the kept leading
+    # dims into M before dispatching, then reshape the kernel's 2-D output
+    # back into the caller's layout via restore().
+    flat_shape = z_flat.shape  # (kept..., N)
+    n_red = flat_shape[-1]
+    z_2d = z_flat.reshape(-1, n_red)
     g = float(gamma.detach().reshape(()).item())
-    y_flat, _rsigma = torch.ops.gate_norm.fused_fwd_v04(
-        z_flat, g, _GATE_KIND[op], float(eps),
+    y_2d, _rsigma = torch.ops.gate_norm.fused_fwd_v04(
+        z_2d, g, _GATE_KIND[op], float(eps),
     )
+    y_flat = y_2d.reshape(flat_shape)
     return restore(y_flat, layout)
