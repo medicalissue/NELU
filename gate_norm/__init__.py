@@ -29,6 +29,8 @@ from .functional import nelu, nilu
 from .glu import NELUGLU, NiLUGLU, SwiGLU
 from .ln_beta import NELU_LN, NiLU_LN
 from .logging import collect_gamma_stats
+from .resact import ResActGELU, collect_resact_stats
+from .xln import xLN
 
 __all__ = [
     "GateNorm",
@@ -43,6 +45,9 @@ __all__ = [
     "NELUGLU",
     "NiLUGLU",
     "SwiGLU",
+    "ResActGELU",
+    "collect_resact_stats",
+    "xLN",
     "gate_norm",
     "nelu",
     "nilu",

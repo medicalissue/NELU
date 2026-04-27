@@ -36,7 +36,9 @@ __all__ = [
 ACTIVATIONS = ("relu", "gelu", "silu", "nelu", "nilu",
                "nelu_ln", "nilu_ln",
                "nelu_aff", "nilu_aff",
-               "nelu_affcw", "nilu_affcw")
+               "nelu_affcw", "nilu_affcw",
+               "xln_g0", "xln_g1",
+               "resact_gelu_a5", "resact_gelu_a0")
 MODELS = (
     "resnet20", "resnet56", "resnet110", "vgg16_bn",
     "shufflenetv2", "mobilenetv2", "densenet_bc_100_12",
@@ -52,7 +54,7 @@ def build_eval_model(
     model = build_model(name, activation=activation, num_classes=100)
     # Channel-wise affine variants need a dummy forward to materialize
     # γ_c, β_c before load_state_dict can map the saved tensors back.
-    if activation in ("nelu_affcw", "nilu_affcw"):
+    if activation in ("nelu_affcw", "nilu_affcw", "xln_g0", "xln_g1"):
         with torch.no_grad():
             _ = model(torch.zeros(2, 3, 32, 32))
     load_checkpoint(model, checkpoint)

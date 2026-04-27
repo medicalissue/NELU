@@ -30,7 +30,8 @@ from torchvision import datasets, transforms
 
 from gate_norm import (
     NELU, NiLU, NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF,
-    NELU_AFFCW, NiLU_AFFCW, collect_gamma_stats,
+    NELU_AFFCW, NiLU_AFFCW, ResActGELU, xLN,
+    collect_gamma_stats, collect_resact_stats,
 )
 from train.swap import (  # noqa: F401
     replace_activation,
@@ -208,6 +209,28 @@ def build_model(
             gamma_init=gamma_init,
         )
         print(f"Swapped {n} ReLU -> NiLU_AFFCW (channel-wise γ,β; {order} axes)")
+    elif activation in ("resact_gelu_a5", "resact_gelu_a0"):
+        # ResAct on GELU's odd-even decomposition.
+        #   y = GELU(x) - 0.5*x + 0.5*[sigmoid(α)*x + (1-sigmoid(α))*prev]
+        #
+        # Two init choices:
+        #   resact_gelu_a5 → α=5  (σ≈0.993, near-vanilla GELU at start)
+        #   resact_gelu_a0 → α=0  (σ=0.5, uniform mix at start)
+        alpha_init = 5.0 if activation == "resact_gelu_a5" else 0.0
+        n = replace_activation(
+            model, relu_types, lambda: ResActGELU(alpha_init=alpha_init),
+        )
+        print(f"Swapped {n} ReLU -> ResActGELU (α_init={alpha_init})")
+    elif activation in ("xln_g0", "xln_g1"):
+        # xLN with two γ_init choices for the LayerScale ablation:
+        #   xln_g0 → γ_c = 0   (LayerScale-style; identity-init residual branch)
+        #   xln_g1 → γ_c = 1   (active from the start)
+        g_init = 0.0 if activation == "xln_g0" else 1.0
+        n = replace_activation_auto_axes(
+            model, relu_types, xLN, activation_order=order,
+            gamma_init=g_init,
+        )
+        print(f"Swapped {n} ReLU -> xLN (γ_init={g_init}, channel-wise γ,β; {order} axes)")
     else:
         raise ValueError(f"Unknown activation: {activation}")
 
@@ -473,7 +496,9 @@ def parse_args():
                     choices=["relu", "gelu", "silu", "nelu", "nilu",
                              "nelu_ln", "nilu_ln",
                              "nelu_aff", "nilu_aff",
-                             "nelu_affcw", "nilu_affcw"])
+                             "nelu_affcw", "nilu_affcw",
+                             "xln_g0", "xln_g1",
+                             "resact_gelu_a5", "resact_gelu_a0"])
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--val_batch_size", type=int, default=None,
@@ -579,7 +604,7 @@ def main():
     # count lazily on the first forward). Run a dummy batch to materialize
     # them before any code that walks model.parameters() — e.g. param_count,
     # the optimizer, AMP setup.
-    if args.activation in ("nelu_affcw", "nilu_affcw"):
+    if args.activation in ("nelu_affcw", "nilu_affcw", "xln_g0", "xln_g1"):
         model.eval()
         with torch.no_grad():
             _dummy = torch.zeros(2, 3, 32, 32, device=device)
@@ -710,8 +735,14 @@ def main():
         gamma_stats = {}
         if args.activation in ("nelu", "nilu", "nelu_ln", "nilu_ln",
                                "nelu_aff", "nilu_aff",
-                               "nelu_affcw", "nilu_affcw"):
+                               "nelu_affcw", "nilu_affcw",
+                               "xln_g0", "xln_g1"):
             gamma_stats = collect_gamma_stats(_orig_module(model))
+
+        # ResAct α stats — only when using a ResAct-* activation
+        resact_stats = {}
+        if args.activation in ("resact_gelu_a5", "resact_gelu_a0"):
+            resact_stats = collect_resact_stats(_orig_module(model))
 
         # Gate entropy + variance (all activations)
         gate_stats = measure_gate_stats(model, probe_batch, device)
@@ -729,6 +760,7 @@ def main():
             "time": elapsed,
         }
         log_entry.update(gamma_stats)
+        log_entry.update(resact_stats)
         log_entry.update(gate_stats)
         log_entry.update(weight_norm_stats)
         training_log.append(log_entry)
@@ -757,6 +789,7 @@ def main():
                 "lr": optimizer.param_groups[0]["lr"],
             }
             wandb_metrics.update(gamma_stats)
+            wandb_metrics.update(resact_stats)
             wandb_metrics.update(gate_stats)
             wandb_metrics.update(weight_norm_stats)
             wandb.log(wandb_metrics)

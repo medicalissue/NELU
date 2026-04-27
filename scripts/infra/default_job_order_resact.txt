@@ -1,0 +1,10 @@
+# ResAct ablation: ResAct-GELU on ResNet56-CIFAR100.
+#  Format: <cfg>:<activation>:<seed>:cls
+#
+# 4 jobs total — α_init={5, 0} × seed={42, 43}
+# All cls mode. GELU baseline (s42, s43) already on S3 from prior CIFAR campaign.
+# 4 GPUs on g5.12xlarge → all 4 jobs run in parallel.
+configs/cifar100/resnet56.yaml:resact_gelu_a5:42:cls
+configs/cifar100/resnet56.yaml:resact_gelu_a5:43:cls
+configs/cifar100/resnet56.yaml:resact_gelu_a0:42:cls
+configs/cifar100/resnet56.yaml:resact_gelu_a0:43:cls
