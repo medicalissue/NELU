@@ -147,6 +147,25 @@ def build_model(
             f"Unknown model: {name!r}. Supported: {_SUPPORTED_MODELS}"
         )
 
+    # ResAct needs prev-activation threaded through forward, so for the
+    # ResNet family we use a self-contained variant that owns its
+    # forward-signature changes. Other architectures don't support ResAct.
+    if activation in ("resact_gelu_a5", "resact_gelu_a0"):
+        if not name.startswith("resnet"):
+            raise ValueError(
+                f"ResAct currently only supported on ResNet-family models, "
+                f"got {name!r}"
+            )
+        from train.resnet_resact import build_resnet_resact
+        model = build_resnet_resact(name, activation=activation,
+                                    num_classes=num_classes)
+        n_resact = sum(
+            1 for m in model.modules()
+            if type(m).__name__ == "ResActGELUGraph"
+        )
+        print(f"Built {name} with {n_resact} ResActGELUGraph (graph-attached prev)")
+        return model
+
     model = _build_backbone(name, num_classes)
 
     if activation == "relu":
@@ -209,18 +228,6 @@ def build_model(
             gamma_init=gamma_init,
         )
         print(f"Swapped {n} ReLU -> NiLU_AFFCW (channel-wise γ,β; {order} axes)")
-    elif activation in ("resact_gelu_a5", "resact_gelu_a0"):
-        # ResAct on GELU's odd-even decomposition.
-        #   y = GELU(x) - 0.5*x + 0.5*[sigmoid(α)*x + (1-sigmoid(α))*prev]
-        #
-        # Two init choices:
-        #   resact_gelu_a5 → α=5  (σ≈0.993, near-vanilla GELU at start)
-        #   resact_gelu_a0 → α=0  (σ=0.5, uniform mix at start)
-        alpha_init = 5.0 if activation == "resact_gelu_a5" else 0.0
-        n = replace_activation(
-            model, relu_types, lambda: ResActGELU(alpha_init=alpha_init),
-        )
-        print(f"Swapped {n} ReLU -> ResActGELU (α_init={alpha_init})")
     elif activation in ("xln_g0", "xln_g1"):
         # xLN with two γ_init choices for the LayerScale ablation:
         #   xln_g0 → γ_c = 0   (LayerScale-style; identity-init residual branch)
@@ -742,7 +749,8 @@ def main():
         # ResAct α stats — only when using a ResAct-* activation
         resact_stats = {}
         if args.activation in ("resact_gelu_a5", "resact_gelu_a0"):
-            resact_stats = collect_resact_stats(_orig_module(model))
+            from train.resnet_resact import collect_resact_graph_stats
+            resact_stats = collect_resact_graph_stats(_orig_module(model))
 
         # Gate entropy + variance (all activations)
         gate_stats = measure_gate_stats(model, probe_batch, device)
