@@ -46,7 +46,10 @@ if [[ -z "${JOB_ORDER:-}" ]]; then
 fi
 export JOB_ORDER
 
-export WANDB_PROJECT="${WANDB_PROJECT:-beta-adaptive-nelu}"
+# Force the β-pipeline W&B project regardless of what .env has —
+# the imagenet-side default would lump these runs together with the
+# main CIFAR/ImageNet campaign workspace.
+export WANDB_PROJECT="beta-adaptive-nelu"
 
 echo "β-pipeline campaign starting:"
 echo "  TARGET_WORKERS = $TARGET_WORKERS"
