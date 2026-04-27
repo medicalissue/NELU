@@ -72,20 +72,27 @@ exp_complete() {
     return 1
 }
 
-# Parse a queue entry into its experiment basename. Accepts either the
-# ImageNet "<cfg>:<act>" pair or the CIFAR "<cfg>:<act>:<seed>" triple;
-# the resulting exp mirrors what the orchestrators compute for S3 prefixes.
+# Parse a queue entry into its experiment basename. Accepts:
+#   "<cfg>:<act>"                 ImageNet pair
+#   "<cfg>:<act>:<seed>"          CIFAR triple
+#   "<cfg>:<act>:<seed>:<mode>"   β-pipeline 4-tuple (mode ∈ cls, ae)
+# The resulting exp must match the S3 prefix the slot script PUTs to.
 _exp_from_entry() {
     local entry="$1"
-    local cfg act seed
-    IFS=: read -r cfg act seed <<<"$entry"
+    local cfg act seed mode
+    IFS=: read -r cfg act seed mode <<<"$entry"
     local base
     base=$(basename "${cfg%.yaml}")
+    local exp
     if [[ -n "$seed" ]]; then
-        echo "${base}-${act}-s${seed}"
+        exp="${base}-${act}-s${seed}"
     else
-        echo "${base}-${act}"
+        exp="${base}-${act}"
     fi
+    if [[ "$mode" == "ae" ]]; then
+        exp="${exp}-ae"
+    fi
+    echo "$exp"
 }
 
 all_done() {

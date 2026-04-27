@@ -23,15 +23,21 @@ torch.Size([4, 64, 32, 32])
 """
 
 from .activations import NELU, NiLU
+from .affine import NELU_AFF, NiLU_AFF
 from .core import GateNorm, gate_norm
 from .functional import nelu, nilu
 from .glu import NELUGLU, NiLUGLU, SwiGLU
+from .ln_beta import NELU_LN, NiLU_LN
 from .logging import collect_gamma_stats
 
 __all__ = [
     "GateNorm",
     "NELU",
     "NiLU",
+    "NELU_LN",
+    "NiLU_LN",
+    "NELU_AFF",
+    "NiLU_AFF",
     "NELUGLU",
     "NiLUGLU",
     "SwiGLU",

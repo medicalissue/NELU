@@ -1,0 +1,29 @@
+# β-pipeline job order: <cfg>:<activation>:<seed>:<mode>
+#  mode = cls (default if omitted) or ae
+#
+# Stage A — classification pretrain (NELU_LN + NELU_AFF, 4 each = 8 jobs)
+configs/cifar100/vgg16_bn.yaml:nelu_ln:42:cls
+configs/cifar100/vgg16_bn.yaml:nelu_ln:43:cls
+configs/cifar100/resnet56.yaml:nelu_ln:42:cls
+configs/cifar100/resnet56.yaml:nelu_ln:43:cls
+configs/cifar100/vgg16_bn.yaml:nelu_aff:42:cls
+configs/cifar100/vgg16_bn.yaml:nelu_aff:43:cls
+configs/cifar100/resnet56.yaml:nelu_aff:42:cls
+configs/cifar100/resnet56.yaml:nelu_aff:43:cls
+#
+# Stage B — AE (dense reconstruction) finetune for all three NELU variants
+# (12 jobs). Each AE job depends on its matching cls completion sentinel
+# and is skipped (returned to the queue) until cls is done.
+# NELU baseline ckpts already on S3 from the prior CIFAR campaign.
+configs/cifar100/vgg16_bn.yaml:nelu:42:ae
+configs/cifar100/vgg16_bn.yaml:nelu:43:ae
+configs/cifar100/resnet56.yaml:nelu:42:ae
+configs/cifar100/resnet56.yaml:nelu:43:ae
+configs/cifar100/vgg16_bn.yaml:nelu_ln:42:ae
+configs/cifar100/vgg16_bn.yaml:nelu_ln:43:ae
+configs/cifar100/resnet56.yaml:nelu_ln:42:ae
+configs/cifar100/resnet56.yaml:nelu_ln:43:ae
+configs/cifar100/vgg16_bn.yaml:nelu_aff:42:ae
+configs/cifar100/vgg16_bn.yaml:nelu_aff:43:ae
+configs/cifar100/resnet56.yaml:nelu_aff:42:ae
+configs/cifar100/resnet56.yaml:nelu_aff:43:ae

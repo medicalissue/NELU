@@ -28,7 +28,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from gate_norm import NELU, NiLU, collect_gamma_stats
+from gate_norm import (
+    NELU, NiLU, NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF, collect_gamma_stats,
+)
 from train.swap import (  # noqa: F401
     replace_activation,
     replace_activation_auto_axes,
@@ -169,6 +171,30 @@ def build_model(
             gamma_init=gamma_init,
         )
         print(f"Swapped {n} ReLU -> NiLU ({order}-activation axes)")
+    elif activation == "nelu_ln":
+        n = replace_activation_auto_axes(
+            model, relu_types, NELU_LN, activation_order=order,
+            gamma_init=gamma_init,
+        )
+        print(f"Swapped {n} ReLU -> NELU_LN ({order}-activation axes)")
+    elif activation == "nilu_ln":
+        n = replace_activation_auto_axes(
+            model, relu_types, NiLU_LN, activation_order=order,
+            gamma_init=gamma_init,
+        )
+        print(f"Swapped {n} ReLU -> NiLU_LN ({order}-activation axes)")
+    elif activation == "nelu_aff":
+        n = replace_activation_auto_axes(
+            model, relu_types, NELU_AFF, activation_order=order,
+            gamma_init=gamma_init,
+        )
+        print(f"Swapped {n} ReLU -> NELU_AFF ({order}-activation axes)")
+    elif activation == "nilu_aff":
+        n = replace_activation_auto_axes(
+            model, relu_types, NiLU_AFF, activation_order=order,
+            gamma_init=gamma_init,
+        )
+        print(f"Swapped {n} ReLU -> NiLU_AFF ({order}-activation axes)")
     else:
         raise ValueError(f"Unknown activation: {activation}")
 
@@ -431,7 +457,8 @@ def parse_args():
     p.add_argument("--model", type=str, default="resnet20",
                     choices=list(_SUPPORTED_MODELS))
     p.add_argument("--activation", type=str, default="relu",
-                    choices=["relu", "gelu", "silu", "nelu", "nilu"])
+                    choices=["relu", "gelu", "silu", "nelu", "nilu",
+                             "nelu_ln", "nilu_ln", "nelu_aff", "nilu_aff"])
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--val_batch_size", type=int, default=None,
@@ -653,9 +680,10 @@ def main():
 
         from train.diagnostics import gate_stats as measure_gate_stats, weight_norms as log_weight_norms
 
-        # Gamma stats (nelu/nilu only)
+        # Gamma (and β for *_ln variants) stats — gated activations only
         gamma_stats = {}
-        if args.activation in ("nelu", "nilu"):
+        if args.activation in ("nelu", "nilu", "nelu_ln", "nilu_ln",
+                               "nelu_aff", "nilu_aff"):
             gamma_stats = collect_gamma_stats(_orig_module(model))
 
         # Gate entropy + variance (all activations)

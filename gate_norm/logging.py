@@ -28,8 +28,9 @@ def _aggregate(values: list[float], out: dict, key: str) -> None:
 
 
 def collect_gamma_stats(model: nn.Module, prefix: str = "gate_norm") -> dict:
-    """Collect per-module γ values with aggregates."""
+    """Collect per-module γ (and β when present) values with aggregates."""
     gammas: list[float] = []
+    betas: list[float] = []
     out: dict[str, float] = {}
     for m in model.modules():
         if not getattr(m, "_gate_norm_module", False):
@@ -38,7 +39,16 @@ def collect_gamma_stats(model: nn.Module, prefix: str = "gate_norm") -> dict:
             g = m.gamma.detach().float().item()
             out[f"{prefix}/gamma/layer_{len(gammas)}"] = g
             gammas.append(g)
+        # NELU_LN / NiLU_LN carry a learnable β that shifts the gate's
+        # operating point. Logged separately so the trade-off slider's
+        # trajectory is visible in W&B.
+        if hasattr(m, "beta"):
+            b = m.beta.detach().float().item()
+            out[f"{prefix}/beta/layer_{len(betas)}"] = b
+            betas.append(b)
 
     if gammas:
         _aggregate(gammas, out, f"{prefix}/gamma")
+    if betas:
+        _aggregate(betas, out, f"{prefix}/beta")
     return out
