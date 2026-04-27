@@ -27,3 +27,8 @@ configs/cifar100/vgg16_bn.yaml:nelu_aff:42:ae
 configs/cifar100/vgg16_bn.yaml:nelu_aff:43:ae
 configs/cifar100/resnet56.yaml:nelu_aff:42:ae
 configs/cifar100/resnet56.yaml:nelu_aff:43:ae
+# GELU baseline AE — uses cls ckpts already on S3 from prior CIFAR campaign
+configs/cifar100/vgg16_bn.yaml:gelu:42:ae
+configs/cifar100/vgg16_bn.yaml:gelu:43:ae
+configs/cifar100/resnet56.yaml:gelu:42:ae
+configs/cifar100/resnet56.yaml:gelu:43:ae

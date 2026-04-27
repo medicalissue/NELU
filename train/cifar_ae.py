@@ -145,7 +145,8 @@ def main() -> None:
     # Slot-script-compatible flags
     p.add_argument("--config", required=True, help="cls model yaml (e.g. configs/cifar100/vgg16_bn.yaml)")
     p.add_argument("--activation", required=True,
-                   choices=["nelu", "nilu", "nelu_ln", "nilu_ln",
+                   choices=["relu", "gelu", "silu",
+                            "nelu", "nilu", "nelu_ln", "nilu_ln",
                             "nelu_aff", "nilu_aff"])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output_dir", required=True)
