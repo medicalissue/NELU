@@ -574,6 +574,17 @@ def main():
         gamma_init=args.gamma_init,
     )
     model = model.to(device)
+    # Channel-wise affine variants use UninitializedParameter for γ_c, β_c
+    # (the swap policy doesn't pass num_features, so we resolve channel
+    # count lazily on the first forward). Run a dummy batch to materialize
+    # them before any code that walks model.parameters() — e.g. param_count,
+    # the optimizer, AMP setup.
+    if args.activation in ("nelu_affcw", "nilu_affcw"):
+        model.eval()
+        with torch.no_grad():
+            _dummy = torch.zeros(2, 3, 32, 32, device=device)
+            _ = model(_dummy)
+        model.train()
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model}, activation: {args.activation}, "
           f"params: {param_count:,}, device: {device}")

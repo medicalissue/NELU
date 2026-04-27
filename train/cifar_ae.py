@@ -208,6 +208,13 @@ def main() -> None:
 
     # ── Build model + load pretrain weights ────────────────────────
     model = build_model(model_name, activation=args.activation, num_classes=100)
+    # Materialize channel-wise affine params before loading the cls state-dict,
+    # otherwise UninitializedParameters reject the load.
+    if args.activation in ("nelu_affcw", "nilu_affcw"):
+        model.eval()
+        with torch.no_grad():
+            _ = model(torch.zeros(2, 3, 32, 32))
+        model.train()
     ck = torch.load(cls_ckpt, map_location="cpu", weights_only=False)
     state = ck.get("model", ck.get("state_dict", ck))
     state = {k.removeprefix("module.").removeprefix("_orig_mod."): v
