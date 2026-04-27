@@ -33,7 +33,10 @@ __all__ = [
 ]
 
 
-ACTIVATIONS = ("relu", "gelu", "silu", "nelu", "nilu")
+ACTIVATIONS = ("relu", "gelu", "silu", "nelu", "nilu",
+               "nelu_ln", "nilu_ln",
+               "nelu_aff", "nilu_aff",
+               "nelu_affcw", "nilu_affcw")
 MODELS = (
     "resnet20", "resnet56", "resnet110", "vgg16_bn",
     "shufflenetv2", "mobilenetv2", "densenet_bc_100_12",
@@ -47,6 +50,11 @@ def build_eval_model(
 ) -> nn.Module:
     """Build the model, load weights, move to device, set eval()."""
     model = build_model(name, activation=activation, num_classes=100)
+    # Channel-wise affine variants need a dummy forward to materialize
+    # γ_c, β_c before load_state_dict can map the saved tensors back.
+    if activation in ("nelu_affcw", "nilu_affcw"):
+        with torch.no_grad():
+            _ = model(torch.zeros(2, 3, 32, 32))
     load_checkpoint(model, checkpoint)
     return model.to(device).eval()
 
