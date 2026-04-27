@@ -28,7 +28,12 @@ def _aggregate(values: list[float], out: dict, key: str) -> None:
 
 
 def collect_gamma_stats(model: nn.Module, prefix: str = "gate_norm") -> dict:
-    """Collect per-module γ (and β when present) values with aggregates."""
+    """Collect per-module γ (and β when present) values with aggregates.
+
+    Handles both scalar variants (γ, β are 1-element parameters) and the
+    channel-wise variants (γ_c, β_c are length-C vectors). For channel-wise,
+    we log the per-layer mean to keep the W&B key shape uniform.
+    """
     gammas: list[float] = []
     betas: list[float] = []
     out: dict[str, float] = {}
@@ -36,14 +41,18 @@ def collect_gamma_stats(model: nn.Module, prefix: str = "gate_norm") -> dict:
         if not getattr(m, "_gate_norm_module", False):
             continue
         if hasattr(m, "gamma"):
-            g = m.gamma.detach().float().item()
+            t = m.gamma.detach().float()
+            if t.numel() == 0:
+                # UninitializedParameter (channel-wise variant before first forward)
+                continue
+            g = t.mean().item() if t.numel() > 1 else t.item()
             out[f"{prefix}/gamma/layer_{len(gammas)}"] = g
             gammas.append(g)
-        # NELU_LN / NiLU_LN carry a learnable β that shifts the gate's
-        # operating point. Logged separately so the trade-off slider's
-        # trajectory is visible in W&B.
         if hasattr(m, "beta"):
-            b = m.beta.detach().float().item()
+            t = m.beta.detach().float()
+            if t.numel() == 0:
+                continue
+            b = t.mean().item() if t.numel() > 1 else t.item()
             out[f"{prefix}/beta/layer_{len(betas)}"] = b
             betas.append(b)
 

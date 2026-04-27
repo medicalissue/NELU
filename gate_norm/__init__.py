@@ -23,7 +23,7 @@ torch.Size([4, 64, 32, 32])
 """
 
 from .activations import NELU, NiLU
-from .affine import NELU_AFF, NiLU_AFF
+from .affine import NELU_AFF, NiLU_AFF, NELU_AFFCW, NiLU_AFFCW
 from .core import GateNorm, gate_norm
 from .functional import nelu, nilu
 from .glu import NELUGLU, NiLUGLU, SwiGLU
@@ -38,6 +38,8 @@ __all__ = [
     "NiLU_LN",
     "NELU_AFF",
     "NiLU_AFF",
+    "NELU_AFFCW",
+    "NiLU_AFFCW",
     "NELUGLU",
     "NiLUGLU",
     "SwiGLU",

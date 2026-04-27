@@ -29,7 +29,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from gate_norm import (
-    NELU, NiLU, NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF, collect_gamma_stats,
+    NELU, NiLU, NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF,
+    NELU_AFFCW, NiLU_AFFCW, collect_gamma_stats,
 )
 from train.swap import (  # noqa: F401
     replace_activation,
@@ -195,6 +196,18 @@ def build_model(
             gamma_init=gamma_init,
         )
         print(f"Swapped {n} ReLU -> NiLU_AFF ({order}-activation axes)")
+    elif activation == "nelu_affcw":
+        n = replace_activation_auto_axes(
+            model, relu_types, NELU_AFFCW, activation_order=order,
+            gamma_init=gamma_init,
+        )
+        print(f"Swapped {n} ReLU -> NELU_AFFCW (channel-wise γ,β; {order} axes)")
+    elif activation == "nilu_affcw":
+        n = replace_activation_auto_axes(
+            model, relu_types, NiLU_AFFCW, activation_order=order,
+            gamma_init=gamma_init,
+        )
+        print(f"Swapped {n} ReLU -> NiLU_AFFCW (channel-wise γ,β; {order} axes)")
     else:
         raise ValueError(f"Unknown activation: {activation}")
 
@@ -458,7 +471,9 @@ def parse_args():
                     choices=list(_SUPPORTED_MODELS))
     p.add_argument("--activation", type=str, default="relu",
                     choices=["relu", "gelu", "silu", "nelu", "nilu",
-                             "nelu_ln", "nilu_ln", "nelu_aff", "nilu_aff"])
+                             "nelu_ln", "nilu_ln",
+                             "nelu_aff", "nilu_aff",
+                             "nelu_affcw", "nilu_affcw"])
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--val_batch_size", type=int, default=None,
@@ -683,7 +698,8 @@ def main():
         # Gamma (and β for *_ln variants) stats — gated activations only
         gamma_stats = {}
         if args.activation in ("nelu", "nilu", "nelu_ln", "nilu_ln",
-                               "nelu_aff", "nilu_aff"):
+                               "nelu_aff", "nilu_aff",
+                               "nelu_affcw", "nilu_affcw"):
             gamma_stats = collect_gamma_stats(_orig_module(model))
 
         # Gate entropy + variance (all activations)

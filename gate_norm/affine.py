@@ -88,3 +88,97 @@ class NiLU_AFF(_GateAffine):
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(t)
+
+
+class _GateAffineCW(GateNorm):
+    """Channel-wise affine gate: ``y = x · g(γ_c · x + β_c)``.
+
+    γ and β are per-channel learnable vectors, allowing each channel to
+    pick its own sigmoid sharpness and operating point. Parameters are
+    initialized lazily on the first forward (we don't know the channel
+    count at swap time without changing the swap policy).
+
+    Memory cost vs scalar variant: ``2 × C`` extra floats per layer,
+    negligible compared to the surrounding conv weights.
+    """
+
+    _CUDA_KIND = None
+
+    def __init__(
+        self,
+        norm_axes: NormAxes | DimsLike = "channel",
+        *,
+        eps: float = 1e-6,
+        gamma_init: float = 1.0,
+        beta_init: float = 0.0,
+    ) -> None:
+        # Skip GateNorm's gamma init (it's a scalar there); we'll lazily
+        # create per-channel γ and β on the first forward.
+        nn.Module.__init__(self)
+        self.norm_axes = norm_axes
+        self.eps = eps
+        self._gate_norm_module = True
+        self._gamma_init = float(gamma_init)
+        self._beta_init = float(beta_init)
+        # Empty parameter slots for state-dict compatibility before lazy init.
+        # nn.Parameter with an empty tensor lets load_state_dict materialize
+        # the right shape on resume.
+        self.gamma = nn.UninitializedParameter()
+        self.beta = nn.UninitializedParameter()
+
+    @staticmethod
+    def _gate_python(t: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _materialize(self, n_channels: int, device, dtype):
+        if isinstance(self.gamma, nn.UninitializedParameter):
+            self.gamma.materialize((n_channels,), device=device, dtype=torch.float32)
+            with torch.no_grad():
+                self.gamma.fill_(self._gamma_init)
+        if isinstance(self.beta, nn.UninitializedParameter):
+            self.beta.materialize((n_channels,), device=device, dtype=torch.float32)
+            with torch.no_grad():
+                self.beta.fill_(self._beta_init)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # Channel axis is dim=1 for NCHW (4D) and dim=-1 for (B, D) / (B, L, D).
+        # We use the convention that channels are the last axis the gate
+        # broadcasts to — dim=1 for 4D, dim=-1 otherwise.
+        if z.ndim == 4:
+            channel_dim = 1
+            shape = (1, z.size(1), 1, 1)
+        else:
+            channel_dim = -1
+            shape = (1,) * (z.ndim - 1) + (z.size(-1),)
+        n_channels = z.size(channel_dim)
+        self._materialize(n_channels, z.device, z.dtype)
+        z32 = z.float() if z.dtype != torch.float32 else z
+        gamma = self.gamma.view(shape)
+        beta = self.beta.view(shape)
+        gate = type(self)._gate_python(gamma * z32 + beta)
+        return z * gate.to(z.dtype)
+
+    def extra_repr(self) -> str:
+        if isinstance(self.gamma, nn.UninitializedParameter):
+            return f"norm_axes={self.norm_axes!r}, channel-wise (lazy)"
+        return (
+            f"norm_axes={self.norm_axes!r}, "
+            f"gamma=Vec[{self.gamma.numel()}] (mean={self.gamma.mean().item():.3e}), "
+            f"beta=Vec[{self.beta.numel()}] (mean={self.beta.mean().item():.3e})"
+        )
+
+
+class NELU_AFFCW(_GateAffineCW):
+    """Channel-wise NELU_AFF: ``y = x · Φ(γ_c·x + β_c)``."""
+
+    @staticmethod
+    def _gate_python(t: torch.Tensor) -> torch.Tensor:
+        return _phi(t)
+
+
+class NiLU_AFFCW(_GateAffineCW):
+    """Channel-wise NiLU_AFF: ``y = x · σ(γ_c·x + β_c)``."""
+
+    @staticmethod
+    def _gate_python(t: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(t)

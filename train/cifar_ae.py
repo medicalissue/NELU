@@ -39,7 +39,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from gate_norm import NELU, NiLU, NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF
+from gate_norm import (
+    NELU, NiLU, NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF,
+    NELU_AFFCW, NiLU_AFFCW,
+)
 from train.cifar import (
     CIFAR100_MEAN, CIFAR100_STD, build_model,
     _load_config_with_includes,  # reuse cls trainer's yaml loader
@@ -128,11 +131,20 @@ def get_loaders(data_dir: str, batch_size: int, workers: int):
 def collect_beta_stats(model: nn.Module) -> list[dict]:
     out: list[dict] = []
     for name, mod in model.named_modules():
-        if isinstance(mod, (NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF)):
+        if isinstance(mod, (NELU_LN, NiLU_LN,
+                            NELU_AFF, NiLU_AFF,
+                            NELU_AFFCW, NiLU_AFFCW)):
+            # Channel-wise variants store γ, β as length-C vectors; report
+            # the mean to keep the per-layer JSON shape uniform.
+            gt = mod.gamma.detach().float()
+            bt = mod.beta.detach().float()
+            if gt.numel() == 0 or bt.numel() == 0:
+                continue
             out.append({
                 "name": name,
-                "gamma": float(mod.gamma.detach().cpu().item()),
-                "beta": float(mod.beta.detach().cpu().item()),
+                "gamma": float(gt.mean().item() if gt.numel() > 1 else gt.item()),
+                "beta": float(bt.mean().item() if bt.numel() > 1 else bt.item()),
+                "n_channels": int(gt.numel()),
             })
     return out
 
@@ -147,7 +159,8 @@ def main() -> None:
     p.add_argument("--activation", required=True,
                    choices=["relu", "gelu", "silu",
                             "nelu", "nilu", "nelu_ln", "nilu_ln",
-                            "nelu_aff", "nilu_aff"])
+                            "nelu_aff", "nilu_aff",
+                            "nelu_affcw", "nilu_affcw"])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output_dir", required=True)
     p.add_argument("--resume", default=None,
@@ -228,7 +241,9 @@ def main() -> None:
             p_.requires_grad_(False)
         beta_params = []
         for mod in encoder.modules():
-            if isinstance(mod, (NELU_LN, NiLU_LN, NELU_AFF, NiLU_AFF)):
+            if isinstance(mod, (NELU_LN, NiLU_LN,
+                                NELU_AFF, NiLU_AFF,
+                                NELU_AFFCW, NiLU_AFFCW)):
                 mod.beta.requires_grad_(True)
                 beta_params.append(mod.beta)
         param_groups = [

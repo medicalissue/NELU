@@ -32,3 +32,12 @@ configs/cifar100/vgg16_bn.yaml:gelu:42:ae
 configs/cifar100/vgg16_bn.yaml:gelu:43:ae
 configs/cifar100/resnet56.yaml:gelu:42:ae
 configs/cifar100/resnet56.yaml:gelu:43:ae
+# NELU_AFFCW — channel-wise γ,β variant: cls (4) + AE (4)
+configs/cifar100/vgg16_bn.yaml:nelu_affcw:42:cls
+configs/cifar100/vgg16_bn.yaml:nelu_affcw:43:cls
+configs/cifar100/resnet56.yaml:nelu_affcw:42:cls
+configs/cifar100/resnet56.yaml:nelu_affcw:43:cls
+configs/cifar100/vgg16_bn.yaml:nelu_affcw:42:ae
+configs/cifar100/vgg16_bn.yaml:nelu_affcw:43:ae
+configs/cifar100/resnet56.yaml:nelu_affcw:42:ae
+configs/cifar100/resnet56.yaml:nelu_affcw:43:ae
