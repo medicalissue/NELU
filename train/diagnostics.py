@@ -57,14 +57,44 @@ def _record(out: Dict[str, float], gate: torch.Tensor, idx: int) -> None:
 
 
 def _gated_hook(idx: int, stats: Dict[str, float]):
-    def fn(module: GateNorm, inp, _out):
+    """Reconstruct the gate value seen inside the module's forward.
+
+    Standard ``GateNorm`` (NELU/NiLU) computes ``g(γ · z / rms(z))``. The
+    LN-β variant uses LayerNorm-style stats plus a β shift, and the
+    affine variant skips normalization entirely. Channel-wise variants
+    use a length-C γ, β. We dispatch on type to mirror the right forward;
+    if the module is none of the known shapes we just measure the
+    output / input ratio as a stand-in gate.
+    """
+    # Lazy import to avoid circular deps at module load time.
+    from gate_norm.ln_beta import _GateNormLN
+    from gate_norm.affine import _GateAffine, _GateAffineCW
+
+    def fn(module: GateNorm, inp, out):
         with torch.no_grad():
             z = inp[0]
-            axes = resolve_axes(z.ndim, module.norm_axes)
-            rsigma = layer_stats(z, axes, module.eps)
             z32 = z.float() if z.dtype != torch.float32 else z
-            t = module.gamma * z32 * rsigma
-            gate = type(module)._gate_python(t)
+            if isinstance(module, _GateAffineCW):
+                # Channel-wise affine: γ_c, β_c are length-C vectors
+                shape = (1, z.size(1), 1, 1) if z.ndim == 4 else (1,) * (z.ndim - 1) + (z.size(-1),)
+                gate = type(module)._gate_python(
+                    module.gamma.view(shape) * z32 + module.beta.view(shape)
+                )
+            elif isinstance(module, _GateAffine):
+                gate = type(module)._gate_python(module.gamma * z32 + module.beta)
+            elif isinstance(module, _GateNormLN):
+                axes = resolve_axes(z.ndim, module.norm_axes)
+                mu = z32.mean(dim=axes, keepdim=True)
+                var = z32.var(dim=axes, keepdim=True, unbiased=False)
+                rsigma = (var + module.eps).rsqrt()
+                t = module.gamma * (z32 - mu) * rsigma + module.beta
+                gate = type(module)._gate_python(t)
+            else:
+                # Standard NELU / NiLU: scalar γ, RMS-only normalize
+                axes = resolve_axes(z.ndim, module.norm_axes)
+                rsigma = layer_stats(z, axes, module.eps)
+                t = module.gamma * z32 * rsigma
+                gate = type(module)._gate_python(t)
             _record(stats, gate, idx)
     return fn
 
