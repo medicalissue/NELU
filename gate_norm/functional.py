@@ -1,9 +1,11 @@
-"""Functional helpers for quick experiments.
+"""Functional helpers for quick experiments — RMS-only legacy form.
 
-These mirror ``torch.nn.functional.gelu`` / ``torch.nn.functional.silu``
-but apply Gate Normalization with a user-supplied ``γ``. Production
-code should use the :class:`gate_norm.NELU` / :class:`gate_norm.NiLU`
-modules so γ is a learned parameter that ships through ``state_dict``.
+``nelu(z, γ)`` and ``nilu(z, γ)`` mirror the *legacy* RMS-only,
+scalar-γ activation (matching :class:`gate_norm.NELU_RMS` /
+:class:`gate_norm.NiLU_RMS`). They are kept for unit tests and
+quick standalone experiments — the default :class:`gate_norm.NELU` /
+:class:`gate_norm.NiLU` modules use LN-normalize + per-channel γ_c, β_c,
+which doesn't fit a small functional helper signature.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ def nelu(
     z: torch.Tensor,
     gamma: float | torch.Tensor = 1.0,
     *,
-    norm_axes: NormAxes | DimsLike = "channel",
+    norm_axes: NormAxes | DimsLike = "position",
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """``z · Φ(γ · z / rms(z))`` with Φ the Gaussian CDF."""
@@ -48,7 +50,7 @@ def nilu(
     z: torch.Tensor,
     gamma: float | torch.Tensor = 1.0,
     *,
-    norm_axes: NormAxes | DimsLike = "channel",
+    norm_axes: NormAxes | DimsLike = "position",
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """``z · σ(γ · z / rms(z))`` with σ the logistic sigmoid."""

@@ -1,0 +1,7 @@
+# DeiT-Base + NELU (LN-normalize + per-channel γ_c, β_c, token-pool)
+# sanity launch — single job, single spot, single seed.
+#
+# Goal: verify the new default NELU forward/backward survives a real
+# ImageNet training step and doesn't blow up before any meaningful
+# convergence claim is made.
+configs/imagenet/deit_base.yaml:nelu

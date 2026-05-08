@@ -65,8 +65,8 @@ model_ema_decay: 0.9999      # Unified across all archs (MMPretrain used 0.99996
 seed: 42
 
 activation: gelu
-norm_axes: [-1]               # DeiT FFN activation follows a channel-mixing
-                             # Linear (fc1) on (N, L, D); RMS axis is the
-                             # channel dim = last axis.
+# norm_axes omitted — default "position" alias rank-dispatches to the
+# token axis (1,) for 3-D ViT activations: pool over tokens to estimate
+# per-channel scale, then apply per-channel γ_c, β_c gate.
 gamma_init: 1.0
 log_gate_stats_every: 1

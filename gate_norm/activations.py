@@ -1,13 +1,31 @@
-"""Gate-normalized instances of GELU and SiLU.
+"""Default NELU and NiLU activations.
 
-* :class:`NELU` — gate function is the Gaussian CDF Φ, so ``NELU`` is
-  the scale-invariant counterpart of GELU.
-* :class:`NiLU` — gate function is the sigmoid, making ``NiLU`` the
-  scale-invariant counterpart of SiLU.
+NELU and NiLU are the canonical gate-normalized activations of the
+paper. Both share the same recipe — pool over the position axis, get a
+per-channel statistic, normalize, gate — and differ only in the gate
+function:
 
-Both are drop-in replacements for their baselines: construct one in
-place of ``nn.GELU()`` / ``nn.SiLU()`` and pass ``norm_axes`` matching
-the mixing axes of the preceding linear operation.
+* :class:`NELU` — Gaussian CDF Φ. Counterpart of GELU.
+* :class:`NiLU` — sigmoid σ.    Counterpart of SiLU.
+
+Form
+----
+::
+
+    μ_c, var_c = pool over position axis (CNN: H×W; Transformer: T)
+    z_norm     = (x − μ_c) / sqrt(var_c + ε)
+    gate       = g(γ_c · z_norm + β_c)        # γ_c, β_c learnable per channel
+    y          = x · gate
+
+The position axis is rank-dispatched at runtime via the
+``"position"`` alias in :func:`gate_norm.layout.resolve_axes`. The
+per-channel parameters are materialized lazily on the first forward.
+
+Backward-compatible aliases
+---------------------------
+The previous RMS-only, scalar-γ NELU is kept available as
+:class:`NELU_RMS` / :class:`NiLU_RMS` for ablation. The fused CUDA
+kernel covers only those, since it expects scalar γ.
 """
 
 from __future__ import annotations
@@ -17,6 +35,7 @@ import math
 import torch
 
 from .core import GateNorm
+from .ln_beta import _GateNormLN
 
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
@@ -26,20 +45,46 @@ def _phi(t: torch.Tensor) -> torch.Tensor:
     return 0.5 * (1.0 + torch.erf(t * _INV_SQRT2))
 
 
-class NELU(GateNorm):
-    """GELU with gate normalization: ``y = z · Φ(γ · z / rms(z))``."""
+# ── Default: LN-normalize + channel-wise affine ──────────────────────────
 
-    _CUDA_KIND = 0  # GATE_PHI in gate_norm_common.cuh
+
+class NELU(_GateNormLN):
+    """Default NELU: ``y = x · Φ(γ_c · LN_c(x) + β_c)``."""
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
         return _phi(t)
 
 
-class NiLU(GateNorm):
-    """SiLU with gate normalization: ``y = z · σ(γ · z / rms(z))``."""
+class NiLU(_GateNormLN):
+    """Default NiLU: ``y = x · σ(γ_c · LN_c(x) + β_c)``."""
 
-    _CUDA_KIND = 1  # GATE_SIGMOID in gate_norm_common.cuh
+    @staticmethod
+    def _gate_python(t: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(t)
+
+
+# ── Legacy RMS-only, scalar γ (kept for ablation) ────────────────────────
+
+
+class NELU_RMS(GateNorm):
+    """Legacy RMS-only NELU: ``y = x · Φ(γ · x / rms(x))``.
+
+    The earlier paper draft used this scalar-γ, RMSNorm-style gate. Kept
+    here so the fused CUDA kernel and ablations have a clean reference.
+    """
+
+    _CUDA_KIND = 0  # GATE_PHI
+
+    @staticmethod
+    def _gate_python(t: torch.Tensor) -> torch.Tensor:
+        return _phi(t)
+
+
+class NiLU_RMS(GateNorm):
+    """Legacy RMS-only NiLU: ``y = x · σ(γ · x / rms(x))``."""
+
+    _CUDA_KIND = 1  # GATE_SIGMOID
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:

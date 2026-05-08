@@ -1,11 +1,16 @@
 """Tests for the Gate Normalization core and its concrete instances.
 
-Form under test::
+Form under test (legacy RMS-only, scalar-γ NELU)::
 
     y = x · g(γ · x / rms(x))
 
 with ``γ`` a single learnable scalar and
 ``rms(x) = sqrt(mean(x²) + eps)``.
+
+The default :class:`gate_norm.NELU` is now LN-normalize + per-channel
+``γ_c, β_c``; the legacy RMS form is kept as :class:`NELU_RMS` /
+:class:`NiLU_RMS`. These tests target the legacy form (the GateNorm
+base class with scalar γ); a separate suite covers the new default.
 """
 
 from __future__ import annotations
@@ -15,7 +20,16 @@ import math
 import pytest
 import torch
 
-from gate_norm import NELU, NELUGLU, NiLU, NiLUGLU, SwiGLU, gate_norm
+# Legacy RMS form is exposed as NELU_RMS / NiLU_RMS in the package; alias
+# them locally to keep the rest of the file readable.
+from gate_norm import (
+    NELU_RMS as NELU,
+    NiLU_RMS as NiLU,
+    NELUGLU,
+    NiLUGLU,
+    SwiGLU,
+    gate_norm,
+)
 from gate_norm.core import GateNorm
 
 
