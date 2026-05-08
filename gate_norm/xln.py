@@ -54,7 +54,7 @@ class _xLN_Base(GateNorm):
 
     def __init__(
         self,
-        norm_axes: NormAxes | DimsLike = "channel",
+        norm_axes: NormAxes | DimsLike = "position",
         *,
         eps: float = 1e-6,
         gamma_init: float = 0.0,   # LayerScale-style by default

@@ -14,6 +14,13 @@ Two services:
 
 Aliases:
 
+* ``"position"`` — **the position axis** of the tensor, dispatched by rank:
+    - 4-D ``(B, C, H, W)``  → ``(2, 3)`` (spatial)        — CNN
+    - 3-D ``(B, T, C)``     → ``(1,)``  (token)           — Transformer
+    - 2-D ``(B, C)``        → ``(1,)``  (degenerate fallback)
+  Unified policy: pool over the position axis to get a per-channel
+  statistic, then broadcast it back across positions. Same primitive in
+  CNN and Transformer; only the axis index differs.
 * ``"channel"`` — last axis only. Matches channel-mixing linear operations
   (transformer FFNs, ConvNeXt depthwise→pointwise, channels-last activations
   at ``(B, D)`` / ``(B, L, D)`` / ``(B, H, W, D)``).
@@ -35,11 +42,23 @@ import torch
 
 
 DimsLike = int | Iterable[int]
-NormAxes = Literal["channel", "sample"]
+NormAxes = Literal["position", "channel", "sample"]
 
+# Static aliases: tuple of axes (negative for "from end").
 _ALIASES: dict[str, tuple[int, ...]] = {
     "channel": (-1,),
     "sample":  (-3, -2, -1),
+}
+
+# Rank-dispatched aliases: ndim → axis tuple. Resolved at call time.
+# "position": pool over the position axis (spatial in CNN, token in
+# Transformer), keeping per-channel statistics.
+_RANK_ALIASES: dict[str, dict[int, tuple[int, ...]]] = {
+    "position": {
+        2: (1,),         # (B, C)        — degenerate fallback
+        3: (1,),         # (B, T, C)     — Transformer: pool over tokens
+        4: (2, 3),       # (B, C, H, W)  — CNN: pool over spatial
+    },
 }
 
 
@@ -50,15 +69,25 @@ def resolve_axes(ndim: int, spec: NormAxes | DimsLike) -> tuple[int, ...]:
     or out-of-range axes and on string aliases incompatible with ``ndim``.
     """
     if isinstance(spec, str):
-        if spec not in _ALIASES:
+        if spec in _RANK_ALIASES:
+            table = _RANK_ALIASES[spec]
+            if ndim not in table:
+                raise ValueError(
+                    f"alias {spec!r} only supports ndim in {sorted(table)}, "
+                    f"got ndim={ndim}"
+                )
+            raw = table[ndim]
+        elif spec in _ALIASES:
+            raw = _ALIASES[spec]
+            if ndim < len(raw):
+                raise ValueError(
+                    f"alias {spec!r} needs ndim >= {len(raw)}, got ndim={ndim}"
+                )
+        else:
+            valid = sorted(set(_ALIASES) | set(_RANK_ALIASES))
             raise ValueError(
-                f"unknown norm-axes alias {spec!r}; valid: {sorted(_ALIASES)} "
+                f"unknown norm-axes alias {spec!r}; valid: {valid} "
                 "or an explicit axis tuple"
-            )
-        raw = _ALIASES[spec]
-        if ndim < len(raw):
-            raise ValueError(
-                f"alias {spec!r} needs ndim >= {len(raw)}, got ndim={ndim}"
             )
     elif isinstance(spec, int):
         raw = (spec,)

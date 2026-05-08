@@ -44,8 +44,10 @@ class GateNorm(nn.Module):
 
     Parameters
     ----------
-    norm_axes : str or tuple of int, default ``"channel"``
-        Axes over which the RMS is computed.
+    norm_axes : str or tuple of int, default ``"position"``
+        Axes over which the RMS is computed. ``"position"`` is rank-
+        dispatched: spatial ``(2, 3)`` for 4-D CNN tensors, token
+        ``(1,)`` for 3-D Transformer tensors.
     eps : float, default ``1e-6``
         Numerical floor added inside the RMS before sqrt.
     gamma_init : float, default ``1.0``
@@ -66,7 +68,7 @@ class GateNorm(nn.Module):
 
     def __init__(
         self,
-        norm_axes: NormAxes | DimsLike = "channel",
+        norm_axes: NormAxes | DimsLike = "position",
         *,
         eps: float = 1e-6,
         gamma_init: float = _DEFAULT_GAMMA_INIT,
@@ -116,7 +118,7 @@ def gate_norm(
     gate_fn: Callable[[torch.Tensor], torch.Tensor],
     gamma: float | torch.Tensor = 1.0,
     *,
-    norm_axes: NormAxes | DimsLike = "channel",
+    norm_axes: NormAxes | DimsLike = "position",
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Functional form: ``z · gate_fn(γ · z / rms(z))``."""

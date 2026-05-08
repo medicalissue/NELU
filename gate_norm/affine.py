@@ -51,7 +51,7 @@ class _GateAffine(GateNorm):
 
     def __init__(
         self,
-        norm_axes: NormAxes | DimsLike = "channel",
+        norm_axes: NormAxes | DimsLike = "position",
         *,
         eps: float = 1e-6,
         gamma_init: float = 1.0,
@@ -106,7 +106,7 @@ class _GateAffineCW(GateNorm):
 
     def __init__(
         self,
-        norm_axes: NormAxes | DimsLike = "channel",
+        norm_axes: NormAxes | DimsLike = "position",
         *,
         eps: float = 1e-6,
         gamma_init: float = 1.0,
