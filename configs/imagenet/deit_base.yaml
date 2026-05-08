@@ -12,8 +12,11 @@ model: deit_base_patch16_224
 num_classes: 1000
 drop: 0.0
 drop_path: 0.1
-model_kwargs:
-  init_values: 1.0e-6          # LayerScale (Touvron et al., CaiT 2021).
+# LayerScale (CaiT 2021) deliberately disabled: with LS_init=1e-6 the
+# MLP residual branch is muted at init, masking the new NELU's effect.
+# We compare against the baseline run a1na4ngx (deit_base-gelu, no LS,
+# eval_top1 80.65) which used the same recipe minus the activation.
+# To re-enable LS, restore: model_kwargs: { init_values: 1.0e-6 }
 
 data_dir: /data/imagenet
 input_size: [3, 224, 224]
