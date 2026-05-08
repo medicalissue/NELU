@@ -111,20 +111,27 @@ class _GateAffineCW(GateNorm):
         eps: float = 1e-6,
         gamma_init: float = 1.0,
         beta_init: float = 0.0,
+        num_channels: int | None = None,
     ) -> None:
-        # Skip GateNorm's gamma init (it's a scalar there); we'll lazily
-        # create per-channel γ and β on the first forward.
+        # Skip GateNorm's gamma init (it's a scalar there); we'll either
+        # eagerly create per-channel γ_c, β_c (when num_channels is
+        # supplied by the swap policy) or fall back to lazy init.
         nn.Module.__init__(self)
         self.norm_axes = norm_axes
         self.eps = eps
         self._gate_norm_module = True
         self._gamma_init = float(gamma_init)
         self._beta_init = float(beta_init)
-        # Empty parameter slots for state-dict compatibility before lazy init.
-        # nn.Parameter with an empty tensor lets load_state_dict materialize
-        # the right shape on resume.
-        self.gamma = nn.UninitializedParameter()
-        self.beta = nn.UninitializedParameter()
+        if num_channels is not None:
+            self.gamma = nn.Parameter(
+                torch.full((int(num_channels),), float(gamma_init), dtype=torch.float32)
+            )
+            self.beta = nn.Parameter(
+                torch.full((int(num_channels),), float(beta_init), dtype=torch.float32)
+            )
+        else:
+            self.gamma = nn.UninitializedParameter()
+            self.beta = nn.UninitializedParameter()
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:

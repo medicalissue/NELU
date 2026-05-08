@@ -59,17 +59,27 @@ class _xLN_Base(GateNorm):
         eps: float = 1e-6,
         gamma_init: float = 0.0,   # LayerScale-style by default
         beta_init: float = 0.0,
+        num_channels: int | None = None,
     ) -> None:
         # Skip GateNorm's scalar gamma init; xLN wants a per-channel
-        # vector so we materialize lazily.
+        # vector. With num_channels supplied we eagerly materialize;
+        # otherwise fall back to lazy init on the first forward.
         nn.Module.__init__(self)
         self.norm_axes = norm_axes
         self.eps = eps
         self._gate_norm_module = True
         self._gamma_init = float(gamma_init)
         self._beta_init = float(beta_init)
-        self.gamma = nn.UninitializedParameter()
-        self.beta = nn.UninitializedParameter()
+        if num_channels is not None:
+            self.gamma = nn.Parameter(
+                torch.full((int(num_channels),), float(gamma_init), dtype=torch.float32)
+            )
+            self.beta = nn.Parameter(
+                torch.full((int(num_channels),), float(beta_init), dtype=torch.float32)
+            )
+        else:
+            self.gamma = nn.UninitializedParameter()
+            self.beta = nn.UninitializedParameter()
 
     def _materialize(self, n_channels: int, device, dtype):
         if isinstance(self.gamma, nn.UninitializedParameter):

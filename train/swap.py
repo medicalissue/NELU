@@ -75,6 +75,23 @@ def default_norm_axes(activation: str, model_name: str) -> NormAxes:
 # ── Core replacer ────────────────────────────────────────────────────────
 
 
+def _channels_of(mod: nn.Module) -> int | None:
+    """Return the channel-count produced by a Linear/Conv module, or None.
+
+    The number of feature channels each activation sees equals the
+    out-features of the nearest preceding Linear/Conv. We use that to
+    eagerly materialize per-channel γ_c, β_c at swap time so the NELU
+    module behaves like a regular ``nn.Module`` from installation
+    onwards (no LazyModule gotchas around ``.numel()`` / ``state_dict``
+    / DDP).
+    """
+    if isinstance(mod, nn.Conv2d):
+        return mod.out_channels
+    if isinstance(mod, nn.Linear):
+        return mod.out_features
+    return None
+
+
 def _replace_with_policy(
     model: nn.Module,
     baseline_types: tuple[type, ...],
@@ -92,16 +109,49 @@ def _replace_with_policy(
     forward call: spatial for 4-D tensors, token for 3-D tensors. This
     replaces the previous per-block / per-Conv2d policy which has been
     subsumed by the unified position-axis alias.
+
+    Two-pass walk:
+      Pass 1 collects every Linear/Conv2d in module-declaration order so
+      we can read the nearest-preceding linear op for each activation
+      site (its ``out_*`` is the channel count the NELU will see).
+      Pass 2 installs each gate, threading ``num_channels`` so per-
+      channel γ_c, β_c are materialized eagerly.
     """
-    n = 0
-    for parent_name, parent in list(model.named_modules()):
-        for child_name, child in list(parent.named_children()):
+    linear_ops: list[nn.Module] = []
+    sites: list[tuple[nn.Module, str, int]] = []
+
+    def sweep(root: nn.Module) -> None:
+        for name, child in root.named_children():
+            if isinstance(child, (nn.Conv2d, nn.Linear)):
+                linear_ops.append(child)
             if isinstance(child, baseline_types):
-                setattr(parent, child_name, gate_cls(
-                    norm_axes=default_axes, eps=eps,
-                    gamma_init=gamma_init,
-                ))
-                n += 1
+                sites.append((root, name, len(linear_ops)))
+            else:
+                sweep(child)
+
+    sweep(model)
+
+    n = 0
+    for parent, child_name, idx in sites:
+        nc: int | None = None
+        if idx > 0:
+            nc = _channels_of(linear_ops[idx - 1])
+        try:
+            new_mod = gate_cls(
+                norm_axes=default_axes, eps=eps,
+                gamma_init=gamma_init,
+                num_channels=nc,
+            )
+        except TypeError:
+            # Subclass doesn't accept ``num_channels`` (legacy scalar-γ
+            # path: NELU_RMS, NiLU_RMS). Fall back to the original
+            # signature; those modules don't need eager materialization.
+            new_mod = gate_cls(
+                norm_axes=default_axes, eps=eps,
+                gamma_init=gamma_init,
+            )
+        setattr(parent, child_name, new_mod)
+        n += 1
     return n
 
 
@@ -237,13 +287,44 @@ def replace_activation_auto_axes(
     if activation_order not in ("pre", "post"):
         raise ValueError(f"activation_order must be 'pre' or 'post'")
 
-    n = 0
-    for parent in model.modules():
-        for name, child in list(parent.named_children()):
+    # Two-pass: collect Linear/Conv ops in declaration order so we can
+    # read the nearest-preceding (post-act) or nearest-following (pre-act)
+    # linear op's ``out_*`` channel count for each activation site.
+    linear_ops: list[nn.Module] = []
+    sites: list[tuple[nn.Module, str, int]] = []
+
+    def sweep(root: nn.Module) -> None:
+        for name, child in root.named_children():
+            if isinstance(child, (nn.Conv2d, nn.Linear)):
+                linear_ops.append(child)
             if isinstance(child, baseline_types):
-                setattr(parent, name, gate_cls(
-                    norm_axes=default_axes, eps=eps,
-                    gamma_init=gamma_init,
-                ))
-                n += 1
+                sites.append((root, name, len(linear_ops)))
+            else:
+                sweep(child)
+
+    sweep(model)
+
+    n = 0
+    for parent, name, idx in sites:
+        nc: int | None = None
+        if activation_order == "post":
+            if idx > 0:
+                nc = _channels_of(linear_ops[idx - 1])
+        else:  # "pre"
+            if idx < len(linear_ops):
+                nc = _channels_of(linear_ops[idx])
+        try:
+            new_mod = gate_cls(
+                norm_axes=default_axes, eps=eps,
+                gamma_init=gamma_init,
+                num_channels=nc,
+            )
+        except TypeError:
+            # Legacy scalar-γ subclass that doesn't accept num_channels.
+            new_mod = gate_cls(
+                norm_axes=default_axes, eps=eps,
+                gamma_init=gamma_init,
+            )
+        setattr(parent, name, new_mod)
+        n += 1
     return n

@@ -26,7 +26,7 @@ _REQUIRED_IMAGENET_KEYS = {
     "model", "num_classes", "data_dir",
     "batch_size", "opt", "weight_decay",
     "sched", "epochs", "warmup_epochs",
-    "activation", "norm_axes",
+    "activation",
     "gamma_init",
     "seed",
 }
@@ -35,10 +35,14 @@ _REQUIRED_IMAGENET_KEYS = {
 def _norm_axes_token(cfg: dict) -> object:
     """Return a hashable view of norm_axes for schema checks.
 
-    YAML lists (e.g. ``[-1]``) are unhashable so we can't put them straight
-    into a ``set``; convert to tuple when necessary.
+    Returns ``None`` when the config omits ``norm_axes`` (the new
+    default policy: ``train.swap.default_norm_axes`` returns
+    ``"position"``, rank-dispatched at runtime). YAML lists (e.g.
+    ``[-1]``) are unhashable so we convert them to tuples.
     """
-    axes = cfg["norm_axes"]
+    axes = cfg.get("norm_axes")
+    if axes is None:
+        return None
     if isinstance(axes, list):
         return tuple(axes)
     return axes
@@ -57,9 +61,11 @@ def test_imagenet_config_values_are_sane(path: Path) -> None:
     assert cfg["num_classes"] == 1000
     assert cfg["activation"] in {"relu", "gelu", "silu", "nelu", "nilu"}
     axes = _norm_axes_token(cfg)
-    valid_aliases = {"channel", "sample"}
-    # Either an alias or an explicit axis tuple
-    assert axes in valid_aliases or isinstance(axes, tuple), (
+    valid_aliases = {"position", "channel", "sample"}
+    # ``norm_axes`` is now optional — when omitted, swap.default_norm_axes
+    # picks the rank-dispatched ``"position"`` alias. When present it
+    # must be either a known alias or an explicit axis tuple.
+    assert axes is None or axes in valid_aliases or isinstance(axes, tuple), (
         f"{path.name}: norm_axes={axes!r} is neither an alias nor an axis tuple"
     )
     assert cfg["seed"] == 42, "All shipped configs pin seed=42 for comparability."
@@ -87,20 +93,28 @@ def test_every_family_has_both_scales() -> None:
 
 
 def test_axis_policy_matches_architecture_family() -> None:
-    """Transformers and ConvNeXt normalize per channel; EfficientNet per sample."""
+    """Configs use the unified ``"position"`` default, or override explicitly.
+
+    Under the new policy, ``norm_axes`` is rank-dispatched at runtime
+    (CNN→spatial, Tx→token), so configs typically just omit it. Legacy
+    explicit values are still tolerated for backward-compatible schemas.
+    """
     for path in IMAGENET_CONFIGS:
         cfg = yaml.safe_load(path.read_text())
         axes = _norm_axes_token(cfg)
         model = cfg["model"]
+        if axes is None or axes == "position":
+            # New default — rank-dispatched at runtime.
+            continue
         if model.startswith(("deit_", "swin_", "vit_", "convnext_")):
-            # Either the "channel" alias or an explicit last-axis tuple.
+            # Legacy explicit channel-axis spec.
             assert axes in {"channel", (-1,)}, (
-                f"{path.name}: expected channel-axis gate stats, got {axes!r}"
+                f"{path.name}: expected position/channel-axis gate stats, got {axes!r}"
             )
         elif model.startswith("efficientnet_"):
+            # Legacy explicit sample-axis spec.
             assert axes == "sample", (
-                f"{path.name}: EfficientNet should default to 'sample' "
-                f"(per-site overrides apply via train.swap); got {axes!r}"
+                f"{path.name}: EfficientNet legacy spec should be 'sample'; got {axes!r}"
             )
 
 

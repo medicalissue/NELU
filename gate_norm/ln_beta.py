@@ -74,16 +74,29 @@ class _GateNormLN(GateNorm):
         eps: float = 1e-6,
         gamma_init: float = 1.0,
         beta_init: float = 0.0,
+        num_channels: int | None = None,
     ) -> None:
-        # Skip GateNorm's scalar gamma init — we use lazy per-channel γ_c, β_c.
+        # Skip GateNorm's scalar gamma init — we use per-channel γ_c, β_c.
+        # When ``num_channels`` is supplied (the typical swap path), we
+        # materialize γ_c, β_c eagerly so the module behaves like a
+        # standard Module from the moment it's installed (no LazyModule
+        # gotchas around .numel() / state_dict / DDP).
         nn.Module.__init__(self)
         self.norm_axes = norm_axes
         self.eps = eps
         self._gate_norm_module = True
         self._gamma_init = float(gamma_init)
         self._beta_init = float(beta_init)
-        self.gamma = nn.UninitializedParameter()
-        self.beta = nn.UninitializedParameter()
+        if num_channels is not None:
+            self.gamma = nn.Parameter(
+                torch.full((int(num_channels),), float(gamma_init), dtype=torch.float32)
+            )
+            self.beta = nn.Parameter(
+                torch.full((int(num_channels),), float(beta_init), dtype=torch.float32)
+            )
+        else:
+            self.gamma = nn.UninitializedParameter()
+            self.beta = nn.UninitializedParameter()
 
     @staticmethod
     def _gate_python(t: torch.Tensor) -> torch.Tensor:
