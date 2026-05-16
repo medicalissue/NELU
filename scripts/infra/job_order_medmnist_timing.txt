@@ -1,0 +1,9 @@
+# MedMNIST timing-calibration queue — 4 runs spanning the size extremes.
+#   <dataset>:<model>:<activation>:<seed>
+# Largest (tissuemnist 165k) and smallest (breastmnist 546) × resnet18/50,
+# full 100-epoch runs, NELU (the costliest activation: adds normalize).
+# Total GPU-hours of the 360-run campaign is interpolated from these.
+tissuemnist:resnet18:nelu:42
+tissuemnist:resnet50:nelu:42
+breastmnist:resnet18:nelu:42
+breastmnist:resnet50:nelu:42

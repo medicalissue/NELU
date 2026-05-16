@@ -76,9 +76,22 @@ exp_complete() {
 #   "<cfg>:<act>"                 ImageNet pair
 #   "<cfg>:<act>:<seed>"          CIFAR triple
 #   "<cfg>:<act>:<seed>:<mode>"   β-pipeline 4-tuple (mode ∈ cls, ae)
+#   "<ds>:<model>:<act>:<seed>"   MedMNIST 4-tuple, only when
+#                                 JOB_EXP_SCHEME=medmnist
 # The resulting exp must match the S3 prefix the slot script PUTs to.
+#
+# MedMNIST shares the ':'-delimited 4-tuple shape with the β-pipeline but
+# has a different field order and exp scheme (<ds>-<model>-<act>-s<seed>).
+# Disambiguate via JOB_EXP_SCHEME, set by launch_medmnist.sh, so the
+# CIFAR/ImageNet/β paths are byte-for-byte unchanged.
 _exp_from_entry() {
     local entry="$1"
+    if [[ "${JOB_EXP_SCHEME:-}" == "medmnist" ]]; then
+        local ds model act seed
+        IFS=: read -r ds model act seed <<<"$entry"
+        echo "${ds}-${model}-${act}-s${seed}"
+        return
+    fi
     local cfg act seed mode
     IFS=: read -r cfg act seed mode <<<"$entry"
     local base
