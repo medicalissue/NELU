@@ -26,13 +26,15 @@ set -euo pipefail
 : "${EVAL_EPOCH:=}"
 : "${EVAL_MODELS:=}"
 : "${EVAL_RESULT_PREFIX:=}"
+: "${NUM_MEDMNIST_SLOTS:=}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 template="$SCRIPT_DIR/user-data.sh"
 
 export REPO_URL REPO_REF VENV_S3_URL CKPT_BUCKET WANDB_API_KEY \
        WANDB_PROJECT WANDB_ENTITY AWS_DEFAULT_REGION JOB_ORDER \
-       ENTRY_SCRIPT EVAL_EPOCH EVAL_MODELS EVAL_RESULT_PREFIX
+       ENTRY_SCRIPT EVAL_EPOCH EVAL_MODELS EVAL_RESULT_PREFIX \
+       NUM_MEDMNIST_SLOTS
 
 python3 - "$template" <<'PY'
 import os, sys, pathlib
@@ -42,6 +44,7 @@ keys = [
     "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
     "AWS_DEFAULT_REGION", "JOB_ORDER",
     "ENTRY_SCRIPT", "EVAL_EPOCH", "EVAL_MODELS", "EVAL_RESULT_PREFIX",
+    "NUM_MEDMNIST_SLOTS",
 ]
 for k in keys:
     tpl = tpl.replace(f"@@{k}@@", os.environ.get(k, ""))

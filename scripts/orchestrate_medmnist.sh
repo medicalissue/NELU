@@ -20,13 +20,21 @@ log() { printf '[orchestrate-medmnist %s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SLOT_RUNNER="$SCRIPT_DIR/orchestrate_medmnist_slot.sh"
 
+# Slot count. NUM_MEDMNIST_SLOTS (set by launch_medmnist.sh) is
+# authoritative — explicit beats inferred. Only fall back to GPU
+# detection when it is unset. ``nvidia-smi -L`` emits one line PER GPU
+# but can also emit warning/log lines on some driver builds (this is
+# what produced 2 slots on a 1-GPU g5.2xlarge), so count only lines
+# that actually start with "GPU <n>:". Default to 1 on any ambiguity.
 if [[ -n "${NUM_MEDMNIST_SLOTS:-}" ]]; then
     ngpus="$NUM_MEDMNIST_SLOTS"
 elif command -v nvidia-smi >/dev/null; then
-    ngpus=$(nvidia-smi -L | wc -l | tr -d ' ')
+    ngpus=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU [0-9]' || echo 1)
+    ngpus=$(echo "$ngpus" | tr -d ' ')
 else
     ngpus=1
 fi
+case "$ngpus" in ''|*[!0-9]*) ngpus=1 ;; esac
 if (( ngpus < 1 )); then ngpus=1; fi
 
 log "spawning $ngpus slot runner(s)"

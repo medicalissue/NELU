@@ -52,6 +52,24 @@ export TARGET_WORKERS INSTANCE_TYPE
 export ENTRY_SCRIPT="scripts/orchestrate_medmnist.sh"
 export CAMPAIGN="medmnist"
 
+# Tell the fanout exactly how many GPU slots to spawn instead of letting
+# it guess from nvidia-smi (which mis-counted 1 GPU as 2 on g5.2xlarge).
+# Map the known instance types; leave unset for anything else so the
+# orchestrator's hardened GPU detector decides. Caller can override with
+# NUM_MEDMNIST_SLOTS.
+if [[ -z "${NUM_MEDMNIST_SLOTS:-}" ]]; then
+    case "$INSTANCE_TYPE" in
+        g5.2xlarge|g5.xlarge|g5.4xlarge|g5.8xlarge|g5.16xlarge|\
+        g6.2xlarge|g6.xlarge|g6.4xlarge|g4dn.xlarge|g4dn.2xlarge)
+            export NUM_MEDMNIST_SLOTS=1 ;;
+        g5.12xlarge|g6.12xlarge|g5.24xlarge)
+            export NUM_MEDMNIST_SLOTS=4 ;;
+        g5.48xlarge|g6.48xlarge|p4d.24xlarge|p5.48xlarge)
+            export NUM_MEDMNIST_SLOTS=8 ;;
+        *) : ;;  # unknown → orchestrator auto-detects
+    esac
+fi
+
 if [[ -z "${JOB_ORDER:-}" ]]; then
     JOB_ORDER=$(grep -v '^\s*#' "$SCRIPT_DIR/default_job_order_medmnist.txt" \
         | grep -v '^\s*$' | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')

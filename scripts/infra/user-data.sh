@@ -23,6 +23,8 @@ export ENTRY_SCRIPT="@@ENTRY_SCRIPT@@"
 export EVAL_EPOCH="@@EVAL_EPOCH@@"
 export EVAL_MODELS="@@EVAL_MODELS@@"
 export EVAL_RESULT_PREFIX="@@EVAL_RESULT_PREFIX@@"
+# MedMNIST fanout slot count (empty for non-MedMNIST workers).
+export NUM_MEDMNIST_SLOTS="@@NUM_MEDMNIST_SLOTS@@"
 
 # Minimal repo clone just to access scripts/bootstrap.sh.
 # The real workspace at /workspace is set up by bootstrap.sh itself,
