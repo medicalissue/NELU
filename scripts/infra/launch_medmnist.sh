@@ -38,7 +38,17 @@ if [[ -f "$ENV_FILE" ]]; then
     [[ -n "$_caller_TARGET_WORKERS" ]] && TARGET_WORKERS="$_caller_TARGET_WORKERS"
     [[ -n "$_caller_INSTANCE_TYPE"  ]] && INSTANCE_TYPE="$_caller_INSTANCE_TYPE"
     [[ -n "$_caller_JOB_ORDER"      ]] && JOB_ORDER="$_caller_JOB_ORDER"
-    [[ -n "$_caller_WANDB_PROJECT"  ]] && WANDB_PROJECT="$_caller_WANDB_PROJECT"
+    # WANDB_PROJECT precedence for MedMNIST: explicit caller value wins;
+    # otherwise FORCE the MedMNIST project. The shared .env carries
+    # WANDB_PROJECT=imnet-gate-normalization for the ImageNet campaign;
+    # ``source .env`` above clobbers our default, which would file every
+    # MedMNIST run under the ImageNet project (trap previously hit). Do
+    # NOT fall back to the .env value here.
+    if [[ -n "$_caller_WANDB_PROJECT" ]]; then
+        WANDB_PROJECT="$_caller_WANDB_PROJECT"
+    else
+        WANDB_PROJECT="medmnist-gate-normalization"
+    fi
 else
     echo "FATAL: $ENV_FILE not found. Copy .env.example → .env and fill it in." >&2
     exit 2
