@@ -93,14 +93,74 @@ MEDMNIST2D_BY_TRAIN_SIZE = [
 _SUPPORTED_MODELS = ("resnet18", "resnet50")
 
 
+def _split_block_relus(model: nn.Module) -> int:
+    """Give every torchvision residual block one ReLU module per call site.
+
+    Stock torchvision ``BasicBlock``/``Bottleneck`` reuse a single
+    ``self.relu`` at 2 (BasicBlock) or 3 (Bottleneck) points inside one
+    forward pass. With a *scalar* ReLU that is harmless, but a per-channel
+    activation (NELU/NiLU carry length-C learnable γ_c, β_c) cannot be
+    shared across call sites whose channel counts differ — in Bottleneck
+    the post-conv1/conv2 ReLUs see ``width`` channels while the post-add
+    ReLU sees ``expansion*width``. Sharing one γ vector there is a hard
+    shape error (observed: ``gamma.view([1,256,1,1])`` on a 64-ch input).
+
+    Fix: replace each block's shared ``self.relu`` with independent
+    ``relu1``/``relu2``[/``relu3``] modules and rebind ``forward`` so each
+    call site has its own activation. The subsequent activation swap then
+    installs a correctly-sized NELU per site. Returns #blocks rewired.
+    The CIFAR ResNet family is unaffected — this only touches torchvision
+    BasicBlock/Bottleneck instances.
+    """
+    from torchvision.models.resnet import BasicBlock, Bottleneck
+
+    def basic_forward(self, x):
+        identity = x
+        out = self.relu1(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity
+        return self.relu2(out)
+
+    def bottleneck_forward(self, x):
+        identity = x
+        out = self.relu1(self.bn1(self.conv1(x)))
+        out = self.relu2(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity
+        return self.relu3(out)
+
+    n = 0
+    for m in model.modules():
+        if isinstance(m, BasicBlock):
+            m.relu1 = nn.ReLU(inplace=True)
+            m.relu2 = nn.ReLU(inplace=True)
+            del m.relu
+            m.forward = basic_forward.__get__(m, BasicBlock)
+            n += 1
+        elif isinstance(m, Bottleneck):
+            m.relu1 = nn.ReLU(inplace=True)
+            m.relu2 = nn.ReLU(inplace=True)
+            m.relu3 = nn.ReLU(inplace=True)
+            del m.relu
+            m.forward = bottleneck_forward.__get__(m, Bottleneck)
+            n += 1
+    return n
+
+
 def build_model(name, activation="relu", num_classes=10, *, gamma_init=1.0):
     """torchvision ResNet-18/50 from random init, with the activation swap.
 
-    torchvision ResNets use ``nn.ReLU(inplace=True)`` (verified: resnet18
-    has 9 such sites, resnet50 has more); the input is always 3-channel
-    (grayscale MedMNIST datasets are tripled by the data pipeline), so the
-    stock stem is left as-is. Post-activation ordering (Conv -> BN -> ReLU),
-    same as the CIFAR ResNet family.
+    torchvision ResNets reuse one ``self.relu`` per block at multiple call
+    sites; :func:`_split_block_relus` first splits those into independent
+    per-site modules so per-channel NELU/NiLU γ_c is correctly sized
+    (Bottleneck's post-conv vs post-add ReLUs see different channel
+    counts). The 3-channel stem is left as-is (grayscale MedMNIST is
+    tripled by the data pipeline). Post-activation ordering (Conv -> BN
+    -> ReLU), same as the CIFAR ResNet family.
     """
     if name not in _SUPPORTED_MODELS:
         raise ValueError(
@@ -111,6 +171,12 @@ def build_model(name, activation="relu", num_classes=10, *, gamma_init=1.0):
 
     if activation == "relu":
         return model
+
+    # Split shared block ReLUs before swapping so each call site gets its
+    # own correctly-sized activation.
+    nb = _split_block_relus(model)
+    if nb:
+        print(f"Split shared block ReLUs in {nb} residual blocks")
 
     relu_types = (nn.ReLU,)
     if activation in {"gelu", "silu"}:
@@ -131,6 +197,26 @@ def build_model(name, activation="relu", num_classes=10, *, gamma_init=1.0):
         print(f"Swapped {n} ReLU -> NiLU (post-activation axes)")
     else:
         raise ValueError(f"Unknown activation: {activation}")
+
+    # swap.py sizes per-channel γ_c/β_c from the *declaration-order*
+    # adjacent conv. In torchvision Bottleneck the post-conv1 ReLU is
+    # declared after conv3, so that heuristic assigns it conv3's channel
+    # count (256) while its real input is conv1's (64) — a hard shape
+    # error. Sidestep the heuristic entirely: reset γ_c/β_c to lazy and
+    # let one dummy forward materialize each to its *actual* input
+    # channel count (the module's _materialize uses z.size(channel_dim),
+    # which is always correct). swap.py / ln_beta.py stay untouched, so
+    # the CIFAR/ImageNet campaigns are unaffected.
+    if activation in ("nelu", "nilu"):
+        for mod in model.modules():
+            if type(mod).__name__ in ("NELU", "NiLU"):
+                mod.gamma = nn.UninitializedParameter()
+                mod.beta = nn.UninitializedParameter()
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            model(torch.zeros(2, 3, 28, 28))
+        model.train(was_training)
     return model
 
 
