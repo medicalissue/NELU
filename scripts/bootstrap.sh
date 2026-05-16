@@ -135,6 +135,19 @@ source "${VENV_ROOT}/bin/activate"
 step editable-install python -m pip install -e "$WORKSPACE" --no-deps -q \
     || die "editable-install failed" 7
 
+# ── 4b. MedMNIST extra dep ───────────────────────────────────────
+# The pre-built venv tarball is shared with the CIFAR/ImageNet
+# campaigns and does not ship the `medmnist` package (train.medmnist
+# needs it for the official splits + Evaluator). Install it only when
+# this is a MedMNIST worker so the other campaigns' venv is untouched.
+# Idempotent (`pip install -q`); pulls only medmnist + its small deps.
+case "${ENTRY_SCRIPT:-}" in
+    *orchestrate_medmnist*)
+        step install-medmnist python -m pip install -q "medmnist>=3.0" \
+            || die "medmnist install failed" 7
+        ;;
+esac
+
 # ── 5. Orchestrate.sh ────────────────────────────────────────────
 # ENTRY_SCRIPT selects which orchestrator runs after bootstrap. Default
 # is the training worker; eval VMs set ENTRY_SCRIPT=scripts/eval_orchestrate.sh

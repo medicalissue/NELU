@@ -33,6 +33,9 @@ train = [
     "wandb>=0.16",
     "numpy>=1.24",
 ]
+medmnist = [
+    "medmnist>=3.0",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
