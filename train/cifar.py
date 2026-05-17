@@ -253,7 +253,8 @@ CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_STD = (0.2675, 0.2565, 0.2761)
 
 
-def get_dataloaders(data_dir, train_batch_size, val_batch_size=None, num_workers=4):
+def get_dataloaders(data_dir, train_batch_size, val_batch_size=None,
+                    num_workers=4, samples_per_class=None, subsample_seed=0):
     if val_batch_size is None:
         val_batch_size = train_batch_size * 2
 
@@ -276,6 +277,24 @@ def get_dataloaders(data_dir, train_batch_size, val_batch_size=None, num_workers
                                   transform=train_transform)
     test_ds = datasets.CIFAR100(data_dir, train=False, download=False,
                                  transform=test_transform)
+
+    # Small-data PoC: keep only ``samples_per_class`` training images per
+    # class (test set untouched). Deterministic given ``subsample_seed``
+    # so the same subset is used across activations / resumes — the
+    # activation must be the only variable.
+    if samples_per_class is not None:
+        import numpy as _np
+        rng = _np.random.RandomState(subsample_seed)
+        targets = _np.asarray(train_ds.targets)
+        keep = []
+        for c in _np.unique(targets):
+            idx = _np.where(targets == c)[0]
+            rng.shuffle(idx)
+            keep.append(idx[:samples_per_class])
+        keep = _np.concatenate(keep)
+        train_ds = torch.utils.data.Subset(train_ds, keep.tolist())
+        print(f"[subsample] CIFAR-100 -> {samples_per_class}/class "
+              f"= {len(keep)} train imgs (seed={subsample_seed})")
     # persistent_workers keeps the dataloader subprocesses alive across
     # epoch boundaries. CIFAR-100 has ~200 epoch boundaries per run and
     # spinning workers up takes ~0.5-1s each, so this saves ~3 minutes
@@ -536,6 +555,9 @@ def parse_args():
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     p.add_argument("--data_dir", type=str, default="/data")
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--samples_per_class", type=int, default=None,
+                   help="Small-data PoC: keep only N training images per "
+                        "class (test set untouched). None = full data.")
     p.add_argument("--amp", action="store_true", help="Use AMP (mixed precision)")
     p.add_argument("--amp_dtype", type=str, default="float16",
                    choices=["float16", "bfloat16"],
@@ -599,6 +621,8 @@ def main():
         args.batch_size,
         args.val_batch_size,
         args.num_workers,
+        samples_per_class=args.samples_per_class,
+        subsample_seed=args.seed,
     )
     # Model
     model = build_model(
