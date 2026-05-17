@@ -69,12 +69,22 @@ def _gated_hook(idx: int, stats: Dict[str, float]):
     # Lazy import to avoid circular deps at module load time.
     from gate_norm.ln_beta import _GateNormLN
     from gate_norm.affine import _GateAffine, _GateAffineCW
+    from gate_norm.xln import _xLN_Base
 
     def fn(module: GateNorm, inp, out):
         with torch.no_grad():
             z = inp[0]
             z32 = z.float() if z.dtype != torch.float32 else z
-            if isinstance(module, _GateAffineCW):
+            if isinstance(module, _xLN_Base):
+                # xLN's "gate" is the layer-normalized value of x; we
+                # report it directly. Pre-affine, since the outer γ_c, β_c
+                # are recorded separately by collect_gamma_stats.
+                axes = resolve_axes(z.ndim, module.norm_axes)
+                mu = z32.mean(dim=axes, keepdim=True)
+                var = z32.var(dim=axes, keepdim=True, unbiased=False)
+                rsigma = (var + module.eps).rsqrt()
+                gate = (z32 - mu) * rsigma
+            elif isinstance(module, _GateAffineCW):
                 # Channel-wise affine: γ_c, β_c are length-C vectors
                 shape = (1, z.size(1), 1, 1) if z.ndim == 4 else (1,) * (z.ndim - 1) + (z.size(-1),)
                 gate = type(module)._gate_python(
@@ -87,7 +97,17 @@ def _gated_hook(idx: int, stats: Dict[str, float]):
                 mu = z32.mean(dim=axes, keepdim=True)
                 var = z32.var(dim=axes, keepdim=True, unbiased=False)
                 rsigma = (var + module.eps).rsqrt()
-                t = module.gamma * (z32 - mu) * rsigma + module.beta
+                # γ_c, β_c are per-channel vectors — reshape to broadcast
+                # over the channel axis exactly as the module's forward
+                # does (mirrors the _GateAffineCW branch above). Without
+                # this, a length-C γ multiplied a tensor whose channel
+                # count differs from γ's length crashes (the hook fires
+                # on every NELU site, which have different C).
+                shape = ((1, z.size(1), 1, 1) if z.ndim == 4
+                         else (1,) * (z.ndim - 1) + (z.size(-1),))
+                gamma = module.gamma.view(shape)
+                beta = module.beta.view(shape)
+                t = gamma * (z32 - mu) * rsigma + beta
                 gate = type(module)._gate_python(t)
             else:
                 # Standard NELU / NiLU: scalar γ, RMS-only normalize
