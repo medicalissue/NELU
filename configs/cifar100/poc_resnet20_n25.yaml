@@ -1,0 +1,10 @@
+# Small-data PoC: CIFAR-100 @ 25 training images/class, ResNet-20.
+#
+# Single question: does NELU beat ReLU when data is scarce?
+# Uses the unified published recipe verbatim (the activation + seed are
+# the only variables). samples_per_class is the ONLY addition vs the
+# standard resnet20 config; everything else is inherited from _base.yaml
+# so the comparison stays controlled.
+include: _base.yaml
+model: resnet20
+samples_per_class: 25

@@ -1,0 +1,11 @@
+# Small-data PoC job order: <config>:<activation>:<seed>
+# Question: does NELU beat ReLU on CIFAR-100 @ 25 imgs/class (ResNet-20)?
+# 2 activations x 3 seeds = 6 runs. Same subsample (seed-deterministic)
+# is used per seed across activations, so the activation is the only
+# variable. exp basename = poc_resnet20_n25-<act>-s<seed>.
+configs/cifar100/poc_resnet20_n25.yaml:relu:42
+configs/cifar100/poc_resnet20_n25.yaml:relu:43
+configs/cifar100/poc_resnet20_n25.yaml:relu:44
+configs/cifar100/poc_resnet20_n25.yaml:nelu:42
+configs/cifar100/poc_resnet20_n25.yaml:nelu:43
+configs/cifar100/poc_resnet20_n25.yaml:nelu:44
