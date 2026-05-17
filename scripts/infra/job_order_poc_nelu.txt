@@ -1,0 +1,5 @@
+# PoC nelu re-run only (relu 3 already complete on S3). @9974d61 fixes
+# the diagnostics per-channel gamma reshape crash.
+configs/cifar100/poc_resnet20_n25.yaml:nelu:42
+configs/cifar100/poc_resnet20_n25.yaml:nelu:43
+configs/cifar100/poc_resnet20_n25.yaml:nelu:44
